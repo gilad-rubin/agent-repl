@@ -68,6 +68,35 @@ def _execute_request(server: ServerInfo, *, path: str | None, session_id: str | 
     return execute_request_with_target(server, target=target, request=request, transport=transport, timeout=timeout)
 
 
+def _fire_execute_request(
+    server: ServerInfo, *, path: str | None = None, session_id: str | None = None,
+    kernel_id: str | None = None, code: str, timeout: float = 10.0,
+) -> None:
+    """Send an execute_request to the kernel and return immediately (fire-and-forget).
+
+    Unlike _execute_request, this does NOT wait for the reply or idle status.
+    The kernel will execute the code asynchronously. Use ``cat --detail full``
+    or ``exec --cell-id`` to check on the result later.
+    """
+    import json as _json, uuid as _uuid, websocket as _ws
+    from agent_repl.execution.transport import _ws_url
+
+    target = resolve_kernel_target(server, path=path, session_id=session_id, kernel_id=kernel_id, timeout=timeout)
+    msg_id = _uuid.uuid4().hex
+    shell_session_id = _uuid.uuid4().hex
+    payload = {
+        "header": {"msg_id": msg_id, "username": "agent", "session": shell_session_id, "msg_type": "execute_request", "version": "5.3"},
+        "parent_header": {}, "metadata": {},
+        "content": {"code": code, "silent": False, "store_history": True, "user_expressions": {}, "allow_stdin": False, "stop_on_error": True},
+        "channel": "shell", "buffers": [],
+    }
+    ws = _ws.create_connection(_ws_url(server, target.kernel_id, session_id=shell_session_id), header=ServerClient(server, timeout=timeout).websocket_headers(), timeout=5.0)
+    try:
+        ws.send(_json.dumps(payload))
+    finally:
+        ws.close()
+
+
 # --- execute_code ---
 
 def execute_code(
@@ -230,19 +259,33 @@ def restart_and_run_all(
 def insert_and_execute(
     server: ServerInfo, *, path: str, cell_type: str = "code", source: str,
     at_index: int = -1, session_id: str | None = None, kernel_id: str | None = None,
-    transport: str, timeout: float, strip_media: bool = True,
+    transport: str, timeout: float, strip_media: bool = True, wait: bool = False,
 ) -> dict[str, Any]:
-    """Insert a new cell and immediately execute it."""
+    """Insert a new cell and execute it.
+
+    By default (wait=False), fires the execute request and returns immediately.
+    With wait=True, blocks until execution completes and includes the result.
+    """
     model = load_notebook_model(server, path, timeout=timeout)
     insert_result = apply_insert(model["content"]["cells"], cell_type=cell_type, source=source, at_index=at_index)
     save_notebook_content(server, path, model["content"], timeout=timeout, expected_last_modified=model.get("last_modified"))
 
-    exec_result = execute_code(
-        server, path=path, session_id=session_id, kernel_id=kernel_id,
-        code=source, transport=transport, timeout=timeout,
-        save_outputs=True, cell_id=insert_result["cell_id"], strip_media=strip_media,
-    )
-    return {"operation": "insert-execute", "insert": {"path": path, "operation": "insert-cell", **insert_result}, "execute": exec_result}
+    result = {"operation": "insert-execute", "cell_id": insert_result["cell_id"], "insert": {"path": path, "operation": "insert-cell", **insert_result}}
+
+    if wait:
+        exec_result = execute_code(
+            server, path=path, session_id=session_id, kernel_id=kernel_id,
+            code=source, transport=transport, timeout=timeout,
+            save_outputs=True, cell_id=insert_result["cell_id"], strip_media=strip_media,
+        )
+        result["execute"] = exec_result
+    else:
+        _fire_execute_request(
+            server, path=path, session_id=session_id, kernel_id=kernel_id,
+            code=source, timeout=timeout,
+        )
+
+    return result
 
 
 # --- respond to prompt ---

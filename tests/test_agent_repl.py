@@ -1136,5 +1136,138 @@ class TestWebSocketUsesUniqueSessionId(unittest.TestCase):
                          "connections to starve each other of kernel messages")
 
 
+# ---------------------------------------------------------------------------
+# Bug fix: idle-before-reply race condition in WebSocket recv loop
+# ---------------------------------------------------------------------------
+
+class TestIdleBeforeReplyRaceCondition(unittest.TestCase):
+    """Regression: the WebSocket recv loop used to require status:idle to arrive
+    AFTER execute_reply. If status:idle arrived first (common when kernel errors
+    quickly — e.g. ImportError), the loop missed it and hung forever waiting for
+    a second status:idle that never comes.
+
+    After the fix, the loop tracks seen_idle and reply independently, breaking
+    when both have been received regardless of order.
+    """
+
+    def _make_kernel_messages(self, msg_id: str, *, idle_first: bool, error: bool = False) -> list[str]:
+        """Build a sequence of kernel messages as JSON strings.
+
+        If idle_first=True, status:idle arrives before execute_reply (the race condition).
+        If error=True, includes an error message (like ImportError).
+        """
+        busy = json.dumps({
+            "msg_type": "status", "parent_header": {"msg_id": msg_id},
+            "content": {"execution_state": "busy"},
+        })
+        error_msg = json.dumps({
+            "msg_type": "error", "parent_header": {"msg_id": msg_id},
+            "content": {"ename": "ImportError", "evalue": "No module named 'nonexistent'", "traceback": []},
+        })
+        idle = json.dumps({
+            "msg_type": "status", "parent_header": {"msg_id": msg_id},
+            "content": {"execution_state": "idle"},
+        })
+        reply = json.dumps({
+            "msg_type": "execute_reply", "parent_header": {"msg_id": msg_id},
+            "content": {"status": "error" if error else "ok"},
+        })
+
+        msgs = [busy]
+        if error:
+            msgs.append(error_msg)
+        if idle_first:
+            msgs.extend([idle, reply])  # race condition order
+        else:
+            msgs.extend([reply, idle])  # normal order
+        return msgs
+
+    def _run_websocket(self, *, idle_first: bool, error: bool = False) -> ExecutionResult:
+        from agent_repl.execution import transport as transport_mod
+        from agent_repl.core import ExecuteRequest
+
+        captured_msg_id = {}
+
+        class FakeWS:
+            def __init__(self, messages):
+                self._messages = iter(messages)
+
+            def send(self, data):
+                payload = json.loads(data)
+                captured_msg_id["id"] = payload["header"]["msg_id"]
+
+            def settimeout(self, t):
+                pass
+
+            def recv(self):
+                return next(self._messages)
+
+            def close(self):
+                pass
+
+        # We need to intercept create_connection to inject our FakeWS,
+        # but we need the msg_id from the payload first. Use a two-phase approach:
+        # FakeWS.send captures the msg_id, then we rebuild messages with the right id.
+        class LazyFakeWS:
+            """FakeWS that builds messages lazily after send() reveals the msg_id."""
+            def __init__(self):
+                self._messages = None
+                self._msg_id = None
+
+            def send(self, data):
+                payload = json.loads(data)
+                self._msg_id = payload["header"]["msg_id"]
+
+            def settimeout(self, t):
+                pass
+
+            def recv(self):
+                if self._messages is None:
+                    # Build messages now that we know msg_id
+                    test = TestIdleBeforeReplyRaceCondition()
+                    raw = test._make_kernel_messages(
+                        self._msg_id, idle_first=idle_first, error=error,
+                    )
+                    self._messages = iter(raw)
+                return next(self._messages)
+
+            def close(self):
+                pass
+
+        fake_ws = LazyFakeWS()
+
+        with (
+            mock.patch.object(transport_mod, "ensure_kernel_idle"),
+            mock.patch("websocket.create_connection", return_value=fake_ws),
+        ):
+            return transport_mod.execute_via_websocket(
+                _make_server(), kernel_id="kernel-1",
+                session_id="session-1", path=NOTEBOOK_PATH,
+                request=ExecuteRequest(code="import nonexistent" if error else "x = 1"),
+                timeout=5,
+            )
+
+    def test_normal_order_reply_then_idle(self):
+        """Normal case: execute_reply arrives before status:idle."""
+        result = self._run_websocket(idle_first=False)
+        self.assertEqual(result.reply.get("status"), "ok")
+
+    def test_race_condition_idle_then_reply(self):
+        """Race condition: status:idle arrives before execute_reply.
+        Before the fix, this would hang forever."""
+        result = self._run_websocket(idle_first=True)
+        self.assertEqual(result.reply.get("status"), "ok")
+
+    def test_error_with_idle_first(self):
+        """Error case with race condition: kernel sends error + idle before reply."""
+        result = self._run_websocket(idle_first=True, error=True)
+        self.assertEqual(result.reply.get("status"), "error")
+
+    def test_error_normal_order(self):
+        """Error case normal order: reply before idle."""
+        result = self._run_websocket(idle_first=False, error=True)
+        self.assertEqual(result.reply.get("status"), "error")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -119,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     ix_parser.add_argument("-t", "--cell-type", default="code", choices=["code", "markdown", "raw"])
     ix_parser.add_argument("--transport", choices=["auto", "websocket", "zmq"], default="auto")
     ix_parser.add_argument("--timeout", type=float, default=DEFAULT_EXEC_TIMEOUT)
+    ix_parser.add_argument("--wait", action="store_true", help="Block until execution completes (default: fire-and-forget).")
     ix_parser.add_argument("--raw-output", action="store_true")
     ix_parser.add_argument("--pretty", action="store_true")
 
@@ -187,6 +188,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--dir", default=".", help="Root directory for JupyterLab")
     start_parser.add_argument("--foreground", action="store_true", help="Don't background the process")
     start_parser.add_argument("--port", type=int, help="Port to run on")
+
+    # --- stop ---
+    stop_parser = subparsers.add_parser("stop", help="Stop running Jupyter servers.")
+    stop_parser.add_argument("-p", "--port", type=int, help="Stop only the server on this port")
+    stop_parser.add_argument("--all", action="store_true", help="Stop all discovered servers")
 
     # --- prompts ---
     prompts_parser = subparsers.add_parser("prompts", help="List agent prompt cells in a notebook.")

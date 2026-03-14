@@ -69,6 +69,7 @@ def execute_via_websocket(
     }
 
     reply: dict[str, Any] | None = None
+    seen_idle = False
     events: list[dict[str, Any]] = []
     deadline = (time.time() + timeout) if timeout else None
     request_sent = False
@@ -96,7 +97,10 @@ def execute_via_websocket(
             mt = _message_type(msg)
             if mt == "execute_reply":
                 reply = msg.get("content", {})
-            if mt == "status" and (msg.get("content") or {}).get("execution_state") == "idle" and reply:
+            if mt == "status" and (msg.get("content") or {}).get("execution_state") == "idle":
+                seen_idle = True
+            # Done when we have both reply and idle, regardless of arrival order
+            if reply and seen_idle:
                 break
         else:
             # Timeout — interrupt the kernel and raise a clear error

@@ -40,6 +40,34 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"pid": proc.pid, "command": " ".join(cmd)}))
             return 0
 
+        if args.command == "stop":
+            import os
+            import signal
+            from agent_repl.server import discover_servers
+            servers = discover_servers(timeout=args.get("timeout", 5.0) if hasattr(args, "get") else 5.0)
+            stopped = []
+            for entry in servers:
+                info = entry.get("server", {})
+                pid = info.get("pid")
+                port = info.get("port")
+                if not pid:
+                    continue
+                if args.port and port != args.port:
+                    continue
+                if not args.port and not args.all and len(servers) > 1:
+                    print(json.dumps({"error": f"Multiple servers found. Use --port or --all.", "servers": [s["server"] for s in servers]}))
+                    return 1
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    stopped.append({"pid": pid, "port": port})
+                except ProcessLookupError:
+                    stopped.append({"pid": pid, "port": port, "note": "already stopped"})
+            if not stopped:
+                print(json.dumps({"error": "No matching servers found."}))
+                return 1
+            print(json.dumps({"stopped": stopped}))
+            return 0
+
         if args.command == "git-setup":
             from agent_repl.git import setup_git_filters
             result = setup_git_filters()
@@ -155,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
             from agent_repl.execution import insert_and_execute
             path = _resolve_path_arg(args)
             source = _read_source_argument(args.source, args.source_file)
-            _print(insert_and_execute(server, path=path, cell_type=args.cell_type, source=source, at_index=args.at_index, session_id=args.session_id, kernel_id=args.kernel_id, transport=args.transport, timeout=args.timeout, strip_media=not args.raw_output), pretty)
+            _print(insert_and_execute(server, path=path, cell_type=args.cell_type, source=source, at_index=args.at_index, session_id=args.session_id, kernel_id=args.kernel_id, transport=args.transport, timeout=args.timeout, strip_media=not args.raw_output, wait=args.wait), pretty)
             return 0
 
         if args.command == "restart":
