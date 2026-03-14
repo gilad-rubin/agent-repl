@@ -71,11 +71,24 @@ agent-repl new analysis.ipynb --no-start-kernel
 
 ### Execute
 ```bash
+# Insert + execute + wait (one step — use for most cells)
+agent-repl ix demo.ipynb -s 'import pandas as pd' --wait
+agent-repl ix demo.ipynb --source-file /tmp/cell.py --wait
+agent-repl ix demo.ipynb --source-file /tmp/cell.py --wait --timeout 300  # long-running cells
+
+# Insert + fire (non-blocking — returns immediately with cell_id)
+agent-repl ix demo.ipynb -s 'import pandas as pd'
+
+# Wait for a previously fired cell
+agent-repl exec demo.ipynb --cell-id <cell_id>             # blocks until done
+agent-repl cat demo.ipynb --cells -1 --detail full         # poll (non-blocking)
+
+# Execute arbitrary code (no cell insertion)
 agent-repl exec demo.ipynb -c 'x = 42; print(x)'
-agent-repl exec demo.ipynb -c 'train_model()' --stream    # real-time JSONL output
-agent-repl ix demo.ipynb -s 'import pandas as pd'         # insert + execute
-agent-repl ix demo.ipynb --at-index 3 -s 'x = 1'
+agent-repl exec demo.ipynb -c 'train_model()' --stream     # real-time JSONL output
 ```
+
+**ix** inserts a cell and fires execution. By default it returns immediately (non-blocking). Use `--wait` to block until execution completes — this is the normal mode for most cells. For long-running cells, either use `--wait --timeout N` or omit `--wait` and check with `exec --cell-id` or `cat` later.
 
 ### Edit
 ```bash
@@ -178,7 +191,7 @@ CLI strips rich media by default. Notebook file always keeps full outputs.
 | `notebooks` | `ls` | List live notebooks |
 | `contents` | `cat` | Read notebook contents |
 | `execute` | `exec` | Execute code |
-| `insert-execute` | `ix` | Insert cell + execute |
+| `insert-execute` | `ix` | Insert cell + fire execution (non-blocking) |
 | `edit` | | Edit cells (replace-source, insert, delete, move, clear-outputs, batch) |
 | `new` | | Create notebook |
 | `kernels` | | List kernelspecs |
@@ -196,7 +209,7 @@ CLI strips rich media by default. Notebook file always keeps full outputs.
 
 ## Timeouts
 
-Execution commands (`exec`, `ix`, `run-all`, etc.) have **no timeout by default** — cells run until they finish. To set an explicit timeout, pass `--timeout SECONDS`. Non-execution commands (like `cat`, `ls`) have a 10s default.
+`exec` and `run-all` block until done by default. `ix` is non-blocking by default — use `--wait` to block. Pass `--timeout SECONDS` to any blocking command to limit wait time. Non-execution commands (`cat`, `ls`) have a 10s default.
 
 ## Target Selection
 
