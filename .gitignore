@@ -6,3 +6,5 @@ node_modules/
 dist/
 *.egg-info/
 .env
+extension/out/
+notebooks/
