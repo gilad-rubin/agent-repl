@@ -1,11 +1,15 @@
 ---
 name: agent-repl
-description: Work against a live local Jupyter notebook kernel. Use this when an agent needs a Jupyter-like in-memory REPL, wants to inspect or edit a notebook while the kernel stays alive, or needs an explicit verification pass.
+description: Work against a live Jupyter notebook via the VS Code bridge. Use this when an agent needs to read, edit, or execute notebook cells while Cursor/VS Code is open.
 ---
 
 # agent-repl
 
-CLI tool giving AI agents direct access to live Jupyter notebook kernels. The notebook in JupyterLab is the human-facing surface; the CLI is the agent-facing surface.
+CLI for AI agents to work with Jupyter notebooks via the VS Code extension bridge. The notebook in Cursor/VS Code is the human-facing surface; the CLI is the agent-facing surface.
+
+## Prerequisites
+
+The VS Code/Cursor extension must be running. It auto-starts when the editor opens and writes a connection file to `~/Library/Jupyter/runtime/`. The CLI discovers it automatically.
 
 ## Installation
 
@@ -13,212 +17,102 @@ CLI tool giving AI agents direct access to live Jupyter notebook kernels. The no
 # Global CLI tool (recommended)
 uv tool install /path/to/agent-repl
 
-# Dev dependency in another project
-uv add --dev agent-repl --path /path/to/agent-repl
-
 # Direct invocation without install
-uv run /path/to/agent-repl/scripts/agent_repl.py --help
+uv run agent-repl <command>
 ```
 
-## When Already Installed
-
-If `agent-repl` is already on `$PATH` (via `uv tool install`), skip installation. Just run commands directly — no `uv run` prefix needed.
-
-Server auto-selects when only one is running — no flags needed. Use `-p PORT` only when multiple servers are running. If JupyterLab is already running, jump straight to `agent-repl servers` to confirm, then start working.
+If `agent-repl` is already on `$PATH`, skip installation — run commands directly.
 
 ## Quick Start
 
 ```bash
-# Launch JupyterLab (no-auth, background)
-agent-repl start
-
-# Or if JupyterLab is already running (tokens are read automatically)
-agent-repl servers
-
 # Create a notebook and start working
 agent-repl new analysis.ipynb
 agent-repl ix analysis.ipynb -s 'import pandas as pd; print(pd.__version__)'
 agent-repl cat analysis.ipynb
 ```
 
-Set `AGENT_REPL_PORT=8899` to avoid passing `-p` every time. If only one server is running, it's auto-selected.
-
 ## Core Loop
-
-### Discover
-```bash
-agent-repl servers                    # list all Jupyter servers
-agent-repl ls                         # list live notebooks (alias for notebooks)
-agent-repl kernels                    # list kernelspecs + running kernels
-```
 
 ### Read
 ```bash
-agent-repl cat demo.ipynb                              # brief view (default)
-agent-repl cat demo.ipynb --detail minimal             # one-liner per cell
-agent-repl cat demo.ipynb --detail full                # full source + outputs
-agent-repl cat demo.ipynb --cells 0-2,5,8-             # flexible ranges
-agent-repl cat demo.ipynb --cell-type code             # filter by type
-agent-repl cat demo.ipynb --detail full --raw-output   # full MIME bundles
+agent-repl cat demo.ipynb                    # cell sources + outputs (cleaned)
+agent-repl cat demo.ipynb --no-outputs       # sources only
+agent-repl status demo.ipynb                 # kernel state, running/queued cells
 ```
 
 ### Create
 ```bash
-agent-repl new analysis.ipynb                          # auto-starts kernel
-agent-repl new analysis.ipynb --kernel-name julia-1.9
-agent-repl new analysis.ipynb --no-start-kernel
+agent-repl new analysis.ipynb
+agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"x=1"}]'
 ```
 
 ### Execute
 ```bash
-# Insert + execute + wait (one step — use for most cells)
-agent-repl ix demo.ipynb -s 'import pandas as pd' --wait
-agent-repl ix demo.ipynb --source-file /tmp/cell.py --wait
-agent-repl ix demo.ipynb --source-file /tmp/cell.py --wait --timeout 300  # long-running cells
-
-# Insert + fire (non-blocking — returns immediately with cell_id)
+# Insert + execute (returns immediately with cell_id)
 agent-repl ix demo.ipynb -s 'import pandas as pd'
+agent-repl ix demo.ipynb --source-file /tmp/cell.py
 
-# Wait for a previously fired cell
-agent-repl exec demo.ipynb --cell-id <cell_id>             # blocks until done
-agent-repl cat demo.ipynb --cells -1 --detail full         # poll (non-blocking)
+# Execute existing cell by ID
+agent-repl exec demo.ipynb --cell-id <cell_id>
 
-# Execute arbitrary code (no cell insertion)
+# Execute inline code (inserts + runs)
 agent-repl exec demo.ipynb -c 'x = 42; print(x)'
-agent-repl exec demo.ipynb -c 'train_model()' --stream     # real-time JSONL output
 ```
-
-**ix** inserts a cell and fires execution. By default it returns immediately (non-blocking). Use `--wait` to block until execution completes — this is the normal mode for most cells. For long-running cells, either use `--wait --timeout N` or omit `--wait` and check with `exec --cell-id` or `cat` later.
 
 ### Edit
 ```bash
 agent-repl edit demo.ipynb replace-source --cell-id abc -s 'x = 2'
-agent-repl edit demo.ipynb insert --at-index 1 -t code -s 'print("hello")'
+agent-repl edit demo.ipynb insert --at-index 1 --cell-type code -s 'print("hello")'
 agent-repl edit demo.ipynb delete --cell-id abc
 agent-repl edit demo.ipynb move --cell-id abc --to-index 0
 agent-repl edit demo.ipynb clear-outputs --all
-agent-repl edit demo.ipynb batch --operations '[
-  {"op":"insert","at_index":-1,"cell_type":"code","source":"x=1"},
-  {"op":"replace-source","cell_id":"abc","source":"x=2"}
-]'
 ```
 
-### Variables
+### Lifecycle
 ```bash
-agent-repl vars demo.ipynb list
-agent-repl vars demo.ipynb preview --name df
+agent-repl run-all demo.ipynb
+agent-repl restart demo.ipynb
+agent-repl restart-run-all demo.ipynb
 ```
 
-### Verify
-```bash
-agent-repl run-all demo.ipynb --save-outputs
-agent-repl run-all demo.ipynb --skip-tags setup,expensive
-agent-repl run-all demo.ipynb --only-tags critical
-agent-repl restart-run-all demo.ipynb --save-outputs
-```
+## Prompts
 
-## Notebook-as-Conversation (Prompting from Cells)
-
-Humans write prompt cells in JupyterLab, agents discover and respond via CLI.
-
-### Human writes in JupyterLab
-```python
-#| agent: clean this dataframe — drop nulls, normalize column names
-df = pd.read_csv("sales.csv")
-df.head()
-```
-
-Or in markdown:
-```markdown
-<!-- agent: create a visualization of sales by region -->
-```
+Humans write prompt cells in the editor, agents discover and respond via CLI.
 
 ### Agent discovers and responds
 ```bash
-agent-repl prompts demo.ipynb                          # list pending prompts
+agent-repl prompts demo.ipynb                          # list prompt cells
 agent-repl respond demo.ipynb --to <cell_id> -s 'df.dropna(inplace=True)'
-agent-repl watch demo.ipynb                            # poll for new prompts (JSONL)
-agent-repl watch demo.ipynb --once                     # check once and exit
 ```
 
-### Cell Directives
-```python
-#| agent: <instruction>           # prompt the agent
-#| agent-tags: critical, setup    # tag cells for filtering
-#| agent-skip                     # skip in run-all
-```
-
-## Execution Context
-
-Get a full snapshot of kernel + notebook state in one call:
-```bash
-agent-repl context demo.ipynb
-```
-Returns: cells (brief), variables, kernel state, pending prompts.
-
-## Streaming Execution
-
-Real-time output for long-running cells:
-```bash
-agent-repl exec demo.ipynb -c 'train_model()' --stream
-```
-Output (JSONL, one event per line):
-```jsonl
-{"elapsed":2.1,"name":"stdout","text":"Epoch 1: loss=0.45\n","type":"stream"}
-{"elapsed":21.0,"data":{"text/plain":"<accuracy=0.94>"},"type":"execute_result"}
-```
-
-## Git-Friendly Notebooks
+## Extension Management
 
 ```bash
-agent-repl clean demo.ipynb           # strip outputs for clean diffs (stdout)
-agent-repl git-setup                  # configure .gitattributes + git filter
+agent-repl reload      # hot-reload extension routes (no restart needed)
 ```
-
-## Output Filtering
-
-CLI strips rich media by default. Notebook file always keeps full outputs.
-
-- **Default**: HTML dropped when text/plain exists, images → `[image: image/png]`, widgets → `[widget]`
-- **`--raw-output`**: disable stripping
-- **On save**: ANSI codes stripped, repr addresses cleaned, Colab metadata removed
 
 ## Command Reference
 
-| Command | Alias | Description |
-|---------|-------|-------------|
-| `servers` | | List Jupyter servers |
-| `notebooks` | `ls` | List live notebooks |
-| `contents` | `cat` | Read notebook contents |
-| `execute` | `exec` | Execute code |
-| `insert-execute` | `ix` | Insert cell + fire execution (non-blocking) |
-| `edit` | | Edit cells (replace-source, insert, delete, move, clear-outputs, batch) |
-| `new` | | Create notebook |
-| `kernels` | | List kernelspecs |
-| `variables` | `vars` | Inspect variables |
-| `run-all` | | Execute all cells |
-| `restart-run-all` | | Restart + run all |
-| `restart` | | Restart kernel |
-| `start` | | Launch JupyterLab |
-| `prompts` | | List agent prompt cells |
-| `respond` | | Respond to a prompt |
-| `watch` | | Poll for new prompts |
-| `context` | | Snapshot kernel state |
-| `clean` | | Strip outputs for git |
-| `git-setup` | | Configure git filters |
+| Command | Description |
+|---------|-------------|
+| `cat` | Read notebook contents (cleaned for agent consumption) |
+| `status` | Kernel state + running/queued cells with owner (human/agent) |
+| `exec` | Execute a cell by `--cell-id` or inline `-c`/`--code` |
+| `ix` | Insert and execute code (`-s SOURCE`, `--source-file`, or stdin) |
+| `edit` | Cell editing: `replace-source`, `insert`, `delete`, `move`, `clear-outputs` |
+| `run-all` | Execute all cells |
+| `restart` | Restart kernel |
+| `restart-run-all` | Restart kernel then run all |
+| `new` | Create a new notebook |
+| `prompts` | List prompt cells |
+| `respond` | Answer a prompt (`--to CELL_ID`) — auto-updates prompt status |
+| `reload` | Hot-reload extension routes |
 
-## Timeouts
-
-`exec` and `run-all` block until done by default. `ix` is non-blocking by default — use `--wait` to block. Pass `--timeout SECONDS` to any blocking command to limit wait time. Non-execution commands (`cat`, `ls`) have a 10s default.
-
-## Target Selection
-
-1. Server: `-p PORT` (auto-selects if only one server is running)
-2. Notebook: positional path argument
-3. Session/Kernel: `--session-id` or `--kernel-id` (when needed)
+All commands output JSON. Pass `--pretty` for formatted output.
 
 ## Resources
 
-- Package: `src/agent_repl/`
-- Docs: `docs/`
+- CLI source: `src/agent_repl/`
+- Extension source: `extension/`
 - Tests: `tests/test_agent_repl.py`

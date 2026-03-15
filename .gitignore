@@ -1,2 +1,7 @@
 *.pyc
 __pycache__/
+node_modules/
+*.vsix
+.venv/
+dist/
+*.egg-info/

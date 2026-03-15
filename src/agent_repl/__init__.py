@@ -1,1 +1,1 @@
-"""agent-repl: CLI for AI agents to work with live Jupyter notebook kernels."""
+"""agent-repl: CLI for AI agents to work with Jupyter notebooks via the VS Code bridge."""

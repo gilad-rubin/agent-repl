@@ -1,0 +1,59 @@
+{
+  "name": "agent-repl",
+  "displayName": "Agent REPL",
+  "description": "Multiplayer Jupyter notebooks — AI agents and humans collaborate in real time",
+  "version": "0.2.0",
+  "publisher": "GiladRubin",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": ["Notebooks", "Other"],
+  "activationEvents": [
+    "onNotebook:jupyter-notebook",
+    "workspaceContains:**/*.ipynb"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "agent-repl.start", "title": "Agent REPL: Start Bridge" },
+      { "command": "agent-repl.stop", "title": "Agent REPL: Stop Bridge" },
+      { "command": "agent-repl.askAgent", "title": "Agent REPL: Ask Agent", "icon": "$(comment-discussion)" }
+    ],
+    "menus": {
+      "notebook/toolbar": [
+        { "command": "agent-repl.askAgent", "group": "navigation", "when": "notebookType == jupyter-notebook" }
+      ]
+    },
+    "configuration": {
+      "title": "Agent REPL",
+      "properties": {
+        "agent-repl.port": { "type": "number", "default": 0, "description": "Fixed port (0 = auto)" },
+        "agent-repl.autoStart": { "type": "boolean", "default": true, "description": "Start bridge on notebook open" },
+        "agent-repl.maxQueueSize": { "type": "number", "default": 20, "description": "Max queued executions" },
+        "agent-repl.executionTimeout": { "type": "number", "default": 300, "description": "Execution timeout (seconds)" }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "agent-repl", "title": "Agent REPL", "icon": "$(terminal)" }
+      ]
+    },
+    "views": {
+      "agent-repl": [
+        { "type": "webview", "id": "agent-repl.activity", "name": "Activity" }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --allow-missing-repository",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.86.0",
+    "typescript": "^5.3.0"
+  }
+}
