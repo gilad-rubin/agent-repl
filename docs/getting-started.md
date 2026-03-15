@@ -1,43 +1,19 @@
 # Getting Started
 
-Build and run a complete notebook workflow from the command line -- install through git-clean in 10 minutes.
+Create a notebook, execute code, edit cells, and use the prompt loop — all from the CLI.
 
-## Install
+## Prerequisites
 
-```bash
-uv tool install /path/to/agent-repl
-agent-repl --help
-```
+1. **VS Code or Cursor** with the agent-repl extension installed and running
+2. **Python 3.10+** with the CLI installed (`uv tool install /path/to/agent-repl`)
 
-```
-usage: agent-repl [-h] {servers,notebooks,ls,contents,cat,...} ...
-```
-
-See [Installation](installation.md) for alternative install methods.
-
-## Start JupyterLab
+The extension auto-starts when you open a notebook. Verify the bridge is running:
 
 ```bash
-agent-repl start
+agent-repl cat --help
 ```
 
-```json
-{"pid": 42710, "command": "jupyter lab --IdentityProvider.token='' --ServerApp.password='' --no-browser"}
-```
-
-JupyterLab runs in the background with auth disabled. Open `http://localhost:8888/lab` to watch the notebook update in real time.
-
-## Discover the Server
-
-```bash
-agent-repl servers
-```
-
-```json
-{"servers": [{"url": "http://localhost:8888/", "pid": 42710, "notebook_dir": "/Users/you/project"}]}
-```
-
-When only one server is running, all commands auto-select it. Set `AGENT_REPL_PORT=8899` if you run multiple servers.
+If you get "No running agent-repl bridge found", open a `.ipynb` file in VS Code first.
 
 ## Create a Notebook
 
@@ -46,34 +22,36 @@ agent-repl new demo.ipynb
 ```
 
 ```json
-{"operation": "new", "path": "demo.ipynb", "kernel_name": "python3", "cell_count": 2, "session": {"id": "...", "kernel": {"id": "..."}}}
+{"status": "ok", "path": "demo.ipynb"}
 ```
 
-Creates `demo.ipynb` with a title cell and an empty code cell, starts a Python kernel. The notebook appears in JupyterLab immediately.
+The notebook appears in VS Code immediately with a running kernel.
 
 ## Execute Code
 
-Run code in the kernel without touching the notebook file:
-
-```bash
-agent-repl exec demo.ipynb -c 'x = 42; print(x)'
-```
-
-```json
-{"status": "ok", "events": [{"type": "stream", "name": "stdout", "text": "42\n"}]}
-```
-
-`exec` is for throwaway evaluation. To build the notebook, use `ix`:
+Use `ix` (insert-execute) to add a cell and run it:
 
 ```bash
 agent-repl ix demo.ipynb -s 'import math; print(math.pi)'
 ```
 
 ```json
-{"operation": "insert-execute", "insert": {"cell_id": "a1b2c3", "cell_count": 3}, "execute": {"status": "ok", "events": [{"type": "stream", "name": "stdout", "text": "3.141592653589793\n"}]}}
+{"cell_id": "a1b2c3", "status": "queued"}
 ```
 
-`ix` (insert-execute) adds a cell AND runs it. The cell appears in JupyterLab with its output. Insert at a specific position with `--at-index 1`.
+The cell appears in VS Code with its output. `ix` returns immediately — execution continues in the background.
+
+To execute inline code that also inserts a cell:
+
+```bash
+agent-repl exec demo.ipynb -c 'x = 42; print(x)'
+```
+
+To execute an existing cell by ID:
+
+```bash
+agent-repl exec demo.ipynb --cell-id a1b2c3
+```
 
 ## Read the Notebook
 
@@ -82,115 +60,97 @@ agent-repl cat demo.ipynb
 ```
 
 ```json
-{"path": "demo.ipynb", "cells": [
-  {"index": 0, "cell_type": "markdown", "source_preview": "# demo"},
-  {"index": 1, "cell_type": "code", "source_preview": ""},
-  {"index": 2, "cell_type": "code", "source_preview": "import math; print(math.pi)"}
-]}
+{
+  "path": "demo.ipynb",
+  "cells": [
+    {
+      "index": 0,
+      "cell_id": "a1b2c3",
+      "cell_type": "code",
+      "source": "import math; print(math.pi)",
+      "execution_count": 1,
+      "outputs": [{"output_type": "stream", "name": "stdout", "text": "3.141592653589793\n"}]
+    }
+  ]
+}
 ```
 
-Default `brief` detail shows first 3 lines per cell. Use `--detail full` for outputs, or `--cells 0,2` to select specific cells.
+Use `--no-outputs` for sources only:
+
+```bash
+agent-repl cat demo.ipynb --no-outputs
+```
 
 ## Edit Cells
 
-Replace a cell's source by ID (from `cat` output):
+Replace a cell's source:
 
 ```bash
 agent-repl edit demo.ipynb replace-source --cell-id a1b2c3 -s 'area = math.pi * 5 ** 2
 print(f"Area: {area:.2f}")'
 ```
 
-```json
-{"changed": true, "cell": {"index": 2, "cell_id": "a1b2c3", "cell_type": "code"}}
-```
-
-Other edit operations: `insert`, `delete`, `move`, `clear-outputs`, `batch`.
-
-## Inspect Variables
+Insert a new cell:
 
 ```bash
-agent-repl vars demo.ipynb list
+agent-repl edit demo.ipynb insert --at-index 0 --cell-type code -s 'import math'
 ```
 
-```json
-{"variables": [
-  {"name": "area", "type": "float", "module": "builtins"},
-  {"name": "x", "type": "int", "module": "builtins"}
-]}
-```
+Other edit operations: `delete`, `move`, `clear-outputs`.
 
-Preview a specific variable:
+## Check Status
+
+See what the kernel is doing:
 
 ```bash
-agent-repl vars demo.ipynb preview --name area
+agent-repl status demo.ipynb
 ```
 
-```json
-{"variable": {"name": "area", "type": "float", "preview": 78.53981633974483}}
-```
+Returns kernel state (idle/busy), running cells, and queued cells.
 
-## Try the Prompt Loop
+## The Prompt Loop
 
-Humans write instructions in JupyterLab that agents discover via CLI. In JupyterLab, add a cell with a `#| agent:` directive:
-
-```python
-#| agent: calculate the circumference too
-radius = 5
-```
-
-Discover pending prompts:
+Humans create prompt cells in VS Code using the "Ask Agent" toolbar button. Agents discover and respond:
 
 ```bash
 agent-repl prompts demo.ipynb
 ```
 
 ```json
-{"prompts": [{"cell_id": "d4e5f6", "index": 3, "instruction": "calculate the circumference too", "status": "pending"}]}
+{
+  "prompts": [
+    {
+      "cell_id": "d4e5f6",
+      "cell_type": "markdown",
+      "source": "calculate the circumference too",
+      "metadata": {
+        "custom": {
+          "agent-repl": {"cell_id": "d4e5f6", "type": "prompt", "status": "pending"}
+        }
+      }
+    }
+  ]
+}
 ```
 
-Respond:
+Respond to the prompt:
 
 ```bash
-agent-repl respond demo.ipynb --to d4e5f6 -s 'circ = 2 * math.pi * radius; print(f"Circumference: {circ:.2f}")'
+agent-repl respond demo.ipynb --to d4e5f6 -s 'circ = 2 * math.pi * 5; print(f"Circumference: {circ:.2f}")'
 ```
 
-The response cell is inserted after the prompt, executed, and linked via metadata. Markdown cells use `<!-- agent: ... -->` instead.
+The response cell is inserted after the prompt, executed, and the prompt is marked as answered.
 
 ## Verify with Run-All
 
-Re-execute every cell from a fresh kernel to confirm reproducibility:
+Re-execute every cell to confirm reproducibility:
 
 ```bash
-agent-repl restart-run-all demo.ipynb --save-outputs
+agent-repl restart-run-all demo.ipynb
 ```
-
-```json
-{"operation": "restart-run-all", "run_all": {"status": "ok", "executed_cell_count": 3, "skipped_cell_count": 0, "outputs_saved": true}}
-```
-
-If any cell errors, the output shows which cell failed and why.
-
-## Clean for Git
-
-Strip outputs so notebooks produce clean diffs:
-
-```bash
-agent-repl clean demo.ipynb > demo-clean.ipynb
-```
-
-For automatic cleaning on every `git add`:
-
-```bash
-agent-repl git-setup
-```
-
-```json
-{"gitattributes": ".gitattributes", "git_config_clean": "git config filter.agent-repl-clean.clean 'agent-repl clean %f'", "git_config_smudge": "git config filter.agent-repl-clean.smudge cat"}
-```
-
-Run the printed `git config` commands to activate the filter. After that, `git diff` only shows source changes.
 
 ## Next Steps
 
-- [Output filtering](output-filtering.md) -- How agent-repl strips rich media for CLI readability
-- [Command reference](index.md) -- Full command list with descriptions
+- [Command Reference](commands.md) — Full reference for all 12 commands
+- [Prompt Loop](prompt-loop.md) — Deep dive into the conversation pattern
+- [Architecture](architecture.md) — How the bridge works

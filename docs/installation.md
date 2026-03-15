@@ -1,119 +1,90 @@
 # Installation
 
-Get agent-repl running and connected to a Jupyter kernel.
+Get agent-repl running: the VS Code extension and the CLI.
 
 ## Prerequisites
 
+- **VS Code or Cursor** (v1.86+)
 - **Python 3.10+**
-- **uv** - [Install uv](https://docs.astral.sh/uv/getting-started/installation/) if you don't have it
+- **uv** — [Install uv](https://docs.astral.sh/uv/getting-started/installation/) if you don't have it
 
-## Install Methods
+## 1. Install the VS Code Extension
 
-### Global CLI tool (recommended)
-
-Install agent-repl as a standalone CLI tool available everywhere:
+Build and install the extension:
 
 ```bash
-uv tool install /path/to/agent-repl
+cd extension
+npm install
+npm run compile
+npx vsce package
 ```
 
-Verify it works:
+This produces a `.vsix` file. Install it:
+
+```bash
+code --install-extension agent-repl-0.2.0.vsix
+```
+
+Or in Cursor: open the command palette → "Extensions: Install from VSIX..."
+
+The extension auto-starts when you open a `.ipynb` file. You can also start it manually via the command palette: "Agent REPL: Start Bridge".
+
+## 2. Install the CLI
+
+```bash
+# Global CLI tool (recommended)
+uv tool install /path/to/agent-repl
+
+# Or as a dev dependency in another project
+uv add --dev agent-repl --path /path/to/agent-repl
+```
+
+Verify:
 
 ```bash
 agent-repl --help
 ```
 
-Output:
 ```
-usage: agent-repl [-h] {servers,notebooks,ls,contents,cat,execute,exec,...} ...
-
-agent-repl: CLI for AI agents to work with live Jupyter notebook kernels.
+usage: agent-repl [-h] [--pretty] {reload,cat,status,edit,exec,ix,run-all,restart,restart-run-all,new,prompts,respond} ...
 ```
 
-### Dev dependency in another project
+## 3. Verify the Setup
 
-Add agent-repl to a project where an agent needs notebook access:
+1. Open a `.ipynb` file in VS Code (the extension starts automatically)
+2. Run the CLI:
 
 ```bash
-uv add --dev agent-repl --path /path/to/agent-repl
-```
-
-The `agent-repl` command is then available inside that project's virtual environment.
-
-### Direct script invocation
-
-Run without installing anything:
-
-```bash
-uv run /path/to/agent-repl/scripts/agent_repl.py --help
-```
-
-This uses uv's inline script metadata to install dependencies into a temporary environment.
-
-## Starting JupyterLab
-
-agent-repl needs a running Jupyter server to connect to. The `start` command launches one with authentication disabled (for local agent use):
-
-```bash
-agent-repl start
-```
-
-Output:
-```json
-{"pid": 12345, "command": "jupyter lab --IdentityProvider.token='' --ServerApp.password='' --no-browser"}
-```
-
-JupyterLab runs in the background. To run in the foreground instead:
-
-```bash
-agent-repl start --foreground
-```
-
-To use a specific port:
-
-```bash
-agent-repl start --port 8899
-```
-
-Confirm the server is running:
-
-```bash
-agent-repl servers
-```
-
-Output:
-```json
-{"servers": [{"url": "http://localhost:8888/", "pid": 12345, "notebook_dir": "/Users/you/project"}]}
-```
-
-## Environment Variables
-
-| Variable | Purpose | Example |
-|----------|---------|---------|
-| `AGENT_REPL_PORT` | Default server port (avoids passing `-p` on every command) | `export AGENT_REPL_PORT=8899` |
-
-When only one Jupyter server is running, agent-repl auto-selects it. Set `AGENT_REPL_PORT` when you run multiple servers and want a consistent default.
-
-## Verifying the Full Setup
-
-Run through the core loop to confirm everything works:
-
-```bash
-# 1. Start JupyterLab
-agent-repl start
-
-# 2. Check the server is discovered
-agent-repl servers
-
-# 3. Create a notebook with a running kernel
 agent-repl new test.ipynb
-
-# 4. Execute code against the kernel
 agent-repl ix test.ipynb -s 'print("agent-repl is working")'
+agent-repl cat test.ipynb
 ```
 
-You should see `"text": "agent-repl is working\n"` in the output. The notebook also appears in JupyterLab at `http://localhost:8888/lab` if you open it in a browser.
+You should see the cell and its output in both the CLI response and VS Code.
+
+## Extension Configuration
+
+Settings available in VS Code (Settings → Extensions → Agent REPL):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `agent-repl.port` | `0` (auto) | Fixed port for the bridge server |
+| `agent-repl.autoStart` | `true` | Start bridge automatically on notebook open |
+| `agent-repl.maxQueueSize` | `20` | Maximum queued executions per notebook |
+| `agent-repl.executionTimeout` | `300` | Execution timeout in seconds |
+
+## Troubleshooting
+
+**"No running agent-repl bridge found"**
+- Make sure VS Code/Cursor is open with a `.ipynb` file
+- Check that the extension is installed: look for "Agent REPL" in the activity bar
+- Manually start: Command Palette → "Agent REPL: Start Bridge"
+
+**Connection file not found**
+- The extension writes to `~/Library/Jupyter/runtime/` (macOS) or `~/.local/share/jupyter/runtime/` (Linux)
+- Check for `agent-repl-bridge-*.json` files in that directory
 
 ## Next Steps
 
-- [Overview and core loop](index.md) - Understand the full command set
+- [Getting Started](getting-started.md) — End-to-end tutorial
+- [Command Reference](commands.md) — All commands with examples

@@ -1,48 +1,46 @@
 # Notebook-as-Conversation
 
-Human writes prompt cells in JupyterLab. Agent discovers and responds via CLI. The notebook becomes a shared conversation surface where both participants work in their natural interface.
+Humans create prompt cells in VS Code. Agents discover and respond via CLI. The notebook becomes a shared conversation surface where both participants work in their natural interface.
 
 ## How It Works
 
-The prompt loop has three roles:
-
 | Role | Interface | Action |
 |------|-----------|--------|
-| **Human** | JupyterLab | Writes a cell with `#| agent:` directive |
+| **Human** | VS Code / Cursor | Clicks "Ask Agent" toolbar button to create a prompt cell |
 | **Agent** | CLI | Discovers the prompt, generates a response |
 | **Notebook** | Shared file | Stores the conversation as executable cells |
 
-The human never leaves JupyterLab. The agent never needs a browser. Both read and write the same `.ipynb` file.
+The human never leaves VS Code. The agent never needs a GUI. Both read and write the same `.ipynb` file through the bridge.
 
 ## Step by Step
 
-### 1. Human writes a prompt cell
+### 1. Human creates a prompt
 
-In JupyterLab, the human creates a code cell with an `#| agent:` directive at the top:
+In VS Code, the human clicks the "Ask Agent" button in the notebook toolbar. This creates a markdown cell with `agent-repl` metadata:
 
-```python
-#| agent: clean this dataframe — drop nulls, normalize column names
-df = pd.read_csv("sales.csv")
-df.head()
+```json
+{
+  "metadata": {
+    "custom": {
+      "agent-repl": {
+        "cell_id": "abc123",
+        "type": "prompt",
+        "status": "pending"
+      }
+    }
+  }
+}
 ```
 
-Or a markdown cell with an HTML comment:
-
-```markdown
-<!-- agent: create a visualization of sales by region -->
-```
-
-The directive is the instruction. Any code below it is context the agent can read.
+The cell's source text is the instruction for the agent.
 
 ### 2. Agent lists pending prompts
 
-The agent polls the notebook for unresolved prompts:
+The agent checks the notebook for unresolved prompts:
 
 ```bash
 agent-repl prompts demo.ipynb
 ```
-
-Output:
 
 ```json
 {
@@ -50,161 +48,87 @@ Output:
     {
       "cell_id": "abc123",
       "index": 3,
-      "instruction": "clean this dataframe — drop nulls, normalize column names",
-      "cell_source": "#| agent: clean this dataframe ...\ndf = pd.read_csv(\"sales.csv\")\ndf.head()",
-      "status": "pending",
-      "context_above": [{"index": 2, "cell_type": "code", "source_preview": "import pandas as pd\n..."}],
-      "context_below": []
+      "cell_type": "markdown",
+      "source": "clean this dataframe — drop nulls, normalize column names",
+      "metadata": {
+        "custom": {
+          "agent-repl": {
+            "cell_id": "abc123",
+            "type": "prompt",
+            "status": "pending"
+          }
+        }
+      }
     }
   ]
 }
 ```
 
-Each prompt includes the instruction, the full cell source, and surrounding context cells so the agent understands what came before and after.
-
 ### 3. Agent responds
 
-The agent inserts a response cell directly after the prompt and executes it:
+The agent inserts a response cell and executes it:
 
 ```bash
 agent-repl respond demo.ipynb --to abc123 \
   -s 'df = df.dropna()
 df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-print(f"Shape: {df.shape}")
-print(df.head())'
+print(f"Shape: {df.shape}")'
 ```
 
-Output:
+The `respond` command does three things atomically:
 
-```json
-{
-  "operation": "respond",
-  "prompt": {"cell_id": "abc123", "index": 3, "instruction": "clean this dataframe ..."},
-  "insert": {"path": "demo.ipynb", "operation": "insert-cell", "cell_id": "def456", "index": 4},
-  "execute": {"status": "ok", "events": [{"type": "stream", "name": "stdout", "text": "Shape: (1420, 8)\n..."}]}
-}
-```
+1. Marks the prompt as `in-progress` via the bridge API
+2. Inserts a response cell and executes it (via `insert-and-execute`)
+3. Marks the prompt as `answered`
 
-The response cell is linked to the prompt via metadata (`responds_to: abc123`). This link is how `prompts` knows a prompt has been answered -- it checks whether the next cell carries that metadata.
+The response cell appears in VS Code right after the prompt cell.
 
-## Watching for Prompts
+## Prompt Status
 
-For continuous monitoring, use `watch`. It polls the notebook and emits new prompts as JSONL:
+Prompts move through three states:
 
-```bash
-agent-repl watch demo.ipynb
-```
+| Status | Meaning |
+|--------|---------|
+| `pending` | Waiting for an agent response |
+| `in-progress` | Agent is generating/executing a response |
+| `answered` | Response cell has been inserted and executed |
 
-Each time the human saves a new prompt cell, a line appears on stdout:
+The `prompts` command returns all cells with prompt metadata. Filter by status in your agent logic.
 
-```jsonl
-{"cell_id":"abc123","index":3,"instruction":"clean this dataframe ...","status":"pending",...}
-{"cell_id":"ghi789","index":6,"instruction":"plot sales by region","status":"pending",...}
-```
+## Building an Agent Loop
 
-`watch` tracks which prompts it has already emitted (by cell ID) and only outputs new ones.
-
-### Flags
-
-| Flag | Default | Effect |
-|------|---------|--------|
-| `--interval` | `2.0` | Seconds between polls |
-| `--once` | off | Check once and exit (no loop) |
-| `--context` | `1` | Number of context cells above/below each prompt |
-
-### Piping to an agent loop
-
-`watch` outputs one JSON object per line, making it straightforward to pipe into a processing loop:
-
-```bash
-agent-repl watch demo.ipynb | while IFS= read -r prompt; do
-  cell_id=$(echo "$prompt" | jq -r .cell_id)
-  instruction=$(echo "$prompt" | jq -r .instruction)
-
-  # Your agent generates code from the instruction
-  code=$(your-agent-generate "$instruction")
-
-  agent-repl respond demo.ipynb --to "$cell_id" -s "$code"
-done
-```
-
-The human writes prompts at their own pace in JupyterLab. The agent watches, responds, and the response appears in the notebook within seconds.
-
-## Response Metadata
-
-When `respond` inserts a cell, it attaches metadata under the `agent-repl` namespace:
-
-```json
-{
-  "metadata": {
-    "agent-repl": {
-      "responds_to": "abc123",
-      "type": "response",
-      "timestamp": 1710345600.0
-    }
-  }
-}
-```
-
-This metadata serves two purposes:
-
-1. **Prompt resolution** -- `prompts` checks whether the cell immediately after a prompt has `responds_to` pointing to that prompt's cell ID. If so, the prompt's status is `"answered"`.
-2. **Provenance** -- the notebook records which cells were human-authored and which were agent-generated.
-
-Use `prompts --all` to see both pending and answered prompts:
-
-```bash
-agent-repl prompts demo.ipynb --all
-```
-
-## Example Walkthrough
-
-A data scientist opens `analysis.ipynb` in JupyterLab and starts exploring a dataset.
-
-**Cell 0** (human runs manually):
+A simple polling loop that watches for prompts and responds:
 
 ```python
-import pandas as pd
-df = pd.read_csv("sales.csv")
-df.head()
+import json
+import subprocess
+import time
+
+NOTEBOOK = "analysis.ipynb"
+
+def run(*args):
+    result = subprocess.run(["agent-repl", *args], capture_output=True, text=True)
+    return json.loads(result.stdout) if result.stdout.strip() else {}
+
+while True:
+    data = run("prompts", NOTEBOOK)
+    for prompt in data.get("prompts", []):
+        meta = prompt.get("metadata", {}).get("custom", {}).get("agent-repl", {})
+        if meta.get("status") != "pending":
+            continue
+
+        cell_id = meta["cell_id"]
+        instruction = prompt["source"]
+
+        # Generate response code (replace with your LLM)
+        code = generate_code(instruction)
+
+        run("respond", NOTEBOOK, "--to", cell_id, "-s", code)
+
+    time.sleep(2)
 ```
-
-**Cell 1** (human writes, does not run):
-
-```python
-#| agent: clean this dataframe — drop nulls, normalize column names, convert date column to datetime
-df.head()
-```
-
-Meanwhile, the agent is watching:
-
-```bash
-agent-repl watch analysis.ipynb
-```
-
-The agent receives the prompt, reads the instruction and context, and responds:
-
-```bash
-agent-repl respond analysis.ipynb --to <cell_id> \
-  -s 'df = df.dropna()
-df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-df["date"] = pd.to_datetime(df["date"])
-print(f"Shape after cleaning: {df.shape}")
-print(df.dtypes)'
-```
-
-The response cell appears at index 2 in the notebook. The human sees it in JupyterLab, reviews the output, and writes the next prompt:
-
-**Cell 3** (human writes):
-
-```python
-#| agent: group by region and plot monthly revenue as a line chart
-```
-
-The watch loop picks it up, the agent responds, and the conversation continues. Each prompt-response pair is a self-contained, executable record of what was asked and what was done.
 
 ## Next Steps
 
-- **Cell directives reference**: [Cell Directives](cell-directives.md) -- full syntax and available directives
-- **Execution context**: Use `agent-repl context` to get a full snapshot of kernel state alongside prompts
-- **Streaming**: Use `agent-repl exec --stream` for real-time output on long-running cells
+- [Command Reference](commands.md) — Full details on `prompts` and `respond`
+- [Getting Started](getting-started.md) — End-to-end tutorial
