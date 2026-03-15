@@ -1,6 +1,6 @@
 # Architecture
 
-agent-repl uses a bridge architecture: a VS Code extension runs an HTTP server, and the CLI talks to it. All notebook operations go through VS Code's native notebook API.
+agent-repl uses a bridge architecture: a VS Code extension runs an HTTP server, and the CLI talks to it. Notebook reads and edits go through VS Code's notebook API. Execution can run through either a background Jupyter session (`no-yank`) or VS Code's native notebook command path (`native`).
 
 ## Components
 
@@ -93,8 +93,9 @@ The CLI scans this directory, sorts by modification time (newest first), and pin
 | POST | `/api/notebook/execute-all` | Run all cells |
 | POST | `/api/notebook/restart-kernel` | Restart kernel |
 | POST | `/api/notebook/restart-and-run-all` | Restart + run all |
-| POST | `/api/notebook/select-kernel` | Open kernel picker |
-| POST | `/api/notebook/create` | Create notebook file |
+| GET | `/api/notebook/kernels` | List available kernels |
+| POST | `/api/notebook/select-kernel` | Select kernel (by ID or interactive picker) |
+| POST | `/api/notebook/create` | Create notebook file (auto-selects `.venv` kernel) |
 | POST | `/api/notebook/open` | Open existing notebook |
 | POST | `/api/notebook/prompt` | Create prompt cell |
 | POST | `/api/notebook/prompt-status` | Update prompt status |
@@ -124,6 +125,17 @@ The extension maintains a per-notebook execution queue:
 - `insert-and-execute` is fire-and-forget: the CLI gets a `cell_id` immediately
 - Use `GET /api/notebook/execution?id=<id>` to poll for completion
 - Use `GET /api/notebook/status` to see queue state
+
+## Execution Modes
+
+Execution behavior is controlled by the `agent-repl.executionMode` setting:
+
+- `no-yank` (default) first tries Jupyter's background kernel session so an already-open notebook can show running cells and outputs without intentionally stealing focus
+- `native` always uses `notebook.cell.execute`, which preserves VS Code's original notebook behavior
+
+Completed execution responses include `execution_mode` so callers can see which backend actually ran, and `execution_preference` so they can see which mode was requested.
+
+`no-yank` is best when a human is working elsewhere in the editor and only wants to glance at notebook progress. The remaining rough edge is the first kernel attach path: creating a new notebook or forcing initial kernel selection still goes through Jupyter's startup UI, which may briefly reveal the notebook.
 
 ## Hot Reload
 

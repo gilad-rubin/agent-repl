@@ -32,6 +32,8 @@ agent-repl ix analysis.ipynb -s 'import pandas as pd; print(pd.__version__)'
 agent-repl cat analysis.ipynb
 ```
 
+By default, agent-triggered execution prefers `no-yank` behavior: it keeps notebook execution visible without intentionally stealing focus from whatever the human is editing. If you want the old VS Code execution behavior, set `agent-repl.executionMode` to `native`.
+
 ## Core Loop
 
 ### Read
@@ -43,9 +45,14 @@ agent-repl status demo.ipynb                 # kernel state, running/queued cell
 
 ### Create
 ```bash
-agent-repl new analysis.ipynb
+agent-repl new analysis.ipynb                    # auto-selects .venv kernel if present
+agent-repl new analysis.ipynb --kernel <id>      # select a specific kernel by ID
 agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"x=1"}]'
 ```
+
+**Kernel auto-selection:** When creating a notebook, agent-repl checks for a `.venv` directory in the workspace. If found, it asks the Jupyter extension to open the notebook against that environment so the response can include `"kernel_status": "selected"` and the agent can run code immediately. If no `.venv` exists and no `--kernel` is provided, the response includes `"kernel_status": "needs_selection"` — use `agent-repl kernels` to list options and `agent-repl select-kernel` to choose one.
+
+**Focus caveat:** Creating a brand-new notebook or forcing the first kernel attach may still briefly reveal the notebook because that path goes through Jupyter's kernel-selection/startup flow. After the kernel is already attached, execution can usually stay on the no-yank path.
 
 ### Execute
 ```bash
@@ -59,6 +66,8 @@ agent-repl exec demo.ipynb --cell-id <cell_id>
 # Execute inline code (inserts + runs)
 agent-repl exec demo.ipynb -c 'x = 42; print(x)'
 ```
+
+On an already-open notebook with a live kernel, `ix` and `exec` now default to the no-yank execution path. Completed execution responses include `execution_mode` and `execution_preference` so you can tell whether the background path ran or the command fell back to VS Code's native notebook command.
 
 ### Edit
 ```bash
@@ -104,7 +113,9 @@ agent-repl reload      # hot-reload extension routes (no restart needed)
 | `run-all` | Execute all cells |
 | `restart` | Restart kernel |
 | `restart-run-all` | Restart kernel then run all |
-| `new` | Create a new notebook |
+| `new` | Create a new notebook (auto-selects `.venv` kernel if present; `--kernel ID` for explicit) |
+| `kernels` | List available notebook kernels |
+| `select-kernel` | Select kernel for a notebook (`--kernel-id ID` for programmatic, omit for interactive picker) |
 | `prompts` | List prompt cells |
 | `respond` | Answer a prompt (`--to CELL_ID`) — auto-updates prompt status |
 | `reload` | Hot-reload extension routes |

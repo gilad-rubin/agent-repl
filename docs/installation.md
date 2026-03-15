@@ -25,6 +25,8 @@ This produces a `.vsix` file. Install it:
 code --install-extension agent-repl-0.2.0.vsix
 ```
 
+If you edit the extension in a local repo checkout, `npm run compile` only updates that checkout. VS Code keeps running the installed copy under `~/.vscode/extensions/` until you reinstall the new `.vsix` or launch the repo in an Extension Development Host. `agent-repl reload` only hot-reloads the extension copy that is already active in the current editor window.
+
 Or in Cursor: open the command palette → "Extensions: Install from VSIX..."
 
 The extension auto-starts when you open a `.ipynb` file. You can also start it manually via the command palette: "Agent REPL: Start Bridge".
@@ -46,7 +48,7 @@ agent-repl --help
 ```
 
 ```
-usage: agent-repl [-h] [--pretty] {reload,cat,status,edit,exec,ix,run-all,restart,restart-run-all,new,prompts,respond} ...
+usage: agent-repl [-h] [--pretty] {reload,cat,status,edit,exec,ix,run-all,restart,restart-run-all,new,kernels,select-kernel,prompts,respond} ...
 ```
 
 ## 3. Verify the Setup
@@ -72,6 +74,7 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 | `agent-repl.autoStart` | `true` | Start bridge automatically on notebook open |
 | `agent-repl.maxQueueSize` | `20` | Maximum queued executions per notebook |
 | `agent-repl.executionTimeout` | `300` | Execution timeout in seconds |
+| `agent-repl.executionMode` | `no-yank` | `no-yank` prefers background execution to avoid stealing focus; `native` always uses VS Code's notebook command path |
 
 ## Troubleshooting
 

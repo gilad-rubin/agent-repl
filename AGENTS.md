@@ -39,9 +39,12 @@ agent-repl status demo.ipynb                 # kernel state, running/queued cell
 ### Create
 
 ```bash
-agent-repl new analysis.ipynb
+agent-repl new analysis.ipynb                    # auto-selects .venv kernel if present
+agent-repl new analysis.ipynb --kernel <id>      # select a specific kernel by ID
 agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"x=1"}]'
 ```
+
+**Kernel selection on create:** If a `.venv` exists in the workspace, `new` automatically sets the Python interpreter so the Jupyter extension uses it. If no `.venv` and no `--kernel`, the response includes `"kernel_status": "needs_selection"`. Use `agent-repl kernels` to list options, then `agent-repl select-kernel <path> --kernel-id <id>` to choose.
 
 ### Execute
 
@@ -105,7 +108,9 @@ agent-repl reload      # hot-reload extension routes (no restart needed)
 | `run-all` | Execute all cells |
 | `restart` | Restart kernel |
 | `restart-run-all` | Restart kernel then run all |
-| `new` | Create a new notebook |
+| `new` | Create notebook (auto-selects `.venv` kernel; `--kernel ID` for explicit) |
+| `kernels` | List available notebook kernels |
+| `select-kernel` | Select kernel (`--kernel-id ID` for programmatic, omit for picker) |
 | `prompts` | List prompt cells (cells with `agent-repl` prompt metadata) |
 | `respond` | Answer a prompt (`--to CELL_ID`) — auto-updates prompt status |
 | `reload` | Hot-reload extension routes without restarting the bridge |

@@ -6,7 +6,7 @@ The notebook open in VS Code/Cursor is the human-facing surface. The CLI is the 
 
 ## How It Works
 
-A VS Code extension runs an HTTP bridge server. The CLI talks to it. The extension handles all notebook operations — reading cells, editing, executing code, managing kernels — through VS Code's native notebook API.
+A VS Code extension runs an HTTP bridge server. The CLI talks to it. The extension handles notebook reads and edits through VS Code's notebook API, and executes cells either through a background Jupyter session (`no-yank`) or VS Code's native notebook command path (`native`).
 
 ```
 Human (VS Code / Cursor)
@@ -31,6 +31,10 @@ agent-repl cat analysis.ipynb
 ```
 
 The `ix` command (insert-execute) adds a cell to the notebook and runs it. The cell appears in VS Code immediately — a human watching sees it show up with its output.
+
+Agent-triggered execution defaults to `no-yank`, which prefers the background Jupyter path so the notebook can keep updating without stealing editor focus. If you want the original VS Code behavior, set `agent-repl.executionMode` to `native`.
+
+Creating a brand-new notebook still goes through Jupyter kernel attachment, so the first create/select-kernel step may briefly reveal the notebook. `agent-repl new` now prefers the workspace `.venv` automatically when it exists, and the JSON response says which kernel was selected. If no workspace `.venv` is available, the response includes discovered kernels plus the exact `agent-repl select-kernel ...` command to run next. Once the kernel is already attached, `exec` and `ix` can usually stay on the no-yank path.
 
 ## Key Features
 
@@ -67,7 +71,9 @@ The `respond` command atomically: marks the prompt in-progress → inserts a res
 | `run-all` | Execute all cells |
 | `restart` | Restart kernel |
 | `restart-run-all` | Restart kernel + run all |
-| `new` | Create a new notebook |
+| `new` | Create notebook (auto-selects `.venv` kernel) |
+| `kernels` | List available notebook kernels |
+| `select-kernel` | Select kernel for a notebook |
 | `prompts` | List prompt cells |
 | `respond` | Answer a prompt cell |
 | `reload` | Hot-reload extension routes |
@@ -85,11 +91,12 @@ uv add --dev agent-repl --path /path/to/agent-repl
 ```
 
 The VS Code extension must also be installed. Build it with `cd extension && npm run compile && npx vsce package`, then install the `.vsix`.
+Recompiling the repo alone does not update an already-installed extension under `~/.vscode/extensions/`; reinstall the `.vsix` after rebuilding, or run the repo in an Extension Development Host.
 
 ## Documentation
 
 - [Getting Started](docs/getting-started.md) — End-to-end tutorial
-- [Command Reference](docs/commands.md) — All 12 commands with examples
+- [Command Reference](docs/commands.md) — All 14 commands with examples
 - [Prompt Loop](docs/prompt-loop.md) — Notebook-as-conversation pattern
 - [Architecture](docs/architecture.md) — How the bridge works
 - [Installation](docs/installation.md) — Setup guide

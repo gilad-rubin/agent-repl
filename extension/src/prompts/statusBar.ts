@@ -31,6 +31,17 @@ export class PromptStatusBarProvider implements vscode.NotebookCellStatusBarItem
             )];
         }
 
+        if (ar.type === 'agent-run') {
+            const labels: Record<string, string> = {
+                'running': '\u{1F916} Agent Run \u00B7 \u2699\uFE0F Working...',
+                'error': '\u{1F916} Agent Run \u00B7 \u274C Failed',
+            };
+            return [new vscode.NotebookCellStatusBarItem(
+                labels[ar.run_status] ?? '\u{1F916} Agent Run',
+                vscode.NotebookCellStatusBarAlignment.Left
+            )];
+        }
+
         return [];
     }
 }

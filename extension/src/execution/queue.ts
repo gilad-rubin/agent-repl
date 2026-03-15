@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import { resolveCell, getCellId } from '../notebook/identity';
-import { toJupyter, stripForAgent } from '../notebook/outputs';
-import { resolveNotebook, findEditor } from '../notebook/resolver';
+import { JupyterOutput, toJupyter, stripForAgent, toVSCode } from '../notebook/outputs';
+import { resolveNotebook, ensureNotebookEditor, captureEditorFocus, restoreEditorFocus } from '../notebook/resolver';
 
 let executionCounter = 0;
+type ExecutionMode = 'no-yank' | 'native';
 
 interface QueueEntry {
     id: string;
@@ -51,46 +52,49 @@ function updateKernelState(): void {
 }
 
 /** Initialize execution monitoring: completion detection + kernel state tracking. */
-export function initExecutionMonitor(context: vscode.ExtensionContext): void {
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeNotebookDocument(e => {
-            for (const change of e.cellChanges) {
-                // executionSummary is undefined if it didn't change, or the new value
-                if (change.executionSummary === undefined) { continue; }
+export function initExecutionMonitor(): vscode.Disposable {
+    return vscode.workspace.onDidChangeNotebookDocument(e => {
+        for (const change of e.cellChanges) {
+            // executionSummary is undefined if it didn't change, or the new value
+            if (change.executionSummary === undefined) { continue; }
 
-                const fsPath = e.notebook.uri.fsPath;
-                const key = cellKey(fsPath, change.cell.index);
-                const summary = change.executionSummary;
+            const fsPath = e.notebook.uri.fsPath;
+            const key = cellKey(fsPath, change.cell.index);
+            const summary = change.executionSummary;
 
-                if (summary?.timing?.endTime) {
-                    // Execution completed
-                    executingCells.delete(key);
-                    updateKernelState();
+            if (summary?.timing?.endTime) {
+                // Execution completed
+                executingCells.delete(key);
+                updateKernelState();
 
-                    // Fire completion callback (used by runCell)
-                    const cb = completionCallbacks.get(key);
-                    if (cb) {
-                        completionCallbacks.delete(key);
-                        cb();
-                    }
-                } else {
-                    // Execution started (summary set/cleared without endTime)
-                    executingCells.set(key, {
-                        fsPath,
-                        cellIndex: change.cell.index,
-                        cellId: getCellId(change.cell) ?? `index-${change.cell.index}`,
-                        sourcePreview: change.cell.document.getText().split('\n')[0].slice(0, 80),
-                    });
-                    updateKernelState();
+                // Fire completion callback (used by runCell)
+                const cb = completionCallbacks.get(key);
+                if (cb) {
+                    completionCallbacks.delete(key);
+                    cb();
                 }
+            } else {
+                // Execution started (summary set/cleared without endTime)
+                executingCells.set(key, {
+                    fsPath,
+                    cellIndex: change.cell.index,
+                    cellId: getCellId(change.cell) ?? `index-${change.cell.index}`,
+                    sourcePreview: change.cell.document.getText().split('\n')[0].slice(0, 80),
+                });
+                updateKernelState();
             }
-        })
-    );
+        }
+    });
 }
 
 /** Get current kernel state. */
 export function getKernelState(): string {
     return kernelState;
+}
+
+function isNotebookBusy(path: string): boolean {
+    const queue = queues.get(path) ?? [];
+    return kernelState === 'busy' || queue.some(e => e.status === 'running');
 }
 
 /**
@@ -114,7 +118,7 @@ export async function executeCell(
 
     const running = queue.filter(e => e.status === 'running');
 
-    if (running.length === 0 && kernelState !== 'busy') {
+    if (running.length === 0 && !isNotebookBusy(path)) {
         return runCell(path, doc, idx, cellId, execId, preview);
     }
 
@@ -136,7 +140,7 @@ export async function executeCell(
             execution_id: execId,
             cell_id: cellId,
             position: queue.filter(e => e.status === 'queued').length,
-            kernel_state: kernelState,
+            kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
             currently_running: running.map(e => ({
                 cell_id: e.cellId,
                 source_preview: e.sourcePreview,
@@ -192,6 +196,21 @@ export function getStatus(path: string): any {
         });
     }
 
+    for (const entry of queue.filter(e => e.status === 'running')) {
+        if (running.some(r => r.cell_id === entry.cellId)) { continue; }
+        try {
+            const cellIndex = resolveCell(doc, { cell_id: entry.cellId });
+            running.push({
+                cell_id: entry.cellId,
+                cell_index: cellIndex,
+                source_preview: entry.sourcePreview,
+                owner: 'agent',
+            });
+        } catch {
+            // Ignore cells that disappeared while queued/running.
+        }
+    }
+
     const queued = queue
         .filter(e => e.status === 'queued')
         .map((e, i) => ({
@@ -203,8 +222,8 @@ export function getStatus(path: string): any {
 
     return {
         path,
-        kernel_state: kernelState,
-        busy: kernelState === 'busy',
+        kernel_state: isNotebookBusy(path) ? 'busy' : kernelState,
+        busy: isNotebookBusy(path),
         running,
         queued
     };
@@ -232,7 +251,7 @@ export async function insertAndExecute(
     edit.set(doc.uri, [vscode.NotebookEdit.insertCells(index, [cellData])]);
     await vscode.workspace.applyEdit(edit);
 
-    const result = await executeCell(path, { cell_index: index }, maxQueue);
+    const result = await enqueueExecution(path, { cell_index: index }, maxQueue);
     return { ...result, operation: 'insert-execute', cell_id: cellId, cell_index: index };
 }
 
@@ -260,6 +279,83 @@ async function runCell(
     return runCellEntry(path, doc, cellIndex, entry);
 }
 
+async function enqueueExecution(
+    path: string,
+    selector: { cell_id?: string; cell_index?: number },
+    maxQueue: number
+): Promise<any> {
+    const doc = resolveNotebook(path);
+    const idx = resolveCell(doc, selector);
+    const cell = doc.cellAt(idx);
+    const cellId = getCellId(cell) ?? `index-${idx}`;
+    const preview = cell.document.getText().split('\n')[0].slice(0, 80);
+    const execId = `exec-${++executionCounter}`;
+
+    const queue = queues.get(path) ?? [];
+    queues.set(path, queue);
+
+    const running = queue.filter(e => e.status === 'running');
+
+    if (running.length === 0 && !isNotebookBusy(path)) {
+        const entry: QueueEntry = {
+            id: execId,
+            path,
+            cellId,
+            sourcePreview: preview,
+            queuedAt: new Date(),
+            startedAt: new Date(),
+            status: 'running',
+            resolve: () => {},
+            reject: () => {},
+        };
+        queue.push(entry);
+        runCellEntry(path, doc, idx, entry)
+            .then(() => {})
+            .catch(() => {});
+
+        return {
+            status: 'started',
+            execution_id: execId,
+            cell_id: cellId,
+            cell_index: idx,
+            kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
+        };
+    }
+
+    if (queue.filter(e => e.status === 'queued').length >= maxQueue) {
+        throw Object.assign(new Error(`Queue full (max ${maxQueue})`), { statusCode: 429 });
+    }
+
+    const entry: QueueEntry = {
+        id: execId,
+        path,
+        cellId,
+        sourcePreview: preview,
+        queuedAt: new Date(),
+        status: 'queued',
+        resolve: () => {},
+        reject: () => {},
+    };
+    queue.push(entry);
+
+    return {
+        status: 'queued',
+        execution_id: execId,
+        cell_id: cellId,
+        cell_index: idx,
+        position: queue.filter(e => e.status === 'queued').length,
+        kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
+        currently_running: running.map(e => ({
+            cell_id: e.cellId,
+            source_preview: e.sourcePreview,
+            owner: 'agent',
+        })),
+        message: kernelState === 'busy'
+            ? 'Kernel is busy (human or agent execution in progress). Queued.'
+            : `Queued after ${running.length} running cell(s)`,
+    };
+}
+
 /** Run a cell using an existing queue entry (called from processNext for queued cells). */
 async function runCellEntry(
     path: string,
@@ -268,44 +364,449 @@ async function runCellEntry(
     entry: QueueEntry
 ): Promise<any> {
     try {
-        // Ensure notebook is visible before executing (findEditor throws 400 otherwise)
-        await vscode.window.showNotebookDocument(doc);
-        const editor = findEditor(doc);
-        editor.selections = [new vscode.NotebookRange(cellIndex, cellIndex + 1)];
+        const executionPreference = getExecutionMode();
+        if (executionPreference === 'native') {
+            return await runCellViaNotebookCommand(path, doc, cellIndex, entry, {
+                executionPreference,
+            });
+        }
 
-        const completionPromise = waitForCompletion(doc.uri.fsPath, cellIndex);
+        const directAttempt = await runCellViaJupyterKernelApi(doc, cellIndex, entry);
+        if (directAttempt.result) {
+            directAttempt.result.execution_preference = executionPreference;
+            entry.status = 'completed';
+            entry.result = directAttempt.result;
+            processNext(path);
+            return directAttempt.result;
+        }
 
-        await vscode.commands.executeCommand('notebook.cell.execute', {
-            ranges: [{ start: cellIndex, end: cellIndex + 1 }],
-            document: doc.uri
+        return await runCellViaNotebookCommand(path, doc, cellIndex, entry, {
+            executionPreference,
+            fallbackReason: directAttempt.fallbackReason,
         });
-
-        await completionPromise;
-
-        const cell = doc.cellAt(cellIndex);
-        const outputs = toJupyter(cell);
-        const stripped = stripForAgent(outputs);
-        const execCount = cell.executionSummary?.executionOrder ?? null;
-
-        const result = {
-            status: 'ok',
-            execution_id: entry.id,
-            cell_id: entry.cellId,
-            cell_index: cellIndex,
-            outputs: stripped,
-            execution_count: execCount
-        };
-
-        entry.status = 'completed';
-        entry.result = result;
-        processNext(path);
-        return result;
     } catch (err: any) {
         entry.status = 'error';
         entry.result = { status: 'error', execution_id: entry.id, error: err.message };
         processNext(path);
         throw err;
     }
+}
+
+async function runCellViaNotebookCommand(
+    path: string,
+    doc: vscode.NotebookDocument,
+    cellIndex: number,
+    entry: QueueEntry,
+    options: {
+        executionPreference: ExecutionMode;
+        fallbackReason?: string;
+    }
+): Promise<any> {
+    const selection = [new vscode.NotebookRange(cellIndex, cellIndex + 1)];
+    const completionPromise = waitForCompletion(doc.uri.fsPath, cellIndex);
+
+    if (options.executionPreference === 'native') {
+        await vscode.window.showNotebookDocument(doc, {
+            preserveFocus: false,
+            preview: false,
+            selections: selection,
+        });
+        await vscode.commands.executeCommand('notebook.cell.execute', {
+            ranges: [{ start: cellIndex, end: cellIndex + 1 }],
+            document: doc.uri
+        });
+    } else {
+        const focus = captureEditorFocus();
+        try {
+            await ensureNotebookEditor(doc, {
+                preserveFocus: true,
+                preview: false,
+                selections: selection,
+            });
+            await vscode.commands.executeCommand('notebook.cell.execute', {
+                ranges: [{ start: cellIndex, end: cellIndex + 1 }],
+                document: doc.uri
+            });
+        } finally {
+            await restoreEditorFocus(focus);
+        }
+    }
+
+    await completionPromise;
+
+    const cell = doc.cellAt(cellIndex);
+    const outputs = toJupyter(cell);
+    const stripped = stripForAgent(outputs);
+    const execCount = cell.executionSummary?.executionOrder ?? null;
+
+    const result = {
+        status: 'ok',
+        execution_id: entry.id,
+        cell_id: entry.cellId,
+        cell_index: cellIndex,
+        outputs: stripped,
+        execution_count: execCount,
+        execution_mode: 'notebook-command',
+        execution_preference: options.executionPreference,
+        execution_fallback_reason: options.fallbackReason ?? null,
+    };
+
+    entry.status = 'completed';
+    entry.result = result;
+    processNext(path);
+    return result;
+}
+
+async function runCellViaJupyterKernelApi(
+    doc: vscode.NotebookDocument,
+    cellIndex: number,
+    entry: QueueEntry
+): Promise<{ result?: any; fallbackReason?: string }> {
+    const privateResult = await runCellViaPrivateJupyterSession(doc, cellIndex, entry);
+    if (privateResult.result || privateResult.fallbackReason !== 'no-private-jupyter-session') {
+        return privateResult;
+    }
+
+    const kernel = await getJupyterKernel(doc);
+    if (!kernel || typeof kernel.executeCode !== 'function') {
+        return { fallbackReason: 'no-private-jupyter-session; no-jupyter-kernel-api' };
+    }
+
+    const outputs: vscode.NotebookCellOutput[] = [];
+    let started = false;
+    const startTime = Date.now();
+
+    try {
+        await replaceCellState(doc, cellIndex, outputs, 'running', {
+            success: undefined,
+            timing: { startTime, endTime: startTime },
+        });
+        const source = doc.cellAt(cellIndex).document.getText();
+
+        for await (const output of kernel.executeCode(source)) {
+            started = true;
+            if (!isNotebookOutput(output)) { continue; }
+            outputs.push(output);
+            await replaceCellState(doc, cellIndex, outputs, 'running', {
+                success: undefined,
+                timing: { startTime, endTime: Date.now() },
+            });
+        }
+
+        await replaceCellState(doc, cellIndex, outputs, undefined, {
+            success: true,
+            timing: { startTime, endTime: Date.now() },
+        });
+        const cell = doc.cellAt(cellIndex);
+        return {
+            result: {
+                status: 'ok',
+                execution_id: entry.id,
+                cell_id: entry.cellId,
+                cell_index: cellIndex,
+                outputs: stripForAgent(toJupyter(cell)),
+                execution_count: cell.executionSummary?.executionOrder ?? null,
+                execution_mode: 'jupyter-kernel-api',
+            }
+        };
+    } catch (err: any) {
+        if (!started && shouldFallbackToNotebookCommand(err)) {
+            await clearAgentRunState(doc, cellIndex);
+            return { fallbackReason: err?.message ?? String(err) };
+        }
+
+        const errorOutput = new vscode.NotebookCellOutput([
+            vscode.NotebookCellOutputItem.error(
+                err instanceof Error ? err : new Error(err?.message ?? String(err))
+            )
+        ]);
+        outputs.push(errorOutput);
+        await replaceCellState(doc, cellIndex, outputs, 'error');
+        throw err;
+    } finally {
+        await clearAgentRunState(doc, cellIndex);
+    }
+}
+
+async function runCellViaPrivateJupyterSession(
+    doc: vscode.NotebookDocument,
+    cellIndex: number,
+    entry: QueueEntry
+): Promise<{ result?: any; fallbackReason?: string }> {
+    const kernel = await getPrivateJupyterKernel(doc);
+    if (!kernel || typeof kernel.requestExecute !== 'function') {
+        return { fallbackReason: 'no-private-jupyter-session' };
+    }
+
+    const startTime = Date.now();
+    const source = doc.cellAt(cellIndex).document.getText();
+    const rawOutputs: JupyterOutput[] = [];
+    let executionCount: number | null = null;
+    let success = true;
+
+    try {
+        await replaceCellState(doc, cellIndex, [], 'running', {
+            success: undefined,
+            timing: { startTime, endTime: startTime },
+        });
+
+        const future = kernel.requestExecute({
+            code: source.replace(/\r\n/g, '\n'),
+            silent: false,
+            stop_on_error: false,
+            allow_stdin: false,
+            store_history: true,
+        });
+
+        future.onIOPub = async (msg: any) => {
+            const output = iopubMessageToJupyterOutput(msg);
+            if (!output) { return; }
+            rawOutputs.push(output);
+            if (output.execution_count != null) {
+                executionCount = output.execution_count;
+            }
+            if (output.output_type === 'error') {
+                success = false;
+            }
+            await replaceCellState(
+                doc,
+                cellIndex,
+                rawOutputs.map(toVSCode),
+                success ? 'running' : 'error',
+                {
+                    executionOrder: executionCount ?? undefined,
+                    success: undefined,
+                    timing: { startTime, endTime: Date.now() },
+                }
+            );
+        };
+
+        future.onReply = (msg: any) => {
+            const replyCount = msg?.content?.execution_count;
+            if (typeof replyCount === 'number') {
+                executionCount = replyCount;
+            }
+            if (msg?.content?.status === 'error') {
+                success = false;
+            }
+        };
+
+        await future.done;
+        if (typeof future.dispose === 'function') {
+            future.dispose();
+        }
+
+        await replaceCellState(
+            doc,
+            cellIndex,
+            rawOutputs.map(toVSCode),
+            success ? undefined : 'error',
+            {
+                executionOrder: executionCount ?? undefined,
+                success,
+                timing: { startTime, endTime: Date.now() },
+            }
+        );
+
+        return {
+            result: {
+                status: success ? 'ok' : 'error',
+                execution_id: entry.id,
+                cell_id: entry.cellId,
+                cell_index: cellIndex,
+                outputs: stripForAgent(rawOutputs),
+                execution_count: executionCount,
+                execution_mode: 'jupyter-private-session',
+            }
+        };
+    } catch (err: any) {
+        const message = err?.message ?? String(err);
+        if (shouldFallbackToNotebookCommand(err)) {
+            await clearAgentRunState(doc, cellIndex);
+            return { fallbackReason: message };
+        }
+
+        rawOutputs.push({
+            output_type: 'error',
+            ename: err?.name ?? 'Error',
+            evalue: message,
+            traceback: [],
+        });
+        await replaceCellState(
+            doc,
+            cellIndex,
+            rawOutputs.map(toVSCode),
+            'error',
+            {
+                executionOrder: executionCount ?? undefined,
+                success: false,
+                timing: { startTime, endTime: Date.now() },
+            }
+        );
+        throw err;
+    } finally {
+        await clearAgentRunState(doc, cellIndex);
+    }
+}
+
+async function getJupyterKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
+    const jupyterExt = vscode.extensions.getExtension('ms-toolsai.jupyter');
+    if (!jupyterExt) { return undefined; }
+
+    const api = jupyterExt.isActive ? jupyterExt.exports : await jupyterExt.activate();
+    const getKernel = api?.kernels?.getKernel;
+    if (typeof getKernel !== 'function') { return undefined; }
+
+    try {
+        return await getKernel(doc.uri);
+    } catch {
+        return undefined;
+    }
+}
+
+async function getPrivateJupyterKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
+    const jupyterExt = vscode.extensions.getExtension('ms-toolsai.jupyter');
+    if (!jupyterExt) { return undefined; }
+
+    const api = jupyterExt.isActive ? jupyterExt.exports : await jupyterExt.activate();
+    const getKernelService = api?.getKernelService;
+    if (typeof getKernelService !== 'function') { return undefined; }
+
+    try {
+        const service = await getKernelService();
+        const kernel = await service?.getKernel?.(doc.uri);
+        return kernel?.connection?.kernel;
+    } catch {
+        return undefined;
+    }
+}
+
+function getExecutionMode(): ExecutionMode {
+    const config = vscode.workspace.getConfiguration('agent-repl');
+    const value = config.get<string>('executionMode', 'no-yank');
+    return value === 'native' ? 'native' : 'no-yank';
+}
+
+async function replaceCellState(
+    doc: vscode.NotebookDocument,
+    cellIndex: number,
+    outputs: vscode.NotebookCellOutput[],
+    runStatus?: 'running' | 'error',
+    executionSummary?: {
+        executionOrder?: number;
+        success?: boolean;
+        timing?: { startTime: number; endTime: number };
+    }
+): Promise<void> {
+    const cell = doc.cellAt(cellIndex);
+    const data = new vscode.NotebookCellData(cell.kind, cell.document.getText(), cell.document.languageId);
+    data.outputs = outputs;
+    data.metadata = withAgentRunStatus(cell.metadata as Record<string, any> | undefined, runStatus);
+    if (executionSummary) {
+        data.executionSummary = executionSummary as vscode.NotebookCellExecutionSummary;
+    } else if (cell.executionSummary) {
+        data.executionSummary = cell.executionSummary;
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(doc.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(cellIndex, cellIndex + 1), [data])]);
+    await vscode.workspace.applyEdit(edit);
+}
+
+async function clearAgentRunState(doc: vscode.NotebookDocument, cellIndex: number): Promise<void> {
+    const cell = doc.cellAt(cellIndex);
+    const metadata = withAgentRunStatus(cell.metadata as Record<string, any> | undefined, undefined);
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(doc.uri, [vscode.NotebookEdit.updateCellMetadata(cellIndex, metadata)]);
+    await vscode.workspace.applyEdit(edit);
+}
+
+function withAgentRunStatus(
+    existing: Record<string, any> | undefined,
+    runStatus?: 'running' | 'error'
+): Record<string, any> {
+    const metadata = { ...(existing ?? {}) };
+    const custom = { ...(metadata.custom ?? {}) };
+    const agent = { ...(custom['agent-repl'] ?? {}) };
+
+    if (runStatus) {
+        agent.type = agent.type ?? 'agent-run';
+        agent.run_status = runStatus;
+    } else {
+        delete agent.run_status;
+        if (agent.type === 'agent-run') {
+            delete agent.type;
+        }
+    }
+
+    if (Object.keys(agent).length > 0) {
+        custom['agent-repl'] = agent;
+    } else {
+        delete custom['agent-repl'];
+    }
+
+    if (Object.keys(custom).length > 0) {
+        metadata.custom = custom;
+    } else {
+        delete metadata.custom;
+    }
+
+    return metadata;
+}
+
+function isNotebookOutput(value: any): value is vscode.NotebookCellOutput {
+    return !!value && Array.isArray(value.items);
+}
+
+function shouldFallbackToNotebookCommand(err: any): boolean {
+    const message = `${err?.message ?? err ?? ''}`.toLowerCase();
+    return (
+        message.includes('proposed api') ||
+        message.includes('kernel access') ||
+        message.includes('not supported for extension') ||
+        message.includes('access denied') ||
+        message.includes('access to jupyter kernel has been revoked')
+    );
+}
+
+function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
+    const type = msg?.header?.msg_type;
+    const content = msg?.content ?? {};
+    if (!type) { return undefined; }
+
+    if (type === 'stream') {
+        return {
+            output_type: 'stream',
+            name: content.name,
+            text: content.text ?? '',
+        };
+    }
+
+    if (type === 'execute_result') {
+        return {
+            output_type: 'execute_result',
+            data: content.data ?? {},
+            execution_count: content.execution_count,
+        };
+    }
+
+    if (type === 'display_data') {
+        return {
+            output_type: 'display_data',
+            data: content.data ?? {},
+        };
+    }
+
+    if (type === 'error') {
+        return {
+            output_type: 'error',
+            ename: content.ename,
+            evalue: content.evalue,
+            traceback: Array.isArray(content.traceback) ? content.traceback : [],
+        };
+    }
+
+    return undefined;
 }
 
 function waitForCompletion(fsPath: string, cellIndex: number): Promise<void> {

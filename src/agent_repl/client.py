@@ -25,19 +25,36 @@ class BridgeClient:
 
     @classmethod
     def discover(cls) -> "BridgeClient":
-        """Scan runtime dir for connection files, ping health, return first live client."""
+        """Scan runtime dir for connection files, prefer the bridge whose workspace matches cwd."""
         runtime = _runtime_dir()
         pattern = os.path.join(runtime, "agent-repl-bridge-*.json")
-        for path in sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True):
+        files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+
+        cwd = os.path.realpath(os.getcwd())
+        live: list[tuple[dict, "BridgeClient"]] = []
+
+        for fpath in files:
             try:
-                info = json.loads(Path(path).read_text())
+                info = json.loads(Path(fpath).read_text())
                 url = f"http://127.0.0.1:{info['port']}"
                 client = cls(url, info["token"])
                 client.health()  # ping
-                return client
+                live.append((info, client))
             except Exception:
                 continue
-        raise RuntimeError("No running agent-repl bridge found")
+
+        if not live:
+            raise RuntimeError("No running agent-repl bridge found")
+
+        # Prefer the bridge whose workspace_folders contains cwd
+        for info, client in live:
+            for folder in info.get("workspace_folders", []):
+                real_folder = os.path.realpath(folder)
+                if cwd == real_folder or cwd.startswith(real_folder + os.sep):
+                    return client
+
+        # No workspace match — fall back to most recent
+        return live[0][1]
 
     # ------------------------------------------------------------------
     # Endpoints
@@ -85,12 +102,28 @@ class BridgeClient:
         return self._post("/api/notebook/restart-and-run-all", {"path": path})
 
     def create(
-        self, path: str, cells: list[dict[str, Any]] | None = None
+        self, path: str, cells: list[dict[str, Any]] | None = None,
+        kernel_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
+        body: dict[str, Any] = {"path": path, "cwd": os.getcwd()}
         if cells is not None:
             body["cells"] = cells
+        if kernel_id is not None:
+            body["kernel_id"] = kernel_id
         return self._post("/api/notebook/create", body)
+
+    def kernels(self) -> dict[str, Any]:
+        return self._get("/api/notebook/kernels", params={"cwd": os.getcwd()})
+
+    def select_kernel(
+        self, path: str, kernel_id: str | None = None, extension: str | None = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path}
+        if kernel_id is not None:
+            body["kernel_id"] = kernel_id
+        if extension is not None:
+            body["extension"] = extension
+        return self._post("/api/notebook/select-kernel", body)
 
     def prompt(self, path: str, instruction: str) -> dict[str, Any]:
         return self._post("/api/notebook/prompt", {"path": path, "instruction": instruction})

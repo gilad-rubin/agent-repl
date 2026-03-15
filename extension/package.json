@@ -31,7 +31,17 @@
         "agent-repl.port": { "type": "number", "default": 0, "description": "Fixed port (0 = auto)" },
         "agent-repl.autoStart": { "type": "boolean", "default": true, "description": "Start bridge on notebook open" },
         "agent-repl.maxQueueSize": { "type": "number", "default": 20, "description": "Max queued executions" },
-        "agent-repl.executionTimeout": { "type": "number", "default": 300, "description": "Execution timeout (seconds)" }
+        "agent-repl.executionTimeout": { "type": "number", "default": 300, "description": "Execution timeout (seconds)" },
+        "agent-repl.executionMode": {
+          "type": "string",
+          "enum": ["no-yank", "native"],
+          "enumDescriptions": [
+            "Prefer the background Jupyter execution path and only fall back to the notebook command when needed.",
+            "Always use VS Code's native notebook execution command, even if it steals focus."
+          ],
+          "default": "no-yank",
+          "description": "How agent-triggered notebook execution should behave."
+        }
       }
     },
     "viewsContainers": {

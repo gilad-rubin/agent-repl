@@ -103,6 +103,22 @@ class TestBridgeEndpoints(unittest.TestCase):
         self.client.create("new.ipynb")
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/notebook/create", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "new.ipynb"})
+
+    def test_create_includes_kernel_id_and_cells(self):
+        self.client.create(
+            "new.ipynb",
+            cells=[{"type": "code", "source": "x = 1"}],
+            kernel_id="/tmp/.venv/bin/python",
+        )
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {
+                "path": "new.ipynb",
+                "cells": [{"type": "code", "source": "x = 1"}],
+                "kernel_id": "/tmp/.venv/bin/python",
+            },
+        )
 
     def test_prompt_status_calls_post(self):
         self.client.prompt_status("nb.ipynb", "cell-1", "answered")
@@ -180,6 +196,13 @@ class TestParser(unittest.TestCase):
     def test_new(self):
         args = build_parser().parse_args(["new", "nb.ipynb"])
         self.assertEqual(args.command, "new")
+
+    def test_new_with_kernel_and_cells_json(self):
+        args = build_parser().parse_args([
+            "new", "nb.ipynb", "--kernel", "/tmp/.venv/bin/python", "--cells-json", '[{"type":"code","source":"x=1"}]',
+        ])
+        self.assertEqual(args.kernel, "/tmp/.venv/bin/python")
+        self.assertEqual(args.cells_json, '[{"type":"code","source":"x=1"}]')
 
     def test_reload(self):
         args = build_parser().parse_args(["reload"])
@@ -290,7 +313,30 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["new", "nb.ipynb"], client)
         self.assertEqual(code, 0)
-        client.create.assert_called_once()
+        client.create.assert_called_once_with("nb.ipynb", cells=None, kernel_id=None)
+
+    def test_new_with_kernel_and_cells_json(self):
+        client = self._mock_client()
+        code, _ = self._run([
+            "new", "nb.ipynb", "--kernel", "/tmp/.venv/bin/python", "--cells-json", '[{"type":"code","source":"x=1"}]',
+        ], client)
+        self.assertEqual(code, 0)
+        client.create.assert_called_once_with(
+            "nb.ipynb",
+            cells=[{"type": "code", "source": "x=1"}],
+            kernel_id="/tmp/.venv/bin/python",
+        )
+
+    def test_reload_outputs_response(self):
+        client = self._mock_client(reload={
+            "status": "ok",
+            "extension_root": "/tmp/agent-repl",
+            "routes_module": "/tmp/agent-repl/out/routes.js",
+        })
+        code, out = self._run(["reload"], client)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["extension_root"], "/tmp/agent-repl")
+        client.reload.assert_called_once()
 
     def test_pretty_flag(self):
         client = self._mock_client()

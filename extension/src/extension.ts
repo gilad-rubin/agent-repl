@@ -10,8 +10,11 @@ import { initExecutionMonitor } from './execution/queue';
 
 let server: BridgeServer | undefined;
 let statusBarItem: vscode.StatusBarItem;
+let extensionContext: vscode.ExtensionContext | undefined;
+let executionMonitorDisposable: vscode.Disposable | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+    extensionContext = context;
     const config = vscode.workspace.getConfiguration('agent-repl');
 
     // Status bar
@@ -23,7 +26,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(statusBarItem);
 
     // Execution monitor (watches cell executionSummary for completion detection)
-    initExecutionMonitor(context);
+    executionMonitorDisposable = initExecutionMonitor();
+    context.subscriptions.push(executionMonitorDisposable);
 
     // Prompt badges
     const promptProvider = new PromptStatusBarProvider();
@@ -69,15 +73,30 @@ async function startBridge(
     const outDir = path.join(__dirname);
     server.addRoute('POST /api/reload', async () => {
         for (const key of Object.keys(require.cache)) {
-            if (key.startsWith(outDir) && !key.endsWith('extension.js') && !key.endsWith('server.js')) {
+            if (
+                key.startsWith(outDir) &&
+                !key.endsWith('extension.js') &&
+                !key.endsWith('server.js')
+            ) {
                 delete require.cache[key];
             }
         }
         const fresh = require('./routes') as { buildRoutes: typeof buildRoutes };
+        const freshQueue = require('./execution/queue') as { initExecutionMonitor: typeof initExecutionMonitor };
         const newRoutes = fresh.buildRoutes(maxQueue);
         newRoutes['POST /api/reload'] = server!.getRoute('POST /api/reload')!;
         server!.setRoutes(newRoutes);
-        return { status: 'ok', message: 'Routes hot-reloaded' };
+
+        executionMonitorDisposable?.dispose();
+        executionMonitorDisposable = freshQueue.initExecutionMonitor();
+        extensionContext?.subscriptions.push(executionMonitorDisposable);
+
+        return {
+            status: 'ok',
+            message: 'Routes hot-reloaded',
+            extension_root: path.resolve(outDir, '..'),
+            routes_module: require.resolve('./routes'),
+        };
     });
 
     try {

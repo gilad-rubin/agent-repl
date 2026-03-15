@@ -66,6 +66,12 @@ agent-repl exec demo.ipynb -c 'x = 42; print(x)'
 
 When using `-c`, a new cell is inserted and executed (same as `ix`). One of `--cell-id` or `-c` is required.
 
+Completed `exec` responses include:
+
+- `execution_mode`: the backend that actually ran the cell, such as `jupyter-private-session` or `notebook-command`
+- `execution_preference`: the requested behavior, either `no-yank` or `native`
+- `execution_fallback_reason`: present when a no-yank attempt had to fall back to the notebook command path
+
 ---
 
 ## ix
@@ -94,6 +100,13 @@ echo 'print("hello")' | agent-repl ix demo.ipynb
 ```
 
 The cell is appended to the end of the notebook by default.
+
+`ix` respects the `agent-repl.executionMode` setting:
+
+- `no-yank` (default) prefers the background Jupyter execution path so the notebook can update without stealing focus
+- `native` always uses VS Code's notebook execution command path
+
+On a brand-new notebook or first kernel attach, Jupyter may still briefly reveal the notebook before later runs settle into the no-yank path.
 
 ---
 
@@ -215,12 +228,13 @@ agent-repl restart-run-all demo.ipynb
 Create a new notebook in the workspace.
 
 ```
-agent-repl new PATH [--cells-json JSON] [--pretty]
+agent-repl new PATH [--kernel ID] [--cells-json JSON] [--pretty]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `PATH` | Notebook path to create |
+| `--kernel` | Kernel ID to auto-select (skips interactive picker) |
 | `--cells-json` | JSON array of `{"type": "code", "source": "..."}` |
 
 ```bash
@@ -229,6 +243,48 @@ agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"import pan
 ```
 
 The notebook is created and opened in VS Code with a Python kernel.
+
+When a workspace `.venv` is present, `new` prefers it automatically and the response includes `kernel_status: "selected"` plus a message naming the selected kernel. If no workspace `.venv` is available, the response includes `kernel_status: "needs_selection"`, `available_kernels`, and `select_kernel_command` so an agent or human can pick one immediately.
+
+---
+
+## kernels
+
+List available Jupyter kernels, including workspace `.venv` and installed kernelspecs.
+
+```
+agent-repl kernels [--pretty]
+```
+
+```bash
+agent-repl kernels
+```
+
+Returns `kernels` (array of kernel records with `id`, `label`, `type`, `python` path), `preferred_kernel` (workspace `.venv` if found), and `workspace` path.
+
+---
+
+## select-kernel
+
+Select a kernel for a notebook. With `--kernel-id`, selects programmatically. Without it, opens VS Code's interactive kernel picker.
+
+```
+agent-repl select-kernel PATH [--kernel-id ID] [--extension EXT] [--pretty]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `PATH` | | Notebook path |
+| `--kernel-id` | | Kernel ID to select programmatically |
+| `--extension` | `ms-toolsai.jupyter` | Extension providing the kernel controller |
+
+```bash
+# Programmatic selection
+agent-repl select-kernel demo.ipynb --kernel-id /path/to/.venv/bin/python
+
+# Interactive picker
+agent-repl select-kernel demo.ipynb
+```
 
 ---
 

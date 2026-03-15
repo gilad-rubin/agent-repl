@@ -22,10 +22,12 @@ agent-repl new demo.ipynb
 ```
 
 ```json
-{"status": "ok", "path": "demo.ipynb"}
+{"status":"ok","path":"demo.ipynb","kernel_status":"selected","message":"Selected workspace .venv kernel: subtext (.venv)"}
 ```
 
-The notebook appears in VS Code immediately with a running kernel.
+The notebook appears in VS Code immediately with a selected kernel when a workspace `.venv` can be matched. If no `.venv` exists, create returns `"kernel_status": "needs_selection"`, lists the discovered kernels, and includes the exact `agent-repl select-kernel demo.ipynb` command to run next.
+
+The first create or kernel-attach step may briefly reveal the notebook because Jupyter owns that startup flow.
 
 ## Execute Code
 
@@ -36,10 +38,12 @@ agent-repl ix demo.ipynb -s 'import math; print(math.pi)'
 ```
 
 ```json
-{"cell_id": "a1b2c3", "status": "queued"}
+{"cell_id": "a1b2c3", "status": "started"}
 ```
 
 The cell appears in VS Code with its output. `ix` returns immediately — execution continues in the background.
+
+By default, agent-triggered execution uses `agent-repl.executionMode = "no-yank"`, which prefers the background Jupyter execution path on an already-open notebook with a live kernel. That keeps the running cell and outputs visible without intentionally stealing focus. If you want the original VS Code notebook execution behavior instead, set `agent-repl.executionMode` to `native`.
 
 To execute inline code that also inserts a cell:
 
@@ -52,6 +56,8 @@ To execute an existing cell by ID:
 ```bash
 agent-repl exec demo.ipynb --cell-id a1b2c3
 ```
+
+Completed execution responses include `execution_mode` and `execution_preference`, so you can see whether the run used the background no-yank path or the native notebook command path.
 
 ## Read the Notebook
 
@@ -151,6 +157,6 @@ agent-repl restart-run-all demo.ipynb
 
 ## Next Steps
 
-- [Command Reference](commands.md) — Full reference for all 12 commands
+- [Command Reference](commands.md) — Full reference for all 14 commands
 - [Prompt Loop](prompt-loop.md) — Deep dive into the conversation pattern
 - [Architecture](architecture.md) — How the bridge works

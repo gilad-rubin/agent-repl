@@ -47,9 +47,9 @@ def cmd_cat(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_reload(_args: argparse.Namespace) -> int:
-    _client().reload()
-    print("Extension host restarting...")
+def cmd_reload(args: argparse.Namespace) -> int:
+    result = _client().reload()
+    _out(result, args.pretty)
     return 0
 
 
@@ -139,7 +139,22 @@ def cmd_new(args: argparse.Namespace) -> int:
     cells = None
     if args.cells_json:
         cells = json.loads(args.cells_json)
-    result = _client().create(args.path, cells=cells)
+    kernel_id = getattr(args, "kernel", None)
+    result = _client().create(args.path, cells=cells, kernel_id=kernel_id)
+    _out(result, args.pretty)
+    return 0
+
+
+def cmd_kernels(args: argparse.Namespace) -> int:
+    result = _client().kernels()
+    _out(result, args.pretty)
+    return 0
+
+
+def cmd_select_kernel(args: argparse.Namespace) -> int:
+    kernel_id = getattr(args, "kernel_id", None)
+    extension = getattr(args, "extension", None)
+    result = _client().select_kernel(args.path, kernel_id=kernel_id, extension=extension)
     _out(result, args.pretty)
     return 0
 
@@ -266,6 +281,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("new", help="Create a new notebook")
     p.add_argument("path")
     p.add_argument("--cells-json")
+    p.add_argument("--kernel", help="Kernel ID to auto-select (skips interactive picker)")
+
+    # kernels
+    sub.add_parser("kernels", help="List available notebook kernels")
+
+    # select-kernel
+    p = sub.add_parser("select-kernel", help="Select kernel for a notebook")
+    p.add_argument("path")
+    p.add_argument("--kernel-id", help="Kernel ID to select programmatically")
+    p.add_argument("--extension", default="ms-toolsai.jupyter", help="Extension ID")
 
     # prompts
     p = sub.add_parser("prompts", help="List prompt cells")
@@ -311,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
         "restart": cmd_restart,
         "restart-run-all": cmd_restart_run_all,
         "new": cmd_new,
+        "kernels": cmd_kernels,
+        "select-kernel": cmd_select_kernel,
         "prompts": cmd_prompts,
         "respond": cmd_respond,
     }
