@@ -272,7 +272,13 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1"], client)
         self.assertEqual(code, 0)
-        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1")
+        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", wait=True, timeout=30)
+
+    def test_ix_no_wait(self):
+        client = self._mock_client()
+        code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1", "--no-wait"], client)
+        self.assertEqual(code, 0)
+        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", wait=False, timeout=30)
 
     def test_exec_with_code(self):
         client = self._mock_client()
@@ -284,7 +290,7 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["exec", "nb.ipynb", "--cell-id", "abc"], client)
         self.assertEqual(code, 0)
-        client.execute_cell.assert_called_once_with("nb.ipynb", cell_id="abc")
+        client.execute_cell.assert_called_once_with("nb.ipynb", cell_id="abc", wait=True, timeout=30)
 
     def test_respond(self):
         client = self._mock_client()

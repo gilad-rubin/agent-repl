@@ -99,10 +99,12 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
 def cmd_exec(args: argparse.Namespace) -> int:
     client = _client()
+    wait = not getattr(args, "no_wait", False)
+    timeout = getattr(args, "timeout", 30)
     if args.code:
-        result = client.insert_and_execute(args.path, args.code)
+        result = client.insert_and_execute(args.path, args.code, wait=wait, timeout=timeout)
     elif args.cell_id:
-        result = client.execute_cell(args.path, cell_id=args.cell_id)
+        result = client.execute_cell(args.path, cell_id=args.cell_id, wait=wait, timeout=timeout)
     else:
         print(json.dumps({"error": "Provide --cell-id or -c/--code"}, indent=2), file=sys.stderr)
         return 1
@@ -112,7 +114,9 @@ def cmd_exec(args: argparse.Namespace) -> int:
 
 def cmd_ix(args: argparse.Namespace) -> int:
     source = _read_source(args)
-    result = _client().insert_and_execute(args.path, source)
+    wait = not getattr(args, "no_wait", False)
+    timeout = getattr(args, "timeout", 30)
+    result = _client().insert_and_execute(args.path, source, wait=wait, timeout=timeout)
     _out(result, args.pretty)
     return 0
 
@@ -258,12 +262,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("--cell-id", help="ID of cell to execute")
     p.add_argument("-c", "--code", help="Code to insert and execute")
+    p.add_argument("--no-wait", action="store_true", help="Return immediately without waiting for output")
+    p.add_argument("--timeout", type=float, default=30, help="Seconds to wait for completion (default: 30)")
 
     # ix
     p = sub.add_parser("ix", help="Insert and execute code")
     p.add_argument("path")
     p.add_argument("-s", "--source")
     p.add_argument("--source-file")
+    p.add_argument("--no-wait", action="store_true", help="Return immediately without waiting for output")
+    p.add_argument("--timeout", type=float, default=30, help="Seconds to wait for completion (default: 30)")
 
     # run-all
     p = sub.add_parser("run-all", help="Execute all cells")

@@ -4,6 +4,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -76,21 +77,29 @@ class BridgeClient:
         return self._post("/api/notebook/edit", {"path": path, "operations": operations})
 
     def execute_cell(
-        self, path: str, *, cell_id: str | None = None, cell_index: int | None = None
+        self, path: str, *, cell_id: str | None = None, cell_index: int | None = None,
+        wait: bool = True, timeout: float = 30,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"path": path}
         if cell_id is not None:
             body["cell_id"] = cell_id
         if cell_index is not None:
             body["cell_index"] = cell_index
-        return self._post("/api/notebook/execute-cell", body)
+        result = self._post("/api/notebook/execute-cell", body)
+        if wait and result.get("execution_id"):
+            return self._poll_execution(result, timeout)
+        return result
 
     def insert_and_execute(
-        self, path: str, source: str, cell_type: str = "code", at_index: int = -1
+        self, path: str, source: str, cell_type: str = "code", at_index: int = -1,
+        wait: bool = True, timeout: float = 30,
     ) -> dict[str, Any]:
-        return self._post("/api/notebook/insert-and-execute", {
+        result = self._post("/api/notebook/insert-and-execute", {
             "path": path, "source": source, "cell_type": cell_type, "at_index": at_index
         })
+        if wait and result.get("execution_id"):
+            return self._poll_execution(result, timeout)
+        return result
 
     def execute_all(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebook/execute-all", {"path": path})
@@ -136,6 +145,26 @@ class BridgeClient:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _poll_execution(
+        self, initial: dict[str, Any], timeout: float,
+    ) -> dict[str, Any]:
+        """Poll until execution completes or timeout expires."""
+        exec_id = initial["execution_id"]
+        deadline = time.monotonic() + timeout
+        interval = 0.2
+        while time.monotonic() < deadline:
+            time.sleep(interval)
+            result = self._get("/api/notebook/execution", params={"id": exec_id})
+            status = result.get("status")
+            if status not in ("running", "queued"):
+                # Carry forward cell_id and cell_index from the initial response
+                for key in ("cell_id", "cell_index", "operation"):
+                    if key in initial and key not in result:
+                        result[key] = initial[key]
+                return result
+            interval = min(interval * 1.5, 1.0)
+        return {**initial, "status": "timeout", "timeout_seconds": timeout}
 
     def _get(self, endpoint: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         r = self._session.get(f"{self.base_url}{endpoint}", params=params, timeout=10)
