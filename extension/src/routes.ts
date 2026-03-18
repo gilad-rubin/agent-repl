@@ -7,7 +7,7 @@ import { resolveNotebook, findEditor, ensureNotebookEditor, captureEditorFocus, 
 import { applyEdits, EditOp } from './notebook/operations';
 import { getCellId, ensureIds, resolveCell, withCellId, newCellId } from './notebook/identity';
 import { toJupyter, stripForAgent } from './notebook/outputs';
-import { executeCell, getExecution, getStatus, insertAndExecute } from './execution/queue';
+import { executeCell, getExecution, getStatus, insertAndExecute, resetExecutionState, resetJupyterApiCache, getJupyterApi } from './execution/queue';
 
 type KernelRecord = {
     id: string;
@@ -320,13 +320,16 @@ export function buildRoutes(maxQueue: number): Routes {
             await ensureIds(doc);
 
             const cells = [];
+            let codeIndex = 0;
             for (let i = 0; i < doc.cellCount; i++) {
                 const cell = doc.cellAt(i);
+                const isCode = cell.kind === vscode.NotebookCellKind.Code;
                 const outputs = toJupyter(cell);
                 cells.push({
                     index: i,
+                    display_number: isCode ? ++codeIndex : null,
                     cell_id: getCellId(cell) ?? `index-${i}`,
-                    cell_type: cell.kind === vscode.NotebookCellKind.Code ? 'code' : 'markdown',
+                    cell_type: isCode ? 'code' : 'markdown',
                     source: cell.document.getText(),
                     outputs: stripForAgent(outputs),
                     execution_count: cell.executionSummary?.executionOrder ?? null,
@@ -399,17 +402,33 @@ export function buildRoutes(maxQueue: number): Routes {
         'POST /api/notebook/restart-kernel': async (body) => {
             const { path } = body as { path: string };
             const doc = resolveNotebook(path);
-            await vscode.window.showNotebookDocument(doc);
-            await restartKernel();
+            const focus = captureEditorFocus();
+            try {
+                await ensureNotebookEditor(doc, { preserveFocus: true, preview: false });
+                await restartKernel(doc.uri);
+            } finally {
+                resetExecutionState();
+                resetJupyterApiCache();
+                await restoreEditorFocus(focus);
+            }
             return { status: 'ok', path };
         },
 
         'POST /api/notebook/restart-and-run-all': async (body) => {
             const { path } = body as { path: string };
             const doc = resolveNotebook(path);
-            await vscode.window.showNotebookDocument(doc);
-            await restartKernel();
-            await vscode.commands.executeCommand('notebook.execute');
+            const focus = captureEditorFocus();
+            try {
+                await ensureNotebookEditor(doc, { preserveFocus: true, preview: false });
+                await restartKernel(doc.uri);
+                resetExecutionState();
+                resetJupyterApiCache();
+                // notebook.execute requires the notebook to be active
+                await vscode.window.showNotebookDocument(doc, { preserveFocus: true });
+                await vscode.commands.executeCommand('notebook.execute');
+            } finally {
+                await restoreEditorFocus(focus);
+            }
             const cells = [];
             for (let i = 0; i < doc.cellCount; i++) {
                 const cell = doc.cellAt(i);
@@ -490,8 +509,8 @@ export function buildRoutes(maxQueue: number): Routes {
             };
             await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(nb, null, 2)));
 
-            const doc = await vscode.workspace.openNotebookDocument(uri);
             const focus = captureEditorFocus();
+            const doc = await vscode.workspace.openNotebookDocument(uri);
             const hasPreferredKernel = !!discovery.preferred_kernel?.python;
 
             let kernelStatus: string;
@@ -519,10 +538,9 @@ export function buildRoutes(maxQueue: number): Routes {
                     // Auto-select .venv kernel via Jupyter extension's openNotebook API
                     await new Promise(r => setTimeout(r, 800));
                     try {
-                        const jupyterExt = vscode.extensions.getExtension('ms-toolsai.jupyter');
-                        if (jupyterExt) {
-                            const api = jupyterExt.isActive ? jupyterExt.exports : await jupyterExt.activate();
-                                if (api.openNotebook) {
+                        const api = await getJupyterApi();
+                        if (api) {
+                            if (api.openNotebook) {
                                 await api.openNotebook(uri, {
                                     id: discovery.preferred_kernel?.id.toLowerCase(),
                                     path: discovery.preferred_kernel?.python,
@@ -616,7 +634,8 @@ export function buildRoutes(maxQueue: number): Routes {
 
 // --- Kernel restart helper ---
 // Try multiple command IDs — availability depends on VS Code version and Cursor.
-async function restartKernel(): Promise<void> {
+// Pass the notebook URI so the command doesn't rely on activeNotebookEditor (which would require focus).
+async function restartKernel(notebookUri?: vscode.Uri): Promise<void> {
     const commands = [
         'jupyter.notebookeditor.restartkernel',
         'notebook.restartKernel',
@@ -624,7 +643,7 @@ async function restartKernel(): Promise<void> {
     ];
     for (const cmd of commands) {
         try {
-            await vscode.commands.executeCommand(cmd);
+            await vscode.commands.executeCommand(cmd, notebookUri);
             return;
         } catch {
             // Command not available or failed — try next

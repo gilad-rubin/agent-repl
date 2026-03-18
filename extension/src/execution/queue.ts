@@ -92,9 +92,53 @@ export function getKernelState(): string {
     return kernelState;
 }
 
+/** Reset execution tracking state. Call on kernel restart to avoid orphaned "busy" state. */
+export function resetExecutionState(): void {
+    executingCells.clear();
+    completionCallbacks.clear();
+    kernelState = 'idle';
+
+    // Drain any queued cells now that kernel is idle
+    for (const path of queues.keys()) {
+        processNext(path);
+    }
+}
+
 function isNotebookBusy(path: string): boolean {
     const queue = queues.get(path) ?? [];
     return kernelState === 'busy' || queue.some(e => e.status === 'running');
+}
+
+/**
+ * Check the real kernel status via Jupyter APIs.
+ * If our tracking says busy but the kernel is actually idle/dead,
+ * clear the stale state so execution can proceed.
+ */
+async function reconcileKernelState(path: string): Promise<void> {
+    if (kernelState !== 'busy') { return; }
+
+    try {
+        const doc = resolveNotebook(path);
+        const realStatus = await queryKernelStatus(doc);
+
+        // If kernel is idle, dead, restarting, or unreachable — our "busy" is stale
+        if (realStatus !== 'busy' && realStatus !== 'starting') {
+            resetExecutionState();
+        }
+    } catch {
+        // Can't resolve notebook or check kernel — leave state as-is
+    }
+}
+
+async function queryKernelStatus(doc: vscode.NotebookDocument): Promise<string> {
+    const privateKernel = await getPrivateJupyterKernel(doc);
+    if (privateKernel?.status) { return privateKernel.status; }
+
+    const kernel = await getJupyterKernel(doc);
+    if (kernel?.status) { return kernel.status; }
+
+    // Can't reach kernel at all — likely dead or restarted
+    return 'unknown';
 }
 
 /**
@@ -106,6 +150,8 @@ export async function executeCell(
     selector: { cell_id?: string; cell_index?: number },
     maxQueue: number
 ): Promise<any> {
+    await reconcileKernelState(path);
+
     const doc = resolveNotebook(path);
     const idx = resolveCell(doc, selector);
     const cell = doc.cellAt(idx);
@@ -168,7 +214,8 @@ export function getExecution(executionId: string): any {
 }
 
 /** Get execution status for a notebook. */
-export function getStatus(path: string): any {
+export async function getStatus(path: string): Promise<any> {
+    await reconcileKernelState(path);
     const doc = resolveNotebook(path);
     const fsPath = doc.uri.fsPath;
     const queue = queues.get(path) ?? [];
@@ -284,6 +331,8 @@ async function enqueueExecution(
     selector: { cell_id?: string; cell_index?: number },
     maxQueue: number
 ): Promise<any> {
+    await reconcileKernelState(path);
+
     const doc = resolveNotebook(path);
     const idx = resolveCell(doc, selector);
     const cell = doc.cellAt(idx);
@@ -649,11 +698,23 @@ async function runCellViaPrivateJupyterSession(
     }
 }
 
-async function getJupyterKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
+// Cache Jupyter API objects so we only trigger the access check once per session.
+// The Jupyter extension identifies callers via stack inspection and shows a warning
+// popup for unrecognized publishers on every getKernelService() / kernels.getKernel()
+// call when the publisher isn't in their allowlist.
+let cachedJupyterApi: any | undefined;
+let cachedKernelService: any | undefined;
+
+export async function getJupyterApi(): Promise<any | undefined> {
+    if (cachedJupyterApi) { return cachedJupyterApi; }
     const jupyterExt = vscode.extensions.getExtension('ms-toolsai.jupyter');
     if (!jupyterExt) { return undefined; }
+    cachedJupyterApi = jupyterExt.isActive ? jupyterExt.exports : await jupyterExt.activate();
+    return cachedJupyterApi;
+}
 
-    const api = jupyterExt.isActive ? jupyterExt.exports : await jupyterExt.activate();
+async function getJupyterKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
+    const api = await getJupyterApi();
     const getKernel = api?.kernels?.getKernel;
     if (typeof getKernel !== 'function') { return undefined; }
 
@@ -665,20 +726,31 @@ async function getJupyterKernel(doc: vscode.NotebookDocument): Promise<any | und
 }
 
 async function getPrivateJupyterKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
-    const jupyterExt = vscode.extensions.getExtension('ms-toolsai.jupyter');
-    if (!jupyterExt) { return undefined; }
+    if (!cachedKernelService) {
+        const api = await getJupyterApi();
+        const getKernelService = api?.getKernelService;
+        if (typeof getKernelService !== 'function') { return undefined; }
 
-    const api = jupyterExt.isActive ? jupyterExt.exports : await jupyterExt.activate();
-    const getKernelService = api?.getKernelService;
-    if (typeof getKernelService !== 'function') { return undefined; }
+        try {
+            cachedKernelService = await getKernelService();
+        } catch {
+            return undefined;
+        }
+    }
+    if (!cachedKernelService) { return undefined; }
 
     try {
-        const service = await getKernelService();
-        const kernel = await service?.getKernel?.(doc.uri);
+        const kernel = await cachedKernelService.getKernel?.(doc.uri);
         return kernel?.connection?.kernel;
     } catch {
         return undefined;
     }
+}
+
+/** Reset cached Jupyter API references (e.g. after kernel restart). */
+export function resetJupyterApiCache(): void {
+    cachedKernelService = undefined;
+    // Keep cachedJupyterApi — the extension object itself doesn't change.
 }
 
 function getExecutionMode(): ExecutionMode {

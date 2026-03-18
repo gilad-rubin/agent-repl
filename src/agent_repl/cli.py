@@ -33,6 +33,8 @@ def cmd_cat(args: argparse.Namespace) -> int:
             "cell_type": c["cell_type"],
             "source": c["source"],
         }
+        if c.get("display_number") is not None:
+            clean["display_number"] = c["display_number"]
         if include_outputs:
             if c.get("execution_count") is not None:
                 clean["execution_count"] = c["execution_count"]
@@ -116,7 +118,8 @@ def cmd_ix(args: argparse.Namespace) -> int:
     source = _read_source(args)
     wait = not getattr(args, "no_wait", False)
     timeout = getattr(args, "timeout", 30)
-    result = _client().insert_and_execute(args.path, source, wait=wait, timeout=timeout)
+    at_index = getattr(args, "at_index", -1)
+    result = _client().insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
     _out(result, args.pretty)
     return 0
 
@@ -270,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("-s", "--source")
     p.add_argument("--source-file")
+    p.add_argument("--at-index", type=int, default=-1, help="Insert at this cell index (-1 = end)")
     p.add_argument("--no-wait", action="store_true", help="Return immediately without waiting for output")
     p.add_argument("--timeout", type=float, default=30, help="Seconds to wait for completion (default: 30)")
 
