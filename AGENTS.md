@@ -1,152 +1,83 @@
 # agent-repl
 
-CLI for AI agents to work with Jupyter notebooks via the VS Code extension bridge. The notebook in VS Code/Cursor is the human-facing surface; the CLI is the agent-facing surface. Both share the same kernel and file.
+CLI + VS Code extension: agents and humans collaborate on Jupyter notebooks in real time. See README.md for user-facing docs; run `agent-repl --help` for CLI reference.
 
-## Prerequisites
-
-The VS Code/Cursor extension must be running. It auto-starts when the editor opens a `.ipynb` file and writes a connection file to `~/Library/Jupyter/runtime/`. The CLI discovers it automatically.
-
-## Installation
+## Development
 
 ```bash
-# Global CLI tool (recommended)
-uv tool install /path/to/agent-repl
-
-# Direct invocation without install
-uv run agent-repl <command>
+uv run agent-repl <command>              # run from source
+uv tool install . --reinstall            # install globally (--reinstall forces rebuild from source)
+uv run pytest                            # tests (mock-based, no running extension needed)
+cd extension && npm run compile          # build extension
+cd extension && npx vsce package         # package as .vsix
 ```
-
-If `agent-repl` is already on `$PATH`, skip installation.
-
-## Quick Start
-
-```bash
-agent-repl new analysis.ipynb
-agent-repl ix analysis.ipynb -s 'import pandas as pd; print(pd.__version__)'
-agent-repl cat analysis.ipynb
-```
-
-## Commands
-
-### Read
-
-```bash
-agent-repl cat demo.ipynb                    # cell sources + outputs (cleaned for agents)
-agent-repl cat demo.ipynb --no-outputs       # sources only
-agent-repl status demo.ipynb                 # kernel state, running/queued cells
-```
-
-### Create
-
-```bash
-agent-repl new analysis.ipynb                    # auto-selects .venv kernel if present
-agent-repl new analysis.ipynb --kernel <id>      # select a specific kernel by ID
-agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"x=1"}]'
-```
-
-**Kernel selection on create:** If a `.venv` exists in the workspace, `new` automatically sets the Python interpreter so the Jupyter extension uses it. If no `.venv` and no `--kernel`, the response includes `"kernel_status": "needs_selection"`. Use `agent-repl kernels` to list options, then `agent-repl select-kernel <path> --kernel-id <id>` to choose.
-
-### Execute
-
-```bash
-# Insert + execute (fire-and-forget, returns cell_id immediately)
-agent-repl ix demo.ipynb -s 'import pandas as pd'
-agent-repl ix demo.ipynb --source-file /tmp/cell.py
-echo 'print("hello")' | agent-repl ix demo.ipynb
-
-# Execute existing cell by ID
-agent-repl exec demo.ipynb --cell-id <cell_id>
-
-# Execute inline code (inserts + runs)
-agent-repl exec demo.ipynb -c 'x = 42; print(x)'
-```
-
-### Edit
-
-```bash
-agent-repl edit demo.ipynb replace-source --cell-id abc -s 'x = 2'
-agent-repl edit demo.ipynb insert --at-index 1 --cell-type code -s 'print("hello")'
-agent-repl edit demo.ipynb delete --cell-id abc
-agent-repl edit demo.ipynb move --cell-id abc --to-index 0
-agent-repl edit demo.ipynb clear-outputs --all
-```
-
-### Lifecycle
-
-```bash
-agent-repl run-all demo.ipynb
-agent-repl restart demo.ipynb
-agent-repl restart-run-all demo.ipynb
-```
-
-### Prompts
-
-Humans create prompt cells in the editor (via the "Ask Agent" toolbar button). Agents discover and respond via CLI.
-
-```bash
-agent-repl prompts demo.ipynb                          # list prompt cells
-agent-repl respond demo.ipynb --to <cell_id> -s 'df.dropna(inplace=True)'
-```
-
-The `respond` command atomically: marks the prompt in-progress, inserts a response cell, executes it, then marks the prompt answered.
-
-### Extension Management
-
-```bash
-agent-repl reload      # hot-reload extension routes (no restart needed)
-```
-
-## Command Reference
-
-| Command | Description |
-|---------|-------------|
-| `cat` | Read notebook contents (cleaned for agent consumption) |
-| `status` | Kernel state + running/queued cells |
-| `exec` | Execute a cell by `--cell-id` or inline `-c`/`--code` |
-| `ix` | Insert and execute code (`-s SOURCE`, `--source-file`, or stdin). Returns immediately with `cell_id` |
-| `edit` | Cell editing: `replace-source`, `insert`, `delete`, `move`, `clear-outputs` |
-| `run-all` | Execute all cells |
-| `restart` | Restart kernel |
-| `restart-run-all` | Restart kernel then run all |
-| `new` | Create notebook (auto-selects `.venv` kernel; `--kernel ID` for explicit) |
-| `kernels` | List available notebook kernels |
-| `select-kernel` | Select kernel (`--kernel-id ID` for programmatic, omit for picker) |
-| `prompts` | List prompt cells (cells with `agent-repl` prompt metadata) |
-| `respond` | Answer a prompt (`--to CELL_ID`) — auto-updates prompt status |
-| `reload` | Hot-reload extension routes without restarting the bridge |
-
-All commands output JSON. Pass `--pretty` for formatted output.
-
-## Source Input
-
-Commands that accept source code (`ix`, `respond`, `edit replace-source`, `edit insert`) support three input methods:
-
-1. **Inline**: `-s 'code here'`
-2. **File**: `--source-file path`
-3. **Stdin**: pipe content when neither flag is provided
-
-## Cell Identification
-
-Commands that target a specific cell accept either:
-- `--cell-id ID` — cell by its stable UUID (preferred, survives moves/deletes)
-- `-i INDEX` / `--index INDEX` — cell by position (0-based)
 
 ## Architecture
 
 ```
-VS Code / Cursor (human interface)
-    |
-VS Code Extension (bridge server on localhost)
-    |  HTTP + bearer token auth
-CLI (agent interface)
+Human (VS Code / Cursor)
+    ↕
+VS Code Extension (HTTP bridge on localhost, bearer token auth)
+    ↕
+Agent (CLI)
 ```
 
-- Extension writes connection file: `~/Library/Jupyter/runtime/agent-repl-bridge-<pid>.json`
-- CLI auto-discovers the bridge by scanning connection files and pinging health
-- All notebook operations go through the extension's API
+- Extension writes `~/Library/Jupyter/runtime/agent-repl-bridge-<pid>.json` on startup
+- CLI auto-discovers by scanning connection files, matching `cwd` to `workspace_folders`, pinging health
+- All commands output JSON — never print unstructured text to stdout
 
-## Source
+## Coupling
 
-- CLI: `src/agent_repl/` (Python, ~640 lines)
-- Extension: `extension/src/` (TypeScript, ~1200 lines)
-- Tests: `tests/test_agent_repl.py`
+API changes require updating both sides together:
+- Routes: `extension/src/routes.ts`
+- CLI handlers: `src/agent_repl/cli.py`
+- Client methods: `src/agent_repl/client.py`
+
+<important if="editing files in extension/src/">
+
+## Extension Notes
+
+- `routes.ts` is the API surface — keep backward-compatible with the Python CLI
+- `execution/queue.ts` is the most complex module — read fully before modifying
+- Three execution backends (tried in order): private Jupyter session, Jupyter kernel API, VS Code notebook command. First two are "no-yank" (don't steal focus).
+- `executingCells` map tracks running cells via `onDidChangeNotebookDocument`; `reconcileKernelState()` checks real kernel status before declaring busy
+- `POST /api/reload` clears `require.cache` for all modules under `out/` except `extension.js` and `server.js`
+- Changes to `extension.ts` or `server.ts` require full window reload; everything else can hot-reload
+- Recompiling does NOT update an installed extension under `~/.vscode/extensions/` — reinstall the `.vsix` or use Extension Development Host
+
+</important>
+
+<important if="editing files in src/agent_repl/">
+
+## CLI Notes
+
+- `client.py`: bridge discovery + HTTP calls. `cli.py`: arg parsing + output formatting
+- Source input pattern (`-s`, `--source-file`, stdin) is shared across `ix`, `respond`, `edit replace-source`, `edit insert` — keep consistent
+- Cell targeting (`--cell-id` or `-i INDEX`) is shared across cell-specific commands — keep consistent
+
+</important>
+
+<important if="adding a new CLI command or modifying command arguments">
+
+## Adding/Changing Commands
+
+Both sides must be updated:
+1. Route in `extension/src/routes.ts`
+2. Subcommand in `src/agent_repl/cli.py`
+3. Client method in `src/agent_repl/client.py`
+4. Test in `tests/test_agent_repl.py`
+5. Docs: README.md, docs/commands.md, SKILL.md command table
+
+</important>
+
+<important if="debugging connection, discovery, or bridge issues">
+
+## Bridge Troubleshooting
+
+- Connection files: `~/Library/Jupyter/runtime/agent-repl-bridge-<pid>.json`
+- `BridgeClient.discover()` scans files, matches `cwd` to `workspace_folders`, pings health, picks freshest healthy one
+- Stale files from dead processes are the most common failure mode
+- `agent-repl reload` returns `extension_root` and `routes_module` paths — use to verify which build is loaded
+- Extension symlink lives at `~/.cursor/extensions/agent-repl.agent-repl-<version>` (or `~/.vscode/extensions/`)
+
+</important>
