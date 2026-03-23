@@ -24,6 +24,7 @@ function loadQueueModule() {
 const {
     applyJupyterOutput,
     applyNotebookOutput,
+    executionSummaryIndicatesCompletion,
     iopubMessageToJupyterOutput,
 } = loadQueueModule();
 
@@ -96,4 +97,25 @@ test('iopubMessageToJupyterOutput preserves display metadata and clear_output wa
         output_type: 'clear_output',
         wait: true,
     });
+});
+
+test('executionSummaryIndicatesCompletion treats success or endTime as terminal', () => {
+    assert.equal(executionSummaryIndicatesCompletion(undefined), false);
+    assert.equal(executionSummaryIndicatesCompletion({ success: true }), true);
+    assert.equal(executionSummaryIndicatesCompletion({ timing: { endTime: 1 } }), true);
+});
+
+test('executionSummaryIndicatesCompletion can use execution order deltas for notebook-command polling', () => {
+    assert.equal(
+        executionSummaryIndicatesCompletion({ executionOrder: 5 }, 4),
+        true,
+    );
+    assert.equal(
+        executionSummaryIndicatesCompletion({ executionOrder: 5 }, 5),
+        false,
+    );
+    assert.equal(
+        executionSummaryIndicatesCompletion({ executionOrder: 5 }),
+        false,
+    );
 });

@@ -1,63 +1,116 @@
 ---
 name: agent-repl
-description: Work against a live Jupyter notebook via the VS Code bridge. Use this when an agent needs to read, edit, or execute notebook cells while Cursor/VS Code is open.
+description: Work against a live Jupyter notebook via the VS Code bridge. Use this when an agent needs to create notebooks, select kernels, read or edit cells, execute notebook code, answer prompt cells, or debug bridge/kernel behavior while Cursor or VS Code is open.
 ---
 
 # agent-repl
 
-CLI for AI agents to work with Jupyter notebooks via the VS Code extension bridge. Agents use the CLI; humans see changes live in VS Code/Cursor. Both share the same kernel.
+CLI for AI agents to work with a live Jupyter notebook through the VS Code/Cursor bridge. Agents use the CLI; humans see the notebook update live in the editor. Both share the same kernel.
 
-The extension must be running (auto-starts when a `.ipynb` file is open). Run `agent-repl --help` for full command and flag details.
+Everything prints JSON to stdout. Prefer `uv run agent-repl ...` inside this repo, or `agent-repl ...` if the tool is already installed.
 
-## Install
+## Core Loop
+
+Use this order unless the user asks for something narrower:
 
 ```bash
-uv tool install /path/to/agent-repl    # global
-uv run agent-repl <command>             # or run from source
+agent-repl status demo.ipynb
+agent-repl cat demo.ipynb --no-outputs
+agent-repl ix demo.ipynb --source-file /tmp/cell.py
+agent-repl cat demo.ipynb
 ```
 
-If already on `$PATH`, skip installation.
+- `status` tells you whether the notebook is open, whether the kernel is busy, and which cells are running or queued
+- `cat --no-outputs` gives you stable cell IDs and source without dragging large outputs into context
+- `ix` is the default way to add new executable work because it inserts a visible cell and runs it
+- `cat` after execution is the fastest way to verify outputs and capture new `cell_id` values
 
-## Workflow
+## Command Contracts
 
 ```bash
-agent-repl new analysis.ipynb                       # create notebook
-agent-repl ix analysis.ipynb -s 'print("hi")'       # insert + execute cell (waits for completion)
-agent-repl ix analysis.ipynb --source-file /tmp/cell.py   # multi-line code from file
-agent-repl cat analysis.ipynb                        # read cells + outputs
-agent-repl cat analysis.ipynb --no-outputs           # sources only
-agent-repl status analysis.ipynb                     # kernel state
+agent-repl new analysis.ipynb
+agent-repl ix analysis.ipynb -s 'print("hi")'
+agent-repl ix analysis.ipynb --source-file /tmp/cell.py
+agent-repl exec analysis.ipynb --cell-id <id>
 agent-repl edit analysis.ipynb replace-source --cell-id <id> -s 'new code'
-agent-repl restart analysis.ipynb                    # restart kernel
+agent-repl status analysis.ipynb
+agent-repl restart analysis.ipynb
 ```
 
-All commands output JSON. Pass `--pretty` for formatted output. Source input accepts `-s 'inline'`, `--source-file path`, or stdin.
+- `ix` waits for completion by default, with a default timeout of 30 seconds
+- use `ix --no-wait` only when you intentionally want fire-and-forget behavior
+- `exec` is for re-running an existing cell or inserting one-off inline code when visibility matters less
+- prefer `--cell-id` over `--index`; IDs survive reordering while indexes do not
+- source input is shared across commands: `-s`, `--source-file`, or stdin
 
-## Usage Tips
+## Notebook Creation
 
-- Prefer `ix` over `exec` for new code — it inserts a visible cell in the notebook
-- Use `--cell-id` over `--index` when possible — IDs survive cell moves and deletes
-- After `ix`, read output with `cat` to verify results
-- For cell editing subcommands (`insert`, `delete`, `move`, `clear-outputs`), run `agent-repl edit --help`
+Use `new` when you want a real notebook file that opens in VS Code and attaches a kernel:
+
+```bash
+agent-repl new analysis.ipynb
+agent-repl new analysis.ipynb --cells-json '[{"type":"markdown","source":"# Notes"},{"type":"code","source":"print(1)"}]'
+```
+
+Important input rule:
+
+- `--cells-json` expects objects with `type` and `source`
+- valid `type` values are `code` and `markdown`
+- notebook-file style `cell_type` is output schema, not input schema
+- if you pass `cell_type` instead of `type`, creation may silently coerce cells to markdown
+
+When `new` returns:
+
+- `kernel_status: "selected"`: kernel attached successfully
+- `kernel_status: "needs_selection"`: no preferred kernel was available; use `kernels` and `select-kernel`
+- `kernel_status: "selection_failed"`: the notebook was created, but kernel attachment needs manual recovery
+
+## Kernel Selection
+
+`new` prefers the workspace `.venv` when it exists. If that does not settle cleanly:
+
+```bash
+agent-repl kernels
+agent-repl select-kernel analysis.ipynb --kernel-id <id>
+```
+
+- use the exact `id` returned by `agent-repl kernels`
+- `select-kernel` can attach programmatically or fall back to VS Code's controller-selection path
+- creating a notebook or selecting a kernel may briefly reveal the notebook tab while Jupyter initializes
+
+## Timeouts and Busy Kernels
+
+```bash
+agent-repl ix demo.ipynb --source-file /tmp/cell.py --timeout 300
+```
+
+- a timeout means the CLI stopped waiting; it does not necessarily mean execution stopped
+- after a timeout, check `status`, then `cat` when the kernel is idle
+- avoid stacking more `ix` calls blindly after a timeout
+- if notebook state looks stale, use `agent-repl restart <path>` to reset execution tracking and the kernel together
 
 ## Prompts
 
-Humans create prompt cells in VS Code. Agents discover and respond:
+Humans can create prompt cells in the notebook UI. Agents should answer them with:
 
 ```bash
 agent-repl prompts demo.ipynb
 agent-repl respond demo.ipynb --to <cell_id> -s 'df.dropna(inplace=True)'
 ```
 
-The `respond` command atomically: marks the prompt in-progress, inserts a response cell, executes it, marks the prompt answered.
+`respond` is the safest path for prompt cells because it marks the prompt in progress, inserts a response cell, executes it, then marks the prompt answered.
 
 <important if="creating a new notebook or selecting a kernel">
 
 ## Kernel Selection
 
-`agent-repl new` auto-selects the workspace `.venv` kernel if present. If no `.venv` and no `--kernel`, the response includes `"kernel_status": "needs_selection"` — use `agent-repl kernels` to list options and `agent-repl select-kernel <path> --kernel-id <id>` to choose.
+Use the JSON response from `new` directly:
 
-Creating a brand-new notebook may briefly steal focus (Jupyter kernel startup). After the kernel is attached, execution stays on the no-yank (background) path.
+- if it already selected a kernel, continue with `ix`
+- if it returned `available_kernels`, pick one of those exact IDs
+- if the notebook is open in the editor and auto-select still failed, retry `select-kernel` before falling back to manual UI clicks
+
+Creating a brand-new notebook may briefly steal focus while Jupyter starts. Once the kernel is attached, `ix` and `exec` can usually stay on the no-yank path.
 
 </important>
 
@@ -71,7 +124,13 @@ Creating a brand-new notebook may briefly steal focus (Jupyter kernel startup). 
 agent-repl ix demo.ipynb --source-file /tmp/cell.py --timeout 300
 ```
 
-If timeout occurs: the cell **keeps running in the kernel**. Use `agent-repl status` to check when it finishes, then `agent-repl cat` to read output. **Do not queue additional cells** after a timeout.
+If timeout occurs:
+
+- assume the kernel may still be running the cell
+- use `status` until the notebook becomes idle
+- use `cat` to inspect outputs and grab fresh `cell_id` values
+- do not queue more executions until the running cell is resolved
+- if the state is obviously wrong, use `restart`
 
 </important>
 
@@ -79,21 +138,32 @@ If timeout occurs: the cell **keeps running in the kernel**. Use `agent-repl sta
 
 ## Troubleshooting
 
-**Cell IDs change after window reload** — Always re-read with `cat` before using `--cell-id`.
+**Cell IDs changed after reload or edits** — Re-read with `cat` before using `--cell-id`.
 
-**404 errors on execute** — Usually means the cell ID doesn't exist (not a missing route). Re-read cell IDs with `cat`.
+**404 on execute/edit** — Usually means the cell ID is wrong, not that the route is missing.
 
-**"Kernel is busy" when it's not** — If the user interrupts from VS Code UI, tracking can get stuck. The extension auto-reconciles against real kernel status, but `agent-repl restart <notebook>` forces a full reset.
+**Notebook is outside the workspace** — The bridge only serves notebooks in its own workspace. Open the correct VS Code window first.
 
-**CLI has stale code** — `uv tool install <path> --force` reuses cached wheels. Use `--reinstall`:
+**Kernel selection acted strangely** — Use `kernels`, then retry `select-kernel` with the exact returned `id`.
+
+**CLI has stale code** — `uv tool install <path> --force` can reuse cached wheels. Use `--reinstall`:
 ```bash
 uv tool install /path/to/agent-repl --reinstall
 ```
 
-**Hot-reload scope** — `agent-repl reload` reloads routes and execution queue. Changes to `extension.ts` or `server.ts` require a full VS Code window reload.
+**Repo source changed, but VS Code still runs old behavior** — `agent-repl reload` hot-reloads the installed extension, not your repo checkout. After changing `extension/src/*`, package and reinstall the extension or use an Extension Development Host:
+
+```bash
+cd extension
+npx vsce package
+code --install-extension agent-repl-<version>.vsix --force
+uv run agent-repl reload
+```
+
+**Hot-reload scope** — `agent-repl reload` updates `routes` and the execution queue. Changes to `extension.ts` or `server.ts` still need a full VS Code window reload.
 
 </important>
 
 ## Execution Modes
 
-Agent-triggered execution defaults to `no-yank`: runs via a background Jupyter session without stealing editor focus. Set `agent-repl.executionMode` to `native` for VS Code's built-in execution. Completed responses include `execution_mode` so you can tell which path ran.
+Agent-triggered execution defaults to `no-yank`, which prefers background Jupyter APIs and falls back to the notebook command path when needed. Set `agent-repl.executionMode` to `native` if you explicitly want VS Code's built-in execution behavior. Completed responses include `execution_mode` and `execution_preference`, so check them when debugging focus-stealing or execution-path issues.

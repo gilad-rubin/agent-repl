@@ -21,7 +21,8 @@ interface QueueEntry {
 
 // Per-notebook queues
 const queues = new Map<string, QueueEntry[]>();
-const completionCallbacks = new Map<string, () => void>();
+type CompletionReason = 'completed' | 'canceled' | 'timeout';
+const completionCallbacks = new Map<string, (reason: CompletionReason) => void>();
 
 // Kernel state tracking via notebook cell execution lifecycle
 interface ExecutingCell {
@@ -39,6 +40,10 @@ function cellKey(fsPath: string, index: number): string {
     return `${fsPath}:${index}`;
 }
 
+function matchesCellKeyPath(key: string, fsPath?: string): boolean {
+    return !fsPath || key.startsWith(`${fsPath}:`);
+}
+
 function updateKernelState(): void {
     const prev = kernelState;
     kernelState = executingCells.size > 0 ? 'busy' : 'idle';
@@ -49,6 +54,18 @@ function updateKernelState(): void {
             processNext(path);
         }
     }
+}
+
+export function executionSummaryIndicatesCompletion(
+    summary: vscode.NotebookCellExecutionSummary | null | undefined,
+    initialExecutionOrder?: number | null
+): boolean {
+    if (!summary) { return false; }
+    if (typeof summary.success === 'boolean') { return true; }
+    if (typeof summary.timing?.endTime === 'number') { return true; }
+    return initialExecutionOrder !== undefined &&
+        typeof summary.executionOrder === 'number' &&
+        summary.executionOrder !== initialExecutionOrder;
 }
 
 /** Initialize execution monitoring: completion detection + kernel state tracking. */
@@ -62,7 +79,7 @@ export function initExecutionMonitor(): vscode.Disposable {
             const key = cellKey(fsPath, change.cell.index);
             const summary = change.executionSummary;
 
-            if (summary?.timing?.endTime) {
+            if (executionSummaryIndicatesCompletion(summary)) {
                 // Execution completed
                 executingCells.delete(key);
                 updateKernelState();
@@ -71,9 +88,9 @@ export function initExecutionMonitor(): vscode.Disposable {
                 const cb = completionCallbacks.get(key);
                 if (cb) {
                     completionCallbacks.delete(key);
-                    cb();
+                    cb('completed');
                 }
-            } else {
+            } else if (summary) {
                 // Execution started (summary set/cleared without endTime)
                 executingCells.set(key, {
                     fsPath,
@@ -93,13 +110,40 @@ export function getKernelState(): string {
 }
 
 /** Reset execution tracking state. Call on kernel restart to avoid orphaned "busy" state. */
-export function resetExecutionState(): void {
-    executingCells.clear();
-    completionCallbacks.clear();
-    kernelState = 'idle';
+export function resetExecutionState(
+    fsPath?: string,
+    reason: string = 'Execution canceled due to kernel restart'
+): void {
+    for (const key of [...executingCells.keys()]) {
+        if (matchesCellKeyPath(key, fsPath)) {
+            executingCells.delete(key);
+        }
+    }
 
-    // Drain any queued cells now that kernel is idle
-    for (const path of queues.keys()) {
+    for (const [key, callback] of [...completionCallbacks.entries()]) {
+        if (!matchesCellKeyPath(key, fsPath)) { continue; }
+        completionCallbacks.delete(key);
+        callback('canceled');
+    }
+
+    for (const [path, queue] of queues.entries()) {
+        if (fsPath && path !== fsPath) { continue; }
+        for (const entry of queue) {
+            if (entry.status !== 'queued' && entry.status !== 'running') { continue; }
+            entry.status = 'error';
+            entry.result = {
+                status: 'error',
+                execution_id: entry.id,
+                cell_id: entry.cellId,
+                error: reason,
+            };
+        }
+    }
+
+    updateKernelState();
+
+    const targetPaths = fsPath ? [fsPath] : [...queues.keys()];
+    for (const path of targetPaths) {
         processNext(path);
     }
 }
@@ -117,19 +161,19 @@ function isNotebookBusy(path: string): boolean {
  * (e.g. completion tracking failed on code-server).
  */
 async function reconcileKernelState(path: string): Promise<void> {
-    // Expire stale running queue entries (older than 5 minutes)
     const queue = queues.get(path);
-    if (queue) {
-        const now = Date.now();
-        for (const entry of queue) {
-            if (entry.status === 'running' && entry.startedAt && now - entry.startedAt.getTime() > 300_000) {
-                entry.status = 'error';
-                entry.result = { status: 'error', execution_id: entry.id, error: 'Execution tracking expired' };
-            }
-        }
+    const hasRunningQueueEntry = queue?.some(entry => entry.status === 'running') ?? false;
+
+    if (queue?.some(entry =>
+        entry.status === 'running' &&
+        entry.startedAt &&
+        Date.now() - entry.startedAt.getTime() > 300_000
+    )) {
+        resetExecutionState(path, 'Execution tracking expired');
+        return;
     }
 
-    if (kernelState !== 'busy') { return; }
+    if (kernelState !== 'busy' && !hasRunningQueueEntry) { return; }
 
     try {
         const doc = resolveNotebook(path);
@@ -137,7 +181,7 @@ async function reconcileKernelState(path: string): Promise<void> {
 
         // If kernel is idle, dead, restarting, or unreachable — our "busy" is stale
         if (realStatus !== 'busy' && realStatus !== 'starting') {
-            resetExecutionState();
+            resetExecutionState(path, 'Execution tracking reset after kernel became idle');
         }
     } catch {
         // Can't resolve notebook or check kernel — leave state as-is
@@ -466,7 +510,7 @@ async function runCellViaNotebookCommand(
     }
 ): Promise<any> {
     const selection = [new vscode.NotebookRange(cellIndex, cellIndex + 1)];
-    const completionPromise = waitForCompletion(doc.uri.fsPath, cellIndex);
+    const completionPromise = waitForCompletion(doc, cellIndex);
 
     if (options.executionPreference === 'native') {
         await vscode.window.showNotebookDocument(doc, {
@@ -495,7 +539,14 @@ async function runCellViaNotebookCommand(
         }
     }
 
-    await completionPromise;
+    const completion = await completionPromise;
+    if (completion !== 'completed') {
+        throw new Error(
+            completion === 'timeout'
+                ? 'Execution tracking timed out'
+                : 'Execution canceled due to kernel restart'
+        );
+    }
 
     const cell = doc.cellAt(cellIndex);
     const outputs = toJupyter(cell);
@@ -1009,19 +1060,46 @@ function getJupyterDisplayId(output: JupyterOutput | undefined): string | undefi
         : undefined;
 }
 
-function waitForCompletion(fsPath: string, cellIndex: number, timeoutMs: number = 300_000): Promise<void> {
+function waitForCompletion(
+    doc: vscode.NotebookDocument,
+    cellIndex: number,
+    timeoutMs: number = 300_000
+): Promise<CompletionReason> {
     return new Promise((resolve) => {
-        const key = `${fsPath}:${cellIndex}`;
+        const key = cellKey(doc.uri.fsPath, cellIndex);
+        const initialExecutionOrder = doc.cellAt(cellIndex).executionSummary?.executionOrder ?? null;
+        let done = false;
+
+        const finish = (reason: CompletionReason) => {
+            if (done) { return; }
+            done = true;
+            clearTimeout(timer);
+            clearInterval(poll);
+            completionCallbacks.delete(key);
+            if (reason !== 'completed') {
+                executingCells.delete(key);
+                updateKernelState();
+            }
+            resolve(reason);
+        };
+
+        const poll = setInterval(() => {
+            try {
+                const cell = doc.cellAt(cellIndex);
+                if (executionSummaryIndicatesCompletion(cell.executionSummary, initialExecutionOrder)) {
+                    finish('completed');
+                }
+            } catch {
+                // The cell may disappear during restart or edits; rely on reset/timeout.
+            }
+        }, 200);
+
         const timer = setTimeout(() => {
             // Completion event never fired — clean up and unblock the queue
-            completionCallbacks.delete(key);
-            executingCells.delete(key);
-            updateKernelState();
-            resolve();
+            finish('timeout');
         }, timeoutMs);
-        completionCallbacks.set(key, () => {
-            clearTimeout(timer);
-            resolve();
+        completionCallbacks.set(key, (reason) => {
+            finish(reason);
         });
     });
 }
