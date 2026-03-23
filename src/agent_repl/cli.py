@@ -50,7 +50,12 @@ def cmd_cat(args: argparse.Namespace) -> int:
 
 
 def cmd_reload(args: argparse.Namespace) -> int:
-    result = _client().reload()
+    try:
+        result = _client().reload()
+    except Exception:
+        # Bridge unreachable (port changed after VS Code reload) — re-discover
+        client = BridgeClient.discover()
+        result = client.reload()
     _out(result, args.pretty)
     return 0
 

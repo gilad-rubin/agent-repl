@@ -37,6 +37,14 @@ class BridgeClient:
         for fpath in files:
             try:
                 info = json.loads(Path(fpath).read_text())
+                # Remove connection files from dead processes
+                pid = info.get("pid")
+                if pid and not _pid_alive(pid):
+                    try:
+                        os.unlink(fpath)
+                    except OSError:
+                        pass
+                    continue
                 url = f"http://127.0.0.1:{info['port']}"
                 client = cls(url, info["token"])
                 client.health()  # ping
@@ -182,3 +190,12 @@ def _runtime_dir() -> str:
     if sys.platform == "darwin":
         return os.path.join(os.path.expanduser("~"), "Library", "Jupyter", "runtime")
     return os.path.join(os.path.expanduser("~"), ".local", "share", "jupyter", "runtime")
+
+
+def _pid_alive(pid: int) -> bool:
+    """Check if a process is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False

@@ -113,8 +113,22 @@ function isNotebookBusy(path: string): boolean {
  * Check the real kernel status via Jupyter APIs.
  * If our tracking says busy but the kernel is actually idle/dead,
  * clear the stale state so execution can proceed.
+ * Also expires queue entries that have been running for too long
+ * (e.g. completion tracking failed on code-server).
  */
 async function reconcileKernelState(path: string): Promise<void> {
+    // Expire stale running queue entries (older than 5 minutes)
+    const queue = queues.get(path);
+    if (queue) {
+        const now = Date.now();
+        for (const entry of queue) {
+            if (entry.status === 'running' && entry.startedAt && now - entry.startedAt.getTime() > 300_000) {
+                entry.status = 'error';
+                entry.result = { status: 'error', execution_id: entry.id, error: 'Execution tracking expired' };
+            }
+        }
+    }
+
     if (kernelState !== 'busy') { return; }
 
     try {
@@ -511,6 +525,10 @@ async function runCellViaJupyterKernelApi(
     cellIndex: number,
     entry: QueueEntry
 ): Promise<{ result?: any; fallbackReason?: string }> {
+    if (kernelApiDisabled) {
+        return { fallbackReason: 'kernel-api-disabled' };
+    }
+
     const privateResult = await runCellViaPrivateJupyterSession(doc, cellIndex, entry);
     if (privateResult.result || privateResult.fallbackReason !== 'no-private-jupyter-session') {
         return privateResult;
@@ -559,7 +577,11 @@ async function runCellViaJupyterKernelApi(
             }
         };
     } catch (err: any) {
-        if (!started && shouldFallbackToNotebookCommand(err)) {
+        if (!started) {
+            // Kernel API returned an object but execution failed before producing
+            // any output — the API is broken (e.g. access denied on code-server).
+            // Disable it for the rest of the session so we fall back cleanly.
+            kernelApiDisabled = true;
             await clearAgentRunState(doc, cellIndex);
             return { fallbackReason: err?.message ?? String(err) };
         }
@@ -670,7 +692,8 @@ async function runCellViaPrivateJupyterSession(
         };
     } catch (err: any) {
         const message = err?.message ?? String(err);
-        if (shouldFallbackToNotebookCommand(err)) {
+        if (rawOutputs.length === 0) {
+            kernelApiDisabled = true;
             await clearAgentRunState(doc, cellIndex);
             return { fallbackReason: message };
         }
@@ -702,8 +725,12 @@ async function runCellViaPrivateJupyterSession(
 // The Jupyter extension identifies callers via stack inspection and shows a warning
 // popup for unrecognized publishers on every getKernelService() / kernels.getKernel()
 // call when the publisher isn't in their allowlist.
+// When kernel API access fails at execution time (e.g. on code-server where our
+// publisher isn't allowlisted), we disable the API for the rest of the session to
+// avoid broken kernel objects that leave execution state stuck.
 let cachedJupyterApi: any | undefined;
 let cachedKernelService: any | undefined;
+let kernelApiDisabled = false;
 
 export async function getJupyterApi(): Promise<any | undefined> {
     if (cachedJupyterApi) { return cachedJupyterApi; }
@@ -750,6 +777,7 @@ async function getPrivateJupyterKernel(doc: vscode.NotebookDocument): Promise<an
 /** Reset cached Jupyter API references (e.g. after kernel restart). */
 export function resetJupyterApiCache(): void {
     cachedKernelService = undefined;
+    kernelApiDisabled = false;
     // Keep cachedJupyterApi — the extension object itself doesn't change.
 }
 
@@ -830,17 +858,6 @@ function isNotebookOutput(value: any): value is vscode.NotebookCellOutput {
     return !!value && Array.isArray(value.items);
 }
 
-function shouldFallbackToNotebookCommand(err: any): boolean {
-    const message = `${err?.message ?? err ?? ''}`.toLowerCase();
-    return (
-        message.includes('proposed api') ||
-        message.includes('kernel access') ||
-        message.includes('not supported for extension') ||
-        message.includes('access denied') ||
-        message.includes('access to jupyter kernel has been revoked')
-    );
-}
-
 function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
     const type = msg?.header?.msg_type;
     const content = msg?.content ?? {};
@@ -881,9 +898,20 @@ function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
     return undefined;
 }
 
-function waitForCompletion(fsPath: string, cellIndex: number): Promise<void> {
+function waitForCompletion(fsPath: string, cellIndex: number, timeoutMs: number = 300_000): Promise<void> {
     return new Promise((resolve) => {
-        completionCallbacks.set(`${fsPath}:${cellIndex}`, resolve);
+        const key = `${fsPath}:${cellIndex}`;
+        const timer = setTimeout(() => {
+            // Completion event never fired — clean up and unblock the queue
+            completionCallbacks.delete(key);
+            executingCells.delete(key);
+            updateKernelState();
+            resolve();
+        }, timeoutMs);
+        completionCallbacks.set(key, () => {
+            clearTimeout(timer);
+            resolve();
+        });
     });
 }
 
