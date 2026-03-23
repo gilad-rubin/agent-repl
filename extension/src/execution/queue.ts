@@ -511,6 +511,7 @@ async function runCellViaNotebookCommand(
 ): Promise<any> {
     const selection = [new vscode.NotebookRange(cellIndex, cellIndex + 1)];
     const completionPromise = waitForCompletion(doc, cellIndex);
+    let restoreFocusWarning: string | undefined;
 
     if (options.executionPreference === 'native') {
         await vscode.window.showNotebookDocument(doc, {
@@ -535,7 +536,13 @@ async function runCellViaNotebookCommand(
                 document: doc.uri
             });
         } finally {
-            await restoreEditorFocus(focus);
+            try {
+                await restoreEditorFocus(focus);
+            } catch (err: any) {
+                // Focus restoration is best-effort and should never mask a successful execution.
+                restoreFocusWarning = err?.message ?? String(err);
+                console.warn('agent-repl: failed to restore editor focus', err);
+            }
         }
     }
 
@@ -563,6 +570,7 @@ async function runCellViaNotebookCommand(
         execution_mode: 'notebook-command',
         execution_preference: options.executionPreference,
         execution_fallback_reason: options.fallbackReason ?? null,
+        ...(restoreFocusWarning ? { focus_restore_warning: restoreFocusWarning } : {}),
     };
 
     entry.status = 'completed';

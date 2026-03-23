@@ -39,9 +39,11 @@ agent-repl restart analysis.ipynb
 
 - `ix` waits for completion by default, with a default timeout of 30 seconds
 - use `ix --no-wait` only when you intentionally want fire-and-forget behavior
-- `exec` is for re-running an existing cell or inserting one-off inline code when visibility matters less
+- `exec --cell-id` is for re-running an existing cell
+- `exec -c/--code` inserts a new persistent code cell and executes it, just like `ix`; use it only when you want that probe to remain in the notebook or you are prepared to delete it afterward
 - prefer `--cell-id` over `--index`; IDs survive reordering while indexes do not
 - source input is shared across commands: `-s`, `--source-file`, or stdin
+- `run-all` and `restart-run-all` trigger notebook execution and return immediately; follow them with `status` until the kernel is idle before assuming the notebook is ready
 
 ## Notebook Creation
 
@@ -88,6 +90,7 @@ agent-repl ix demo.ipynb --source-file /tmp/cell.py --timeout 300
 - after a timeout, check `status`, then `cat` when the kernel is idle
 - avoid stacking more `ix` calls blindly after a timeout
 - if notebook state looks stale, use `agent-repl restart <path>` to reset execution tracking and the kernel together
+- after `run-all` or `restart-run-all`, expect the notebook to stay busy until VS Code finishes the run; this is normal unless `status` stops changing
 
 ## Prompts
 
@@ -142,9 +145,13 @@ If timeout occurs:
 
 **404 on execute/edit** — Usually means the cell ID is wrong, not that the route is missing.
 
+**`exec -c` left a surprise probe cell behind** — That is expected behavior: `exec -c` inserts a real notebook cell. Prefer `exec --cell-id` to rerun existing code, or delete the probe cell after debugging.
+
 **Notebook is outside the workspace** — The bridge only serves notebooks in its own workspace. Open the correct VS Code window first.
 
 **Kernel selection acted strangely** — Use `kernels`, then retry `select-kernel` with the exact returned `id`.
+
+**`run-all` or `restart-run-all` returned but the notebook is still busy** — Those commands return after triggering execution, not after completion. Use `status` to watch the active run.
 
 **CLI has stale code** — `uv tool install <path> --force` can reuse cached wheels. Use `--reinstall`:
 ```bash

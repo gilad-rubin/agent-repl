@@ -97,8 +97,22 @@ type EditorFocus =
     }
     | { kind: 'none' };
 
+function isNotebookCellDocument(document: vscode.TextDocument | undefined): boolean {
+    return document?.uri.scheme === 'vscode-notebook-cell';
+}
+
 export function captureEditorFocus(): EditorFocus {
+    const notebookEditor = vscode.window.activeNotebookEditor;
     const textEditor = vscode.window.activeTextEditor;
+    if (notebookEditor && isNotebookCellDocument(textEditor?.document)) {
+        return {
+            kind: 'notebook',
+            document: notebookEditor.notebook,
+            selections: notebookEditor.selections,
+            viewColumn: notebookEditor.viewColumn,
+        };
+    }
+
     if (textEditor) {
         return {
             kind: 'text',
@@ -108,7 +122,6 @@ export function captureEditorFocus(): EditorFocus {
         };
     }
 
-    const notebookEditor = vscode.window.activeNotebookEditor;
     if (notebookEditor) {
         return {
             kind: 'notebook',
@@ -123,6 +136,10 @@ export function captureEditorFocus(): EditorFocus {
 
 export async function restoreEditorFocus(focus: EditorFocus): Promise<void> {
     if (focus.kind === 'text') {
+        // Notebook cell documents are not safely reopenable via showTextDocument().
+        if (isNotebookCellDocument(focus.document)) {
+            return;
+        }
         await vscode.window.showTextDocument(focus.document, {
             viewColumn: focus.viewColumn,
             preserveFocus: false,

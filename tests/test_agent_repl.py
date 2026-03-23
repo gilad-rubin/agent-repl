@@ -7,6 +7,8 @@ import unittest
 from io import StringIO
 from unittest import mock
 
+import requests
+
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
 
@@ -212,6 +214,15 @@ class TestBridgeEndpoints(unittest.TestCase):
         self.client.reload()
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/reload", url)
+
+    def test_post_surfaces_bridge_error_message(self):
+        response = mock.Mock(status_code=500, reason="Internal Server Error", url="http://127.0.0.1:9999/api/notebook/execute-cell")
+        response.json.return_value = {"error": 'Could NOT open editor for "vscode-notebook-cell:demo"'}
+        response.raise_for_status.side_effect = requests.HTTPError("500 Server Error", response=response)
+        self.mock_post.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, 'Could NOT open editor for "vscode-notebook-cell:demo"'):
+            self.client.execute_cell("nb.ipynb", cell_id="abc", wait=False)
 
     def test_auth_header_set(self):
         self.assertEqual(self.client._session.headers["Authorization"], "token tok")

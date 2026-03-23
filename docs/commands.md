@@ -65,7 +65,7 @@ agent-repl exec demo.ipynb --cell-id abc123
 agent-repl exec demo.ipynb -c 'x = 42; print(x)'
 ```
 
-When using `-c`, a new cell is inserted and executed (same as `ix`). One of `--cell-id` or `-c` is required.
+When using `-c`, a new persistent cell is inserted and executed (same as `ix`). One of `--cell-id` or `-c` is required.
 
 Completed `exec` responses include:
 
@@ -184,7 +184,7 @@ agent-repl edit demo.ipynb clear-outputs --all
 
 ## run-all
 
-Execute all cells in the notebook sequentially.
+Trigger execution of all cells in the notebook and return immediately.
 
 ```
 agent-repl run-all PATH [--pretty]
@@ -193,6 +193,8 @@ agent-repl run-all PATH [--pretty]
 ```bash
 agent-repl run-all demo.ipynb
 ```
+
+Use `agent-repl status PATH` to watch the run until the kernel becomes idle.
 
 ---
 
@@ -212,7 +214,7 @@ agent-repl restart demo.ipynb
 
 ## restart-run-all
 
-Restart the kernel, then execute all cells. Clean-slate verification run.
+Restart the kernel, trigger execution of all cells, and return immediately.
 
 ```
 agent-repl restart-run-all PATH [--pretty]
@@ -221,6 +223,8 @@ agent-repl restart-run-all PATH [--pretty]
 ```bash
 agent-repl restart-run-all demo.ipynb
 ```
+
+Use `agent-repl status PATH` to watch the run until the kernel becomes idle.
 
 ---
 
