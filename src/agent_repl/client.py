@@ -76,19 +76,21 @@ class BridgeClient:
         return self._post("/api/reload", {})
 
     def contents(self, path: str) -> dict[str, Any]:
-        return self._get("/api/notebook/contents", params={"path": path})
+        return self._get("/api/notebook/contents", params=self._path_params(path))
 
     def status(self, path: str) -> dict[str, Any]:
-        return self._get("/api/notebook/status", params={"path": path})
+        return self._get("/api/notebook/status", params=self._path_params(path))
 
     def edit(self, path: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
-        return self._post("/api/notebook/edit", {"path": path, "operations": operations})
+        body = self._path_body(path)
+        body["operations"] = operations
+        return self._post("/api/notebook/edit", body)
 
     def execute_cell(
         self, path: str, *, cell_id: str | None = None, cell_index: int | None = None,
         wait: bool = True, timeout: float = 30,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
+        body = self._path_body(path)
         if cell_id is not None:
             body["cell_id"] = cell_id
         if cell_index is not None:
@@ -102,27 +104,27 @@ class BridgeClient:
         self, path: str, source: str, cell_type: str = "code", at_index: int = -1,
         wait: bool = True, timeout: float = 30,
     ) -> dict[str, Any]:
-        result = self._post("/api/notebook/insert-and-execute", {
-            "path": path, "source": source, "cell_type": cell_type, "at_index": at_index
-        })
+        body = self._path_body(path)
+        body.update({"source": source, "cell_type": cell_type, "at_index": at_index})
+        result = self._post("/api/notebook/insert-and-execute", body)
         if wait and result.get("execution_id"):
             return self._poll_execution(result, timeout)
         return result
 
     def execute_all(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebook/execute-all", {"path": path})
+        return self._post("/api/notebook/execute-all", self._path_body(path))
 
     def restart_kernel(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebook/restart-kernel", {"path": path})
+        return self._post("/api/notebook/restart-kernel", self._path_body(path))
 
     def restart_and_run_all(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebook/restart-and-run-all", {"path": path})
+        return self._post("/api/notebook/restart-and-run-all", self._path_body(path))
 
     def create(
         self, path: str, cells: list[dict[str, Any]] | None = None,
         kernel_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "cwd": os.getcwd()}
+        body = self._path_body(path)
         if cells is not None:
             body["cells"] = cells
         if kernel_id is not None:
@@ -135,7 +137,7 @@ class BridgeClient:
     def select_kernel(
         self, path: str, kernel_id: str | None = None, extension: str | None = None
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
+        body = self._path_body(path)
         if kernel_id is not None:
             body["kernel_id"] = kernel_id
         if extension is not None:
@@ -143,12 +145,14 @@ class BridgeClient:
         return self._post("/api/notebook/select-kernel", body)
 
     def prompt(self, path: str, instruction: str) -> dict[str, Any]:
-        return self._post("/api/notebook/prompt", {"path": path, "instruction": instruction})
+        body = self._path_body(path)
+        body["instruction"] = instruction
+        return self._post("/api/notebook/prompt", body)
 
     def prompt_status(self, path: str, cell_id: str, status: str) -> dict[str, Any]:
-        return self._post("/api/notebook/prompt-status", {
-            "path": path, "cell_id": cell_id, "status": status
-        })
+        body = self._path_body(path)
+        body.update({"cell_id": cell_id, "status": status})
+        return self._post("/api/notebook/prompt-status", body)
 
     # ------------------------------------------------------------------
     # Internals
@@ -183,6 +187,12 @@ class BridgeClient:
         r = self._session.post(f"{self.base_url}{endpoint}", json=body, timeout=30)
         r.raise_for_status()
         return r.json()
+
+    def _path_params(self, path: str) -> dict[str, str]:
+        return {"path": path, "cwd": os.getcwd()}
+
+    def _path_body(self, path: str) -> dict[str, Any]:
+        return {"path": path, "cwd": os.getcwd()}
 
 
 def _runtime_dir() -> str:

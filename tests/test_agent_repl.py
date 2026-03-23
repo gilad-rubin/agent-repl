@@ -45,6 +45,7 @@ class TestBridgeEndpoints(unittest.TestCase):
 
     def setUp(self):
         self.client = BridgeClient("http://127.0.0.1:9999", "tok")
+        self.getcwd = mock.patch("agent_repl.client.os.getcwd", return_value="/workspace").start()
         self.mock_get = mock.patch.object(
             self.client._session, "get",
             return_value=mock.Mock(status_code=200, json=lambda: {"ok": True}),
@@ -62,17 +63,23 @@ class TestBridgeEndpoints(unittest.TestCase):
         self.mock_get.assert_called_once()
         url = self.mock_get.call_args[0][0]
         self.assertIn("/api/notebook/contents", url)
+        self.assertEqual(self.mock_get.call_args.kwargs["params"], {"path": "nb.ipynb", "cwd": "/workspace"})
 
     def test_status_calls_get(self):
         self.client.status("nb.ipynb")
         url = self.mock_get.call_args[0][0]
         self.assertIn("/api/notebook/status", url)
+        self.assertEqual(self.mock_get.call_args.kwargs["params"], {"path": "nb.ipynb", "cwd": "/workspace"})
 
     def test_edit_calls_post(self):
         self.client.edit("nb.ipynb", [{"op": "delete", "cell_index": 0}])
         self.mock_post.assert_called_once()
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/notebook/edit", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "cwd": "/workspace", "operations": [{"op": "delete", "cell_index": 0}]},
+        )
 
     def test_execute_cell_calls_post(self):
         self.client.execute_cell("nb.ipynb", cell_id="abc")
@@ -103,7 +110,7 @@ class TestBridgeEndpoints(unittest.TestCase):
         self.client.create("new.ipynb")
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/notebook/create", url)
-        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "new.ipynb"})
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "new.ipynb", "cwd": "/workspace"})
 
     def test_create_includes_kernel_id_and_cells(self):
         self.client.create(
@@ -115,6 +122,7 @@ class TestBridgeEndpoints(unittest.TestCase):
             self.mock_post.call_args.kwargs["json"],
             {
                 "path": "new.ipynb",
+                "cwd": "/workspace",
                 "cells": [{"type": "code", "source": "x = 1"}],
                 "kernel_id": "/tmp/.venv/bin/python",
             },
@@ -124,6 +132,10 @@ class TestBridgeEndpoints(unittest.TestCase):
         self.client.prompt_status("nb.ipynb", "cell-1", "answered")
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/notebook/prompt-status", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "cwd": "/workspace", "cell_id": "cell-1", "status": "answered"},
+        )
 
     def test_reload_calls_post(self):
         self.client.reload()
@@ -272,13 +284,13 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1"], client)
         self.assertEqual(code, 0)
-        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", wait=True, timeout=30)
+        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30)
 
     def test_ix_no_wait(self):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1", "--no-wait"], client)
         self.assertEqual(code, 0)
-        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", wait=False, timeout=30)
+        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=False, timeout=30)
 
     def test_exec_with_code(self):
         client = self._mock_client()

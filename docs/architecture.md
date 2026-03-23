@@ -53,7 +53,7 @@ The CLI is a thin HTTP client. It:
 
 1. Scans `~/Library/Jupyter/runtime/` for connection files
 2. Pings each bridge's health endpoint
-3. Sends commands as HTTP requests to the first live bridge
+3. Sends commands as HTTP requests to the first live bridge, including the CLI's current working directory for notebook path resolution
 
 Two files:
 
@@ -125,6 +125,12 @@ The extension maintains a per-notebook execution queue:
 - `insert-and-execute` is fire-and-forget: the CLI gets a `cell_id` immediately
 - Use `GET /api/notebook/execution?id=<id>` to poll for completion
 - Use `GET /api/notebook/status` to see queue state
+
+## Closed Notebooks
+
+- `GET /api/notebook/contents` can read a closed `.ipynb` directly from disk
+- `GET /api/notebook/status` returns `kernel_state: "not_open"` with empty queues when the notebook is closed
+- Edit, prompt, kernel, and execution routes automatically open the notebook document first when notebook APIs require it
 
 ## Execution Modes
 

@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Routes } from './server';
-import { resolveNotebook, findEditor, ensureNotebookEditor, captureEditorFocus, restoreEditorFocus } from './notebook/resolver';
+import { resolveNotebook, resolveNotebookUri, resolveOrOpenNotebook, findOpenNotebook, findEditor, ensureNotebookEditor, captureEditorFocus, restoreEditorFocus } from './notebook/resolver';
 import { applyEdits, EditOp } from './notebook/operations';
 import { getCellId, ensureIds, resolveCell, withCellId, newCellId } from './notebook/identity';
 import { toJupyter, stripForAgent } from './notebook/outputs';
@@ -202,6 +202,80 @@ function kernelSelectionGuidance(relPath: string, discovery: KernelDiscovery, re
     };
 }
 
+function rawCellSource(source: unknown): string {
+    if (Array.isArray(source)) {
+        return source.map(part => `${part ?? ''}`).join('');
+    }
+    return typeof source === 'string' ? source : '';
+}
+
+function rawCellId(metadata: Record<string, any> | undefined, fallback: string): string {
+    return metadata?.custom?.['agent-repl']?.cell_id ?? metadata?.custom?.id ?? metadata?.id ?? fallback;
+}
+
+async function readNotebookContents(relPath: string, cwd?: string): Promise<{ path: string; cells: any[] }> {
+    const openDoc = findOpenNotebook(relPath, cwd);
+    if (openDoc) {
+        await ensureIds(openDoc);
+
+        const cells = [];
+        let codeIndex = 0;
+        for (let i = 0; i < openDoc.cellCount; i++) {
+            const cell = openDoc.cellAt(i);
+            const isCode = cell.kind === vscode.NotebookCellKind.Code;
+            const outputs = toJupyter(cell);
+            cells.push({
+                index: i,
+                display_number: isCode ? ++codeIndex : null,
+                cell_id: getCellId(cell) ?? `index-${i}`,
+                cell_type: isCode ? 'code' : 'markdown',
+                source: cell.document.getText(),
+                outputs: stripForAgent(outputs),
+                execution_count: cell.executionSummary?.executionOrder ?? null,
+                metadata: cell.metadata
+            });
+        }
+        return { path: relPath, cells };
+    }
+
+    const uri = resolveNotebookUri(relPath, cwd);
+    let data: Uint8Array;
+    try {
+        data = await vscode.workspace.fs.readFile(uri);
+    } catch (err: any) {
+        const wrapped = new Error(`Notebook '${relPath}' was not found`) as any;
+        wrapped.statusCode = err?.code === 'FileNotFound' ? 404 : err?.statusCode ?? 500;
+        throw wrapped;
+    }
+
+    let notebook: { cells?: Array<Record<string, any>> };
+    try {
+        notebook = JSON.parse(Buffer.from(data).toString('utf8'));
+    } catch {
+        const err = new Error(`Notebook '${relPath}' is not valid JSON`) as any;
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const cells = [];
+    let codeIndex = 0;
+    for (const [index, cell] of (notebook.cells ?? []).entries()) {
+        const cellType = cell.cell_type === 'markdown' ? 'markdown' : 'code';
+        const isCode = cellType === 'code';
+        cells.push({
+            index,
+            display_number: isCode ? ++codeIndex : null,
+            cell_id: rawCellId(cell.metadata, `index-${index}`),
+            cell_type: cellType,
+            source: rawCellSource(cell.source),
+            outputs: stripForAgent(Array.isArray(cell.outputs) ? cell.outputs : []),
+            execution_count: cell.execution_count ?? null,
+            metadata: cell.metadata ?? {}
+        });
+    }
+    return { path: relPath, cells };
+}
+
 export function buildRoutes(maxQueue: number): Routes {
     return {
         // --- Health ---
@@ -314,43 +388,37 @@ export function buildRoutes(maxQueue: number): Routes {
 
         // --- Read ---
         'GET /api/notebook/contents': async (_body, q) => {
-            const path = q.get('path');
-            if (!path) { throw new Error('Missing ?path='); }
-            const doc = resolveNotebook(path);
-            await ensureIds(doc);
-
-            const cells = [];
-            let codeIndex = 0;
-            for (let i = 0; i < doc.cellCount; i++) {
-                const cell = doc.cellAt(i);
-                const isCode = cell.kind === vscode.NotebookCellKind.Code;
-                const outputs = toJupyter(cell);
-                cells.push({
-                    index: i,
-                    display_number: isCode ? ++codeIndex : null,
-                    cell_id: getCellId(cell) ?? `index-${i}`,
-                    cell_type: isCode ? 'code' : 'markdown',
-                    source: cell.document.getText(),
-                    outputs: stripForAgent(outputs),
-                    execution_count: cell.executionSummary?.executionOrder ?? null,
-                    metadata: cell.metadata
-                });
-            }
-            return { path, cells };
+            const relPath = q.get('path');
+            const cwd = q.get('cwd') ?? undefined;
+            if (!relPath) { throw new Error('Missing ?path='); }
+            return readNotebookContents(relPath, cwd);
         },
 
         // --- Status ---
         'GET /api/notebook/status': async (_body, q) => {
-            const path = q.get('path');
-            if (!path) { throw new Error('Missing ?path='); }
-            return getStatus(path);
+            const relPath = q.get('path');
+            const cwd = q.get('cwd') ?? undefined;
+            if (!relPath) { throw new Error('Missing ?path='); }
+            const doc = findOpenNotebook(relPath, cwd);
+            if (!doc) {
+                return {
+                    path: relPath,
+                    open: false,
+                    kernel_state: 'not_open',
+                    busy: false,
+                    running: [],
+                    queued: [],
+                };
+            }
+            const status = await getStatus(doc.uri.fsPath);
+            return { ...status, path: relPath, open: true };
         },
 
         // --- Edit ---
         'POST /api/notebook/edit': async (body) => {
-            const { path, operations } = body as { path: string; operations: EditOp[] };
+            const { path, cwd, operations } = body as { path: string; cwd?: string; operations: EditOp[] };
             if (!path || !operations?.length) { throw new Error('Missing path or operations'); }
-            const doc = resolveNotebook(path);
+            const doc = await resolveOrOpenNotebook(path, cwd);
             await ensureIds(doc);
             const results = await applyEdits(doc, operations);
             return { path, results };
@@ -358,10 +426,11 @@ export function buildRoutes(maxQueue: number): Routes {
 
         // --- Execute ---
         'POST /api/notebook/execute-cell': async (body) => {
-            const { path, cell_id, cell_index } = body as {
-                path: string; cell_id?: string; cell_index?: number;
+            const { path, cwd, cell_id, cell_index } = body as {
+                path: string; cwd?: string; cell_id?: string; cell_index?: number;
             };
-            return executeCell(path, { cell_id, cell_index }, maxQueue);
+            const doc = await resolveOrOpenNotebook(path, cwd);
+            return executeCell(doc.uri.fsPath, { cell_id, cell_index }, maxQueue);
         },
 
         'GET /api/notebook/execution': async (_body, q) => {
@@ -371,16 +440,17 @@ export function buildRoutes(maxQueue: number): Routes {
         },
 
         'POST /api/notebook/insert-and-execute': async (body) => {
-            const { path, source, cell_type, at_index } = body as {
-                path: string; source: string; cell_type?: string; at_index?: number;
+            const { path, cwd, source, cell_type, at_index } = body as {
+                path: string; cwd?: string; source: string; cell_type?: string; at_index?: number;
             };
-            return insertAndExecute(path, source, cell_type ?? 'code', at_index ?? -1, maxQueue);
+            const doc = await resolveOrOpenNotebook(path, cwd);
+            return insertAndExecute(doc.uri.fsPath, source, cell_type ?? 'code', at_index ?? -1, maxQueue);
         },
 
         // --- Lifecycle ---
         'POST /api/notebook/execute-all': async (body) => {
-            const { path } = body as { path: string };
-            const doc = resolveNotebook(path);
+            const { path, cwd } = body as { path: string; cwd?: string };
+            const doc = await resolveOrOpenNotebook(path, cwd);
             await vscode.window.showNotebookDocument(doc);
             await vscode.commands.executeCommand('notebook.execute');
             // Collect results
@@ -400,8 +470,8 @@ export function buildRoutes(maxQueue: number): Routes {
         },
 
         'POST /api/notebook/restart-kernel': async (body) => {
-            const { path } = body as { path: string };
-            const doc = resolveNotebook(path);
+            const { path, cwd } = body as { path: string; cwd?: string };
+            const doc = await resolveOrOpenNotebook(path, cwd);
             const focus = captureEditorFocus();
             try {
                 await ensureNotebookEditor(doc, { preserveFocus: true, preview: false });
@@ -415,8 +485,8 @@ export function buildRoutes(maxQueue: number): Routes {
         },
 
         'POST /api/notebook/restart-and-run-all': async (body) => {
-            const { path } = body as { path: string };
-            const doc = resolveNotebook(path);
+            const { path, cwd } = body as { path: string; cwd?: string };
+            const doc = await resolveOrOpenNotebook(path, cwd);
             const focus = captureEditorFocus();
             try {
                 await ensureNotebookEditor(doc, { preserveFocus: true, preview: false });
@@ -444,10 +514,10 @@ export function buildRoutes(maxQueue: number): Routes {
         },
 
         'POST /api/notebook/select-kernel': async (body) => {
-            const { path: relPath, kernel_id, extension: kernelExt } = body as {
-                path: string; kernel_id?: string; extension?: string;
+            const { path: relPath, cwd, kernel_id, extension: kernelExt } = body as {
+                path: string; cwd?: string; kernel_id?: string; extension?: string;
             };
-            const doc = resolveNotebook(relPath);
+            const doc = await resolveOrOpenNotebook(relPath, cwd);
 
             if (kernel_id) {
                 const editor = await ensureNotebookEditor(doc, {
@@ -578,19 +648,19 @@ export function buildRoutes(maxQueue: number): Routes {
 
         'POST /api/notebook/open': async (body) => {
             const { path: relPath, cwd } = body as { path: string; cwd?: string };
-            const workspace = resolveWorkspaceDir(cwd);
-            if (!workspace) { throw new Error('No workspace folder open and no cwd provided'); }
-            const uri = vscode.Uri.file(path.resolve(workspace, relPath));
+            const uri = resolveNotebookUri(relPath, cwd);
+            const doc = await resolveOrOpenNotebook(relPath, cwd);
             await vscode.commands.executeCommand('vscode.openWith', uri, 'jupyter-notebook');
+            await ensureNotebookEditor(doc, { preserveFocus: false, preview: false });
             return { status: 'ok', path: relPath };
         },
 
         // --- Prompts ---
         'POST /api/notebook/prompt': async (body) => {
-            const { path, instruction, at_index } = body as {
-                path: string; instruction: string; at_index?: number;
+            const { path, cwd, instruction, at_index } = body as {
+                path: string; cwd?: string; instruction: string; at_index?: number;
             };
-            const doc = resolveNotebook(path);
+            const doc = await resolveOrOpenNotebook(path, cwd);
             const index = (at_index === undefined || at_index === -1) ? doc.cellCount : at_index;
             const cellId = newCellId();
             const cellData = new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, instruction, 'markdown');
@@ -603,10 +673,10 @@ export function buildRoutes(maxQueue: number): Routes {
         },
 
         'POST /api/notebook/prompt-status': async (body) => {
-            const { path, cell_id, status: promptStatus } = body as {
-                path: string; cell_id: string; status: string;
+            const { path, cwd, cell_id, status: promptStatus } = body as {
+                path: string; cwd?: string; cell_id: string; status: string;
             };
-            const doc = resolveNotebook(path);
+            const doc = await resolveOrOpenNotebook(path, cwd);
             const idx = resolveCell(doc, { cell_id });
             const cell = doc.cellAt(idx);
             const meta = { ...(cell.metadata ?? {}) } as Record<string, any>;
