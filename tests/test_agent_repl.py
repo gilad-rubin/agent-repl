@@ -19,16 +19,87 @@ class TestBridgeDiscovery(unittest.TestCase):
     """BridgeClient.discover() scans runtime dir for connection files."""
 
     def test_discover_finds_healthy_bridge(self):
-        info = json.dumps({"port": 12345, "token": "abc"})
+        info = json.dumps({
+            "port": 12345,
+            "token": "abc",
+            "workspace_folders": ["/workspace"],
+        })
         with (
             mock.patch("agent_repl.client.glob.glob", return_value=["/tmp/agent-repl-bridge-1.json"]),
             mock.patch("agent_repl.client.os.path.getmtime", return_value=1.0),
+            mock.patch("agent_repl.client.os.getcwd", return_value="/workspace"),
             mock.patch("agent_repl.client.Path.read_text", return_value=info),
             mock.patch.object(BridgeClient, "health", return_value={"status": "ok"}),
         ):
             client = BridgeClient.discover()
         self.assertEqual(client.base_url, "http://127.0.0.1:12345")
         self.assertEqual(client.token, "abc")
+
+    def test_discover_matches_workspace_hint(self):
+        infos = [
+            json.dumps({
+                "port": 11111,
+                "token": "nope",
+                "workspace_folders": ["/other"],
+            }),
+            json.dumps({
+                "port": 22222,
+                "token": "yes",
+                "workspace_folders": ["/project"],
+            }),
+        ]
+        with (
+            mock.patch("agent_repl.client.glob.glob", return_value=["/tmp/1.json", "/tmp/2.json"]),
+            mock.patch("agent_repl.client.os.path.getmtime", side_effect=[2.0, 1.0]),
+            mock.patch("agent_repl.client.os.getcwd", return_value="/outside"),
+            mock.patch("agent_repl.client.Path.read_text", side_effect=infos),
+            mock.patch.object(BridgeClient, "health", return_value={"status": "ok", "open_notebooks": []}),
+        ):
+            client = BridgeClient.discover(workspace_hint="/project/notebooks/demo.ipynb")
+        self.assertEqual(client.base_url, "http://127.0.0.1:22222")
+        self.assertEqual(client.token, "yes")
+
+    def test_discover_raises_when_no_workspace_matches(self):
+        infos = [
+            json.dumps({
+                "port": 11111,
+                "token": "a",
+                "workspace_folders": ["/other"],
+            }),
+            json.dumps({
+                "port": 22222,
+                "token": "b",
+                "workspace_folders": ["/elsewhere"],
+            }),
+        ]
+        with (
+            mock.patch("agent_repl.client.glob.glob", return_value=["/tmp/1.json", "/tmp/2.json"]),
+            mock.patch("agent_repl.client.os.path.getmtime", side_effect=[2.0, 1.0]),
+            mock.patch("agent_repl.client.os.getcwd", return_value="/workspace"),
+            mock.patch("agent_repl.client.Path.read_text", side_effect=infos),
+            mock.patch.object(BridgeClient, "health", return_value={"status": "ok", "open_notebooks": []}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "No running agent-repl bridge matched '/workspace' or cwd '/workspace'"):
+                BridgeClient.discover()
+
+    def test_discover_matches_open_notebook_hint(self):
+        info = json.dumps({
+            "port": 12345,
+            "token": "abc",
+            "workspace_folders": ["/other"],
+        })
+        with (
+            mock.patch("agent_repl.client.glob.glob", return_value=["/tmp/agent-repl-bridge-1.json"]),
+            mock.patch("agent_repl.client.os.path.getmtime", return_value=1.0),
+            mock.patch("agent_repl.client.os.getcwd", return_value="/workspace"),
+            mock.patch("agent_repl.client.Path.read_text", return_value=info),
+            mock.patch.object(BridgeClient, "health", return_value={
+                "status": "ok",
+                "open_notebooks": ["/tmp/demo.ipynb"],
+            }),
+        ):
+            client = BridgeClient.discover(workspace_hint="/tmp/demo.ipynb")
+        self.assertEqual(client.base_url, "http://127.0.0.1:12345")
 
     def test_discover_raises_when_no_bridge(self):
         with mock.patch("agent_repl.client.glob.glob", return_value=[]):

@@ -16,7 +16,9 @@ VS Code Extension (bridge server)
 Agent (CLI)
 ```
 
-The extension auto-starts when you open a `.ipynb` file and writes a connection file so the CLI can discover it.
+The extension auto-starts when VS Code finishes loading the workspace and writes a connection file so the CLI can discover it.
+The CLI now requires a workspace match instead of silently falling back to a different window's bridge.
+By default, the bridge only operates on notebooks inside its own workspace; it will reject external notebook paths instead of opening them in that window.
 
 ## Quick Start
 

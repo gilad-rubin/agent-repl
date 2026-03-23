@@ -25,14 +25,15 @@ class BridgeClient:
     # ------------------------------------------------------------------
 
     @classmethod
-    def discover(cls) -> "BridgeClient":
-        """Scan runtime dir for connection files, prefer the bridge whose workspace matches cwd."""
+    def discover(cls, workspace_hint: str | None = None) -> "BridgeClient":
+        """Scan runtime dir for connection files and require a workspace match."""
         runtime = _runtime_dir()
         pattern = os.path.join(runtime, "agent-repl-bridge-*.json")
         files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
 
         cwd = os.path.realpath(os.getcwd())
-        live: list[tuple[dict, "BridgeClient"]] = []
+        workspace_target = _resolve_workspace_hint(workspace_hint, cwd)
+        live: list[tuple[dict, "BridgeClient", dict[str, Any]]] = []
 
         for fpath in files:
             try:
@@ -47,23 +48,30 @@ class BridgeClient:
                     continue
                 url = f"http://127.0.0.1:{info['port']}"
                 client = cls(url, info["token"])
-                client.health()  # ping
-                live.append((info, client))
+                health = client.health()  # ping
+                live.append((info, client, health))
             except Exception:
                 continue
 
         if not live:
             raise RuntimeError("No running agent-repl bridge found")
 
-        # Prefer the bridge whose workspace_folders contains cwd
-        for info, client in live:
-            for folder in info.get("workspace_folders", []):
-                real_folder = os.path.realpath(folder)
-                if cwd == real_folder or cwd.startswith(real_folder + os.sep):
-                    return client
+        # Require a bridge whose workspace_folders contains the target path.
+        targets = [workspace_target]
+        if workspace_target != cwd:
+            targets.append(cwd)
 
-        # No workspace match — fall back to most recent
-        return live[0][1]
+        for target in targets:
+            for info, client, health in live:
+                for folder in info.get("workspace_folders", []):
+                    real_folder = os.path.realpath(folder)
+                    if _path_within(target, real_folder):
+                        return client
+                for notebook_path in health.get("open_notebooks", []):
+                    if os.path.realpath(notebook_path) == target:
+                        return client
+
+        raise RuntimeError(_workspace_mismatch_message(workspace_target, cwd, live))
 
     # ------------------------------------------------------------------
     # Endpoints
@@ -209,3 +217,34 @@ def _pid_alive(pid: int) -> bool:
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def _resolve_workspace_hint(workspace_hint: str | None, cwd: str) -> str:
+    if not workspace_hint:
+        return cwd
+    if os.path.isabs(workspace_hint):
+        return os.path.realpath(workspace_hint)
+    return os.path.realpath(os.path.abspath(os.path.join(cwd, workspace_hint)))
+
+
+def _path_within(target: str, folder: str) -> bool:
+    return target == folder or target.startswith(folder + os.sep)
+
+
+def _workspace_mismatch_message(
+    workspace_target: str,
+    cwd: str,
+    live: list[tuple[dict[str, Any], BridgeClient, dict[str, Any]]],
+) -> str:
+    active = []
+    for info, _client, health in live:
+        folders = info.get("workspace_folders") or ["<no workspace>"]
+        open_notebooks = health.get("open_notebooks") or []
+        extra = f"; open notebooks: {', '.join(open_notebooks)}" if open_notebooks else ""
+        active.append(f"port {info.get('port')}: {', '.join(folders)}{extra}")
+    joined = "; ".join(active)
+    return (
+        f"No running agent-repl bridge matched '{workspace_target}' or cwd '{cwd}'. "
+        f"Active bridges: {joined}. "
+        "Open this workspace in VS Code and wait for Agent REPL to start, or run 'Agent REPL: Start Bridge' in that window."
+    )

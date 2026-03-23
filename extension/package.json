@@ -10,6 +10,7 @@
   },
   "categories": ["Notebooks", "Other"],
   "activationEvents": [
+    "onStartupFinished",
     "onNotebook:jupyter-notebook",
     "workspaceContains:**/*.ipynb"
   ],
@@ -29,7 +30,7 @@
       "title": "Agent REPL",
       "properties": {
         "agent-repl.port": { "type": "number", "default": 0, "description": "Fixed port (0 = auto)" },
-        "agent-repl.autoStart": { "type": "boolean", "default": true, "description": "Start bridge on notebook open" },
+        "agent-repl.autoStart": { "type": "boolean", "default": true, "description": "Start bridge when the workspace loads" },
         "agent-repl.maxQueueSize": { "type": "number", "default": 20, "description": "Max queued executions" },
         "agent-repl.executionTimeout": { "type": "number", "default": 300, "description": "Execution timeout (seconds)" },
         "agent-repl.executionMode": {

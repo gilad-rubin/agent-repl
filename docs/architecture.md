@@ -53,7 +53,7 @@ The CLI is a thin HTTP client. It:
 
 1. Scans `~/Library/Jupyter/runtime/` for connection files
 2. Pings each bridge's health endpoint
-3. Sends commands as HTTP requests to the first live bridge, including the CLI's current working directory for notebook path resolution
+3. Requires a workspace or open-notebook match before sending commands, including the CLI's current working directory for notebook path resolution
 
 Two files:
 
@@ -77,7 +77,7 @@ The extension writes a JSON connection file on startup:
 
 Location: `~/Library/Jupyter/runtime/agent-repl-bridge-<pid>.json` (macOS) or `~/.local/share/jupyter/runtime/` (Linux).
 
-The CLI scans this directory, sorts by modification time (newest first), and pings `GET /api/health` on each. The first healthy bridge wins.
+The CLI scans this directory, sorts by modification time (newest first), and pings `GET /api/health` on each. It only selects a bridge whose workspace matches the current command context (or already has the target notebook open), so it does not silently fall back to a different VS Code window.
 
 ## API Endpoints
 
@@ -131,6 +131,7 @@ The extension maintains a per-notebook execution queue:
 - `GET /api/notebook/contents` can read a closed `.ipynb` directly from disk
 - `GET /api/notebook/status` returns `kernel_state: "not_open"` with empty queues when the notebook is closed
 - Edit, prompt, kernel, and execution routes automatically open the notebook document first when notebook APIs require it
+- Notebook paths are restricted to the active workspace by default; the bridge rejects external notebook paths instead of opening them in another window
 
 ## Execution Modes
 

@@ -97,8 +97,11 @@ function resolveWorkspaceDir(cwd?: string): string | null {
                 return folder.uri.fsPath;
             }
         }
-        // cwd doesn't match any workspace folder — use it directly
-        return cwd;
+        // Only fall back to cwd when there is no workspace open at all.
+        if (folders.length === 0) {
+            return cwd;
+        }
+        return null;
     }
     return folders[0]?.uri.fsPath ?? null;
 }
@@ -214,6 +217,7 @@ function rawCellId(metadata: Record<string, any> | undefined, fallback: string):
 }
 
 async function readNotebookContents(relPath: string, cwd?: string): Promise<{ path: string; cells: any[] }> {
+    resolveNotebookUri(relPath, cwd);
     const openDoc = findOpenNotebook(relPath, cwd);
     if (openDoc) {
         await ensureIds(openDoc);
@@ -274,6 +278,101 @@ async function readNotebookContents(relPath: string, cwd?: string): Promise<{ pa
         });
     }
     return { path: relPath, cells };
+}
+
+function findKernelRecord(discovery: KernelDiscovery, kernelId: string): KernelRecord | undefined {
+    return discovery.kernels.find(kernel =>
+        kernel.id === kernelId ||
+        kernel.kernelspec_name === kernelId ||
+        samePath(kernel.python, kernelId)
+    );
+}
+
+function kernelRequestCandidates(kernel: KernelRecord): Array<{ id?: string; path?: string }> {
+    const candidates: Array<{ id?: string; path?: string }> = [];
+    const seen = new Set<string>();
+    const push = (id?: string | null, pythonPath?: string | null) => {
+        const payload: { id?: string; path?: string } = {};
+        if (id) { payload.id = id.toLowerCase(); }
+        if (pythonPath) { payload.path = pythonPath; }
+        const key = JSON.stringify(payload);
+        if ((payload.id || payload.path) && !seen.has(key)) {
+            seen.add(key);
+            candidates.push(payload);
+        }
+    };
+
+    push(kernel.kernelspec_name ?? kernel.id, kernel.python);
+    push(kernel.id, kernel.python);
+    push(kernel.kernelspec_name, undefined);
+    return candidates;
+}
+
+function attachedKernelMatches(kernel: any, requested?: KernelRecord): boolean {
+    if (!kernel) { return false; }
+    if (!requested) { return true; }
+
+    const metadata = kernel?.kernelConnectionMetadata ?? {};
+    const controllerId = `${metadata?.id ?? ''}`.toLowerCase();
+    const kernelspecName = `${metadata?.kernelSpec?.name ?? metadata?.kernelSpec?.specFile ?? ''}`.toLowerCase();
+    const interpreterPath = metadata?.interpreter?.uri?.fsPath ?? metadata?.interpreter?.path;
+
+    return (
+        controllerId === requested.id.toLowerCase() ||
+        (requested.kernelspec_name ? controllerId === requested.kernelspec_name.toLowerCase() : false) ||
+        (requested.kernelspec_name ? kernelspecName.includes(requested.kernelspec_name.toLowerCase()) : false) ||
+        samePath(interpreterPath, requested.python)
+    );
+}
+
+async function currentAttachedKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
+    const api = await getJupyterApi();
+    const getKernel = api?.kernels?.getKernel;
+    if (typeof getKernel !== 'function') { return undefined; }
+
+    try {
+        return await getKernel(doc.uri);
+    } catch {
+        return undefined;
+    }
+}
+
+async function waitForKernelAttachment(
+    doc: vscode.NotebookDocument,
+    requested?: KernelRecord,
+    timeoutMs: number = 4000
+): Promise<any | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const kernel = await currentAttachedKernel(doc);
+        if (attachedKernelMatches(kernel, requested)) {
+            return kernel;
+        }
+        await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    return undefined;
+}
+
+async function attachKernelQuietly(
+    doc: vscode.NotebookDocument,
+    kernel: KernelRecord
+): Promise<boolean> {
+    const api = await getJupyterApi();
+    if (typeof api?.openNotebook !== 'function') { return false; }
+
+    for (const request of kernelRequestCandidates(kernel)) {
+        try {
+            await api.openNotebook(doc.uri, request);
+        } catch {
+            continue;
+        }
+
+        if (await waitForKernelAttachment(doc, kernel)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 export function buildRoutes(maxQueue: number): Routes {
@@ -399,6 +498,7 @@ export function buildRoutes(maxQueue: number): Routes {
             const relPath = q.get('path');
             const cwd = q.get('cwd') ?? undefined;
             if (!relPath) { throw new Error('Missing ?path='); }
+            resolveNotebookUri(relPath, cwd);
             const doc = findOpenNotebook(relPath, cwd);
             if (!doc) {
                 return {
@@ -518,18 +618,52 @@ export function buildRoutes(maxQueue: number): Routes {
                 path: string; cwd?: string; kernel_id?: string; extension?: string;
             };
             const doc = await resolveOrOpenNotebook(relPath, cwd);
+            const discovery = discoverKernels(resolveWorkspaceDir(cwd));
 
             if (kernel_id) {
-                const editor = await ensureNotebookEditor(doc, {
-                    preserveFocus: true,
-                    preview: false,
-                });
-                await vscode.commands.executeCommand('notebook.selectKernel', {
-                    id: kernel_id,
-                    extension: kernelExt ?? 'ms-toolsai.jupyter',
-                    notebookEditor: editor,
-                });
-                return { status: 'ok', path: relPath, kernel_id, method: 'programmatic' };
+                const requested = findKernelRecord(discovery, kernel_id);
+                if (requested) {
+                    if (await waitForKernelAttachment(doc, requested, 300)) {
+                        return { status: 'ok', path: relPath, kernel_id, method: 'already-selected' };
+                    }
+
+                    if (await attachKernelQuietly(doc, requested)) {
+                        return { status: 'ok', path: relPath, kernel_id, method: 'jupyter.openNotebook' };
+                    }
+
+                    return {
+                        status: 'selection_failed',
+                        path: relPath,
+                        kernel_id,
+                        ...kernelSelectionGuidance(relPath, discovery, 'failed'),
+                    };
+                }
+
+                const focus = captureEditorFocus();
+                try {
+                    const editor = await ensureNotebookEditor(doc, {
+                        preserveFocus: true,
+                        preview: false,
+                    });
+                    await vscode.commands.executeCommand('notebook.selectKernel', {
+                        id: kernel_id,
+                        extension: kernelExt ?? 'ms-toolsai.jupyter',
+                        notebookEditor: editor,
+                    });
+                } finally {
+                    await restoreEditorFocus(focus);
+                }
+
+                if (await waitForKernelAttachment(doc, undefined, 2000)) {
+                    return { status: 'ok', path: relPath, kernel_id, method: 'notebook.selectKernel' };
+                }
+
+                return {
+                    status: 'selection_failed',
+                    path: relPath,
+                    kernel_id,
+                    ...kernelSelectionGuidance(relPath, discovery, 'failed'),
+                };
             }
 
             await vscode.window.showNotebookDocument(doc);
@@ -584,59 +718,44 @@ export function buildRoutes(maxQueue: number): Routes {
             const hasPreferredKernel = !!discovery.preferred_kernel?.python;
 
             let kernelStatus: string;
+            let selectedKernel: KernelRecord | null = null;
             try {
-                await ensureNotebookEditor(doc, {
-                    preserveFocus: true,
-                    preview: false,
-                });
-
                 if (kernel_id) {
-                    // Explicit kernel_id: use notebook.selectKernel with the Jupyter extension's controller ID
-                    await new Promise(r => setTimeout(r, 800));
-                    try {
-                        const editor = findEditor(doc);
-                        await vscode.commands.executeCommand('notebook.selectKernel', {
-                            id: kernel_id,
-                            extension: 'ms-toolsai.jupyter',
-                            notebookEditor: editor,
-                        });
-                        kernelStatus = 'selected';
-                    } catch {
+                    const requested = findKernelRecord(discovery, kernel_id);
+                    if (requested) {
+                        if (await attachKernelQuietly(doc, requested)) {
+                            selectedKernel = requested;
+                            kernelStatus = 'selected';
+                        } else {
+                            kernelStatus = 'selection_failed';
+                        }
+                    } else {
                         kernelStatus = 'selection_failed';
                     }
-                } else if (hasPreferredKernel) {
-                    // Auto-select .venv kernel via Jupyter extension's openNotebook API
-                    await new Promise(r => setTimeout(r, 800));
-                    try {
-                        const api = await getJupyterApi();
-                        if (api) {
-                            if (api.openNotebook) {
-                                await api.openNotebook(uri, {
-                                    id: discovery.preferred_kernel?.id.toLowerCase(),
-                                    path: discovery.preferred_kernel?.python,
-                                });
-                                kernelStatus = 'selected';
-                            } else {
-                                kernelStatus = 'needs_selection';
-                            }
-                        } else {
-                            kernelStatus = 'needs_selection';
-                        }
-                    } catch {
+                } else if (hasPreferredKernel && discovery.preferred_kernel) {
+                    if (await attachKernelQuietly(doc, discovery.preferred_kernel)) {
+                        selectedKernel = discovery.preferred_kernel;
+                        kernelStatus = 'selected';
+                    } else {
                         kernelStatus = 'selection_failed';
                     }
                 } else {
                     kernelStatus = 'needs_selection';
                 }
+
+                await ensureNotebookEditor(doc, {
+                    preserveFocus: true,
+                    preview: false,
+                });
             } finally {
                 await restoreEditorFocus(focus);
             }
 
             const response: Record<string, unknown> = { status: 'ok', path: relPath, kernel_status: kernelStatus };
 
-            if (kernelStatus === 'selected' && discovery.preferred_kernel) {
-                response.kernel = discovery.preferred_kernel;
-                response.message = `Selected workspace .venv kernel: ${discovery.preferred_kernel.label}`;
+            if (kernelStatus === 'selected' && selectedKernel) {
+                response.kernel = selectedKernel;
+                response.message = `Selected kernel: ${selectedKernel.label}`;
             } else if (kernelStatus === 'needs_selection') {
                 Object.assign(response, kernelSelectionGuidance(relPath, discovery, 'missing'));
             } else if (kernelStatus === 'selection_failed') {

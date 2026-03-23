@@ -23,6 +23,7 @@ agent-repl cat demo.ipynb
 ```
 
 Each cell in the response includes: `index`, `cell_id`, `cell_type`, `source`, and optionally `outputs` and `execution_count`. Cells with prompt metadata include an `agent_repl` object with `type` and `status`.
+Paths outside the active workspace are rejected.
 
 ---
 
@@ -38,7 +39,7 @@ agent-repl status PATH [--pretty]
 agent-repl status demo.ipynb
 ```
 
-Returns kernel state (idle/busy), currently running cells, and queued cells with their owner (human/agent).
+Returns kernel state (idle/busy), currently running cells, and queued cells with their owner (human/agent). Paths outside the active workspace are rejected.
 
 ---
 
@@ -260,13 +261,13 @@ agent-repl kernels [--pretty]
 agent-repl kernels
 ```
 
-Returns `kernels` (array of kernel records with `id`, `label`, `type`, `python` path), `preferred_kernel` (workspace `.venv` if found), and `workspace` path.
+Returns `kernels` (array of kernel records with `id`, `label`, `type`, `python` path), `preferred_kernel` (workspace `.venv` if found), and `workspace` path. Use the returned `id` value with `select-kernel --kernel-id`.
 
 ---
 
 ## select-kernel
 
-Select a kernel for a notebook. With `--kernel-id`, selects programmatically. Without it, opens VS Code's interactive kernel picker.
+Select a kernel for a notebook. With `--kernel-id`, selects programmatically using one of the identifiers returned by `agent-repl kernels`. Without it, opens VS Code's interactive kernel picker.
 
 ```
 agent-repl select-kernel PATH [--kernel-id ID] [--extension EXT] [--pretty]
@@ -279,12 +280,14 @@ agent-repl select-kernel PATH [--kernel-id ID] [--extension EXT] [--pretty]
 | `--extension` | `ms-toolsai.jupyter` | Extension providing the kernel controller |
 
 ```bash
-# Programmatic selection
+# Programmatic selection using a kernel identifier from `agent-repl kernels`
 agent-repl select-kernel demo.ipynb --kernel-id /path/to/.venv/bin/python
 
 # Interactive picker
 agent-repl select-kernel demo.ipynb
 ```
+
+If programmatic selection cannot be completed quietly, the command returns `status: "selection_failed"` with guidance instead of silently dropping into the interactive picker.
 
 ---
 

@@ -8,7 +8,10 @@ import * as fs from 'fs';
  * Strict matching only — no basename fallback.
  */
 export function resolveNotebook(relativePath: string, cwd?: string): vscode.NotebookDocument {
-    const doc = findOpenNotebook(relativePath, cwd);
+    const expected = normalizeFsPath(resolveNotebookUri(relativePath, cwd).fsPath);
+    const doc = vscode.workspace.notebookDocuments.find(candidate =>
+        normalizeFsPath(candidate.uri.fsPath) === expected
+    );
     if (doc) { return doc; }
 
     const err = new Error(
@@ -49,7 +52,9 @@ export function resolveNotebookUri(relativePath: string, cwd?: string): vscode.U
     }
 
     const existing = candidates.find(candidate => fs.existsSync(candidate));
-    return vscode.Uri.file(existing ?? candidates[0]);
+    const resolved = existing ?? candidates[0];
+    assertWorkspaceScope(resolved, cwd, relativePath);
+    return vscode.Uri.file(resolved);
 }
 
 /** Find the visible NotebookEditor for a document. */
@@ -166,6 +171,34 @@ function notebookPathCandidates(relativePath: string, cwd?: string): string[] {
     }
 
     return candidates;
+}
+
+function assertWorkspaceScope(resolvedPath: string, cwd: string | undefined, originalPath: string): void {
+    const roots = allowedRoots(cwd);
+    if (!roots.length) { return; }
+
+    const normalizedPath = normalizeFsPath(resolvedPath);
+    if (roots.some(root => pathWithin(normalizedPath, normalizeFsPath(root)))) {
+        return;
+    }
+
+    const err = new Error(
+        `Notebook '${originalPath}' is outside the active workspace. External notebook access is disabled.`
+    ) as any;
+    err.statusCode = 403;
+    throw err;
+}
+
+function allowedRoots(cwd?: string): string[] {
+    const folders = (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath);
+    if (folders.length > 0) {
+        return folders;
+    }
+    return cwd ? [cwd] : [];
+}
+
+function pathWithin(target: string, root: string): boolean {
+    return target === root || target.startsWith(root + path.sep);
 }
 
 function normalizeFsPath(p: string): string {

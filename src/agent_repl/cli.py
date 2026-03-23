@@ -13,8 +13,8 @@ def _out(data: Any, pretty: bool = False) -> None:
     print(json.dumps(data, indent=2 if pretty else None))
 
 
-def _client() -> BridgeClient:
-    return BridgeClient.discover()
+def _client(workspace_hint: str | None = None) -> BridgeClient:
+    return BridgeClient.discover(workspace_hint=workspace_hint)
 
 
 # ------------------------------------------------------------------
@@ -22,7 +22,7 @@ def _client() -> BridgeClient:
 # ------------------------------------------------------------------
 
 def cmd_cat(args: argparse.Namespace) -> int:
-    result = _client().contents(args.path)
+    result = _client(args.path).contents(args.path)
     include_outputs = not getattr(args, "no_outputs", False)
     # Clean up cells — only show what the agent needs
     clean_cells = []
@@ -61,13 +61,13 @@ def cmd_reload(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    result = _client().status(args.path)
+    result = _client(args.path).status(args.path)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_edit(args: argparse.Namespace) -> int:
-    client = _client()
+    client = _client(args.path)
     op: dict[str, Any] = {"op": args.edit_command}
 
     if args.edit_command == "replace-source":
@@ -105,7 +105,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
 
 def cmd_exec(args: argparse.Namespace) -> int:
-    client = _client()
+    client = _client(args.path)
     wait = not getattr(args, "no_wait", False)
     timeout = getattr(args, "timeout", 30)
     if args.code:
@@ -124,25 +124,25 @@ def cmd_ix(args: argparse.Namespace) -> int:
     wait = not getattr(args, "no_wait", False)
     timeout = getattr(args, "timeout", 30)
     at_index = getattr(args, "at_index", -1)
-    result = _client().insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
+    result = _client(args.path).insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_run_all(args: argparse.Namespace) -> int:
-    result = _client().execute_all(args.path)
+    result = _client(args.path).execute_all(args.path)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_restart(args: argparse.Namespace) -> int:
-    result = _client().restart_kernel(args.path)
+    result = _client(args.path).restart_kernel(args.path)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_restart_run_all(args: argparse.Namespace) -> int:
-    result = _client().restart_and_run_all(args.path)
+    result = _client(args.path).restart_and_run_all(args.path)
     _out(result, args.pretty)
     return 0
 
@@ -152,7 +152,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     if args.cells_json:
         cells = json.loads(args.cells_json)
     kernel_id = getattr(args, "kernel", None)
-    result = _client().create(args.path, cells=cells, kernel_id=kernel_id)
+    result = _client(args.path).create(args.path, cells=cells, kernel_id=kernel_id)
     _out(result, args.pretty)
     return 0
 
@@ -166,13 +166,13 @@ def cmd_kernels(args: argparse.Namespace) -> int:
 def cmd_select_kernel(args: argparse.Namespace) -> int:
     kernel_id = getattr(args, "kernel_id", None)
     extension = getattr(args, "extension", None)
-    result = _client().select_kernel(args.path, kernel_id=kernel_id, extension=extension)
+    result = _client(args.path).select_kernel(args.path, kernel_id=kernel_id, extension=extension)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_prompts(args: argparse.Namespace) -> int:
-    result = _client().contents(args.path)
+    result = _client(args.path).contents(args.path)
     cells = result.get("cells", [])
     prompts = [
         c for c in cells
@@ -183,7 +183,7 @@ def cmd_prompts(args: argparse.Namespace) -> int:
 
 
 def cmd_respond(args: argparse.Namespace) -> int:
-    client = _client()
+    client = _client(args.path)
     source = _read_source(args)
     # Mark prompt as in-progress
     client.prompt_status(args.path, args.to, "in-progress")
