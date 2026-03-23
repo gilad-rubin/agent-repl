@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { resolveCell, getCellId } from '../notebook/identity';
-import { JupyterOutput, toJupyter, stripForAgent, toVSCode } from '../notebook/outputs';
+import { AGENT_REPL_OUTPUT_METADATA_KEY, JupyterOutput, toJupyter, stripForAgent, toVSCode } from '../notebook/outputs';
 import { resolveNotebook, ensureNotebookEditor, captureEditorFocus, restoreEditorFocus } from '../notebook/resolver';
 
 let executionCounter = 0;
@@ -539,7 +539,7 @@ async function runCellViaJupyterKernelApi(
         return { fallbackReason: 'no-private-jupyter-session; no-jupyter-kernel-api' };
     }
 
-    const outputs: vscode.NotebookCellOutput[] = [];
+    let outputs: vscode.NotebookCellOutput[] = [];
     let started = false;
     const startTime = Date.now();
 
@@ -553,7 +553,7 @@ async function runCellViaJupyterKernelApi(
         for await (const output of kernel.executeCode(source)) {
             started = true;
             if (!isNotebookOutput(output)) { continue; }
-            outputs.push(output);
+            outputs = applyNotebookOutput(outputs, output);
             await replaceCellState(doc, cellIndex, outputs, 'running', {
                 success: undefined,
                 timing: { startTime, endTime: Date.now() },
@@ -591,7 +591,7 @@ async function runCellViaJupyterKernelApi(
                 err instanceof Error ? err : new Error(err?.message ?? String(err))
             )
         ]);
-        outputs.push(errorOutput);
+        outputs = [...outputs, errorOutput];
         await replaceCellState(doc, cellIndex, outputs, 'error');
         throw err;
     } finally {
@@ -611,7 +611,8 @@ async function runCellViaPrivateJupyterSession(
 
     const startTime = Date.now();
     const source = doc.cellAt(cellIndex).document.getText();
-    const rawOutputs: JupyterOutput[] = [];
+    let rawOutputs: JupyterOutput[] = [];
+    let clearOutputPending = false;
     let executionCount: number | null = null;
     let success = true;
 
@@ -632,7 +633,18 @@ async function runCellViaPrivateJupyterSession(
         future.onIOPub = async (msg: any) => {
             const output = iopubMessageToJupyterOutput(msg);
             if (!output) { return; }
-            rawOutputs.push(output);
+            if (output.output_type === 'clear_output') {
+                clearOutputPending = output.wait === true;
+                if (!clearOutputPending) {
+                    rawOutputs = [];
+                }
+            } else {
+                if (clearOutputPending) {
+                    rawOutputs = [];
+                    clearOutputPending = false;
+                }
+                rawOutputs = applyJupyterOutput(rawOutputs, output);
+            }
             if (output.execution_count != null) {
                 executionCount = output.execution_count;
             }
@@ -666,6 +678,10 @@ async function runCellViaPrivateJupyterSession(
         if (typeof future.dispose === 'function') {
             future.dispose();
         }
+        if (clearOutputPending) {
+            rawOutputs = [];
+            clearOutputPending = false;
+        }
 
         await replaceCellState(
             doc,
@@ -696,6 +712,10 @@ async function runCellViaPrivateJupyterSession(
             kernelApiDisabled = true;
             await clearAgentRunState(doc, cellIndex);
             return { fallbackReason: message };
+        }
+        if (clearOutputPending) {
+            rawOutputs = [];
+            clearOutputPending = false;
         }
 
         rawOutputs.push({
@@ -858,7 +878,7 @@ function isNotebookOutput(value: any): value is vscode.NotebookCellOutput {
     return !!value && Array.isArray(value.items);
 }
 
-function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
+export function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
     const type = msg?.header?.msg_type;
     const content = msg?.content ?? {};
     if (!type) { return undefined; }
@@ -875,6 +895,8 @@ function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
         return {
             output_type: 'execute_result',
             data: content.data ?? {},
+            metadata: content.metadata ?? {},
+            transient: content.transient ?? {},
             execution_count: content.execution_count,
         };
     }
@@ -883,6 +905,24 @@ function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
         return {
             output_type: 'display_data',
             data: content.data ?? {},
+            metadata: content.metadata ?? {},
+            transient: content.transient ?? {},
+        };
+    }
+
+    if (type === 'update_display_data') {
+        return {
+            output_type: 'update_display_data',
+            data: content.data ?? {},
+            metadata: content.metadata ?? {},
+            transient: content.transient ?? {},
+        };
+    }
+
+    if (type === 'clear_output') {
+        return {
+            output_type: 'clear_output',
+            wait: content.wait === true,
         };
     }
 
@@ -896,6 +936,77 @@ function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
     }
 
     return undefined;
+}
+
+export function applyNotebookOutput(
+    outputs: vscode.NotebookCellOutput[],
+    next: vscode.NotebookCellOutput
+): vscode.NotebookCellOutput[] {
+    const displayId = getNotebookDisplayId(next);
+    if (!displayId) {
+        return [...outputs, next];
+    }
+
+    const index = outputs.findIndex(output => getNotebookDisplayId(output) === displayId);
+    if (index === -1) {
+        return [...outputs, next];
+    }
+
+    const updated = outputs.slice();
+    updated[index] = next;
+    return updated;
+}
+
+export function applyJupyterOutput(outputs: JupyterOutput[], next: JupyterOutput): JupyterOutput[] {
+    if (next.output_type !== 'update_display_data') {
+        return [...outputs, next];
+    }
+
+    const displayId = getJupyterDisplayId(next);
+    const normalized: JupyterOutput = {
+        ...next,
+        output_type: 'display_data',
+    };
+    if (!displayId) {
+        return [...outputs, normalized];
+    }
+
+    const index = outputs.findIndex(output => getJupyterDisplayId(output) === displayId);
+    if (index === -1) {
+        return [...outputs, normalized];
+    }
+
+    const existing = outputs[index];
+    const updated = outputs.slice();
+    updated[index] = {
+        ...existing,
+        ...normalized,
+        output_type: existing.output_type === 'execute_result' ? 'execute_result' : normalized.output_type,
+        data: normalized.data ?? existing.data,
+        metadata: normalized.metadata ?? existing.metadata,
+        transient: { ...(existing.transient ?? {}), ...(normalized.transient ?? {}) },
+    };
+    return updated;
+}
+
+function getNotebookDisplayId(output: vscode.NotebookCellOutput | undefined): string | undefined {
+    const transient = output?.metadata?.transient;
+    if (transient && typeof transient === 'object' && typeof transient.display_id === 'string') {
+        return transient.display_id;
+    }
+
+    const internal = output?.metadata?.[AGENT_REPL_OUTPUT_METADATA_KEY];
+    if (internal && typeof internal === 'object' && typeof internal.display_id === 'string') {
+        return internal.display_id;
+    }
+
+    return undefined;
+}
+
+function getJupyterDisplayId(output: JupyterOutput | undefined): string | undefined {
+    return typeof output?.transient?.display_id === 'string'
+        ? output.transient.display_id
+        : undefined;
 }
 
 function waitForCompletion(fsPath: string, cellIndex: number, timeoutMs: number = 300_000): Promise<void> {

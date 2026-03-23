@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 
+export const AGENT_REPL_OUTPUT_METADATA_KEY = 'agent-repl';
+
 // --- Jupyter → VS Code ---
 
 export interface JupyterOutput {
@@ -7,10 +9,13 @@ export interface JupyterOutput {
     name?: string;
     text?: string;
     data?: Record<string, any>;
+    metadata?: Record<string, any>;
+    transient?: Record<string, any>;
     execution_count?: number;
     ename?: string;
     evalue?: string;
     traceback?: string[];
+    wait?: boolean;
 }
 
 export function toVSCode(output: JupyterOutput): vscode.NotebookCellOutput {
@@ -24,6 +29,7 @@ export function toVSCode(output: JupyterOutput): vscode.NotebookCellOutput {
             ]);
         }
         case 'execute_result':
+        case 'update_display_data':
         case 'display_data': {
             const items: vscode.NotebookCellOutputItem[] = [];
             for (const [mime, val] of Object.entries(output.data ?? {})) {
@@ -34,7 +40,7 @@ export function toVSCode(output: JupyterOutput): vscode.NotebookCellOutput {
                 }
             }
             if (!items.length) { items.push(vscode.NotebookCellOutputItem.text('', 'text/plain')); }
-            return new vscode.NotebookCellOutput(items);
+            return new vscode.NotebookCellOutput(items, buildNotebookOutputMetadata(output));
         }
         case 'error':
             return new vscode.NotebookCellOutput([
@@ -79,6 +85,34 @@ export function toJupyter(cell: vscode.NotebookCell): any[] {
 
 function buf(item: vscode.NotebookCellOutputItem): string {
     return Buffer.from(item.data).toString('utf-8');
+}
+
+function buildNotebookOutputMetadata(output: JupyterOutput): Record<string, any> | undefined {
+    const metadata = output.metadata && typeof output.metadata === 'object'
+        ? { ...output.metadata }
+        : {};
+    const transient = output.transient && typeof output.transient === 'object'
+        ? output.transient
+        : undefined;
+    if (transient) {
+        const existing = metadata.transient;
+        metadata.transient = existing && typeof existing === 'object'
+            ? { ...existing, ...transient }
+            : { ...transient };
+    }
+
+    const internal: Record<string, any> = {};
+    if (typeof output.transient?.display_id === 'string') {
+        internal.display_id = output.transient.display_id;
+    }
+    if (output.output_type === 'execute_result') {
+        internal.output_type = output.output_type;
+    }
+    if (Object.keys(internal).length > 0) {
+        metadata[AGENT_REPL_OUTPUT_METADATA_KEY] = internal;
+    }
+
+    return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
 // --- Strip for agent responses ---
