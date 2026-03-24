@@ -356,7 +356,7 @@ No arguments. Prints "Extension host restarting..." on success.
 Experimental workspace-scoped core daemon commands for the v2 architecture work.
 
 ```
-agent-repl v2 {start|status|stop|sessions|session-start|session-touch|session-detach|session-end|documents|document-open|document-refresh|document-rebind|runtimes|runtime-start|runtime-stop|runs|run-start|run-finish} [--workspace-root PATH] [--pretty]
+agent-repl v2 {start|attach|status|stop|sessions|session-start|session-touch|session-detach|session-end|documents|document-open|document-refresh|document-rebind|branches|branch-start|branch-finish|runtimes|runtime-start|runtime-stop|runs|run-start|run-finish} [--workspace-root PATH] [--pretty]
 ```
 
 ### v2 start
@@ -366,6 +366,15 @@ Start the experimental v2 core daemon for the current workspace and return its s
 ```bash
 agent-repl v2 start
 agent-repl v2 start --workspace-root /path/to/workspace
+```
+
+### v2 attach
+
+Ensure the v2 core daemon is running, then attach or resume a client session against that workspace authority.
+
+```bash
+agent-repl v2 attach --actor agent --client-type cli --label "worker"
+agent-repl v2 attach --actor human --client-type vscode --session-id <session-id>
 ```
 
 ### v2 status
@@ -460,6 +469,32 @@ Explicitly accept the currently observed file snapshot as the new bound baseline
 
 ```bash
 agent-repl v2 document-rebind --document-id <document-id>
+```
+
+### v2 branches
+
+List collaboration branches registered in the workspace-scoped v2 core.
+
+```bash
+agent-repl v2 branches
+```
+
+### v2 branch-start
+
+Create a collaboration branch for a canonical document with explicit ownership and purpose metadata.
+
+```bash
+agent-repl v2 branch-start --document-id <document-id> --owner-session-id <session-id> --title "Experiment"
+agent-repl v2 branch-start --document-id <document-id> --parent-branch-id <branch-id> --purpose "Review risky refactor"
+```
+
+### v2 branch-finish
+
+Move a collaboration branch to a terminal review outcome.
+
+```bash
+agent-repl v2 branch-finish --branch-id <branch-id> --status-value merged
+agent-repl v2 branch-finish --branch-id <branch-id> --status-value rejected
 ```
 
 ### v2 runtimes

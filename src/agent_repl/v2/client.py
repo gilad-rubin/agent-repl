@@ -206,6 +206,36 @@ class V2Client:
     def rebind_document(self, document_id: str) -> dict[str, Any]:
         return self._post("/api/documents/rebind", {"document_id": document_id})
 
+    def list_branches(self) -> dict[str, Any]:
+        return self._get("/api/branches")
+
+    def start_branch(
+        self,
+        *,
+        document_id: str,
+        owner_session_id: str | None = None,
+        parent_branch_id: str | None = None,
+        title: str | None = None,
+        purpose: str | None = None,
+        branch_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "branch_id": branch_id or str(uuid.uuid4()),
+            "document_id": document_id,
+        }
+        if owner_session_id:
+            body["owner_session_id"] = owner_session_id
+        if parent_branch_id:
+            body["parent_branch_id"] = parent_branch_id
+        if title:
+            body["title"] = title
+        if purpose:
+            body["purpose"] = purpose
+        return self._post("/api/branches/start", body)
+
+    def finish_branch(self, branch_id: str, *, status: str) -> dict[str, Any]:
+        return self._post("/api/branches/finish", {"branch_id": branch_id, "status": status})
+
     def list_runtimes(self) -> dict[str, Any]:
         return self._get("/api/runtimes")
 

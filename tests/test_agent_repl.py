@@ -13,7 +13,7 @@ import requests
 
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
-from agent_repl.v2.client import V2Client
+from agent_repl.v2.client import DEFAULT_START_TIMEOUT, V2Client
 from agent_repl.v2.server import CoreState
 
 
@@ -152,6 +152,35 @@ class TestV2Discovery(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "No running agent-repl v2 core daemon matched '/workspace'"):
                 V2Client.discover()
 
+    def test_attach_starts_or_reuses_daemon_then_session(self):
+        with (
+            mock.patch.object(V2Client, "start", return_value={"status": "ok", "workspace_root": "/workspace", "already_running": True}),
+            mock.patch.object(V2Client, "discover") as mock_discover,
+        ):
+            attached_client = mock.MagicMock(spec=V2Client)
+            attached_client.start_session.return_value = {
+                "status": "ok",
+                "session": {"session_id": "sess-1", "status": "attached"},
+            }
+            mock_discover.return_value = attached_client
+            result = V2Client.attach(
+                "/workspace",
+                actor="agent",
+                client="cli",
+                label="worker",
+                capabilities=["projection", "ops"],
+                session_id="sess-1",
+            )
+        self.assertTrue(result["attached"])
+        self.assertEqual(result["session"]["session_id"], "sess-1")
+        attached_client.start_session.assert_called_once_with(
+            actor="agent",
+            client="cli",
+            label="worker",
+            capabilities=["projection", "ops"],
+            session_id="sess-1",
+        )
+
 
 class TestV2CoreState(unittest.TestCase):
     """Direct tests for v2 core document/file sync behavior."""
@@ -239,6 +268,28 @@ class TestV2CoreState(unittest.TestCase):
         self.state.session_records["sess-1"].last_seen_at -= 120
         payload = self.state.list_sessions_payload()
         self.assertEqual(payload["sessions"][0]["status"], "stale")
+
+    def test_branch_can_be_owned_and_finished(self):
+        session = self.state.start_session("agent", "cli", "worker", "sess-1")
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+
+        branch_body, branch_status = self.state.start_branch(
+            branch_id="branch-1",
+            document_id=opened["document"]["document_id"],
+            owner_session_id=session["session"]["session_id"],
+            parent_branch_id=None,
+            title="Agent experiment",
+            purpose="Explore risky changes",
+        )
+        self.assertEqual(branch_status, 200)
+        branch = branch_body["branch"]
+        self.assertEqual(branch["owner_session_id"], "sess-1")
+        self.assertEqual(branch["status"], "active")
+
+        finished_body, finished_status = self.state.finish_branch("branch-1", "merged")
+        self.assertEqual(finished_status, 200)
+        self.assertEqual(finished_body["branch"]["status"], "merged")
 
 
 # ---------------------------------------------------------------------------
@@ -405,13 +456,14 @@ class TestV2Endpoints(unittest.TestCase):
         self.assertIn("/api/sessions", url)
 
     def test_start_session_calls_post(self):
-        self.client.start_session(actor="agent", client="cli", label="worker")
+        self.client.start_session(actor="agent", client="cli", label="worker", capabilities=["projection"])
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/sessions/start", url)
         payload = self.mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["actor"], "agent")
         self.assertEqual(payload["client"], "cli")
         self.assertEqual(payload["label"], "worker")
+        self.assertEqual(payload["capabilities"], ["projection"])
         self.assertIn("session_id", payload)
 
     def test_touch_session_calls_post(self):
@@ -454,6 +506,27 @@ class TestV2Endpoints(unittest.TestCase):
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/documents/rebind", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"document_id": "doc-1"})
+
+    def test_list_branches_calls_get(self):
+        self.client.list_branches()
+        url = self.mock_get.call_args[0][0]
+        self.assertIn("/api/branches", url)
+
+    def test_start_branch_calls_post(self):
+        self.client.start_branch(document_id="doc-1", owner_session_id="sess-1", title="Experiment")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/branches/start", url)
+        payload = self.mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["document_id"], "doc-1")
+        self.assertEqual(payload["owner_session_id"], "sess-1")
+        self.assertEqual(payload["title"], "Experiment")
+        self.assertIn("branch_id", payload)
+
+    def test_finish_branch_calls_post(self):
+        self.client.finish_branch("branch-1", status="merged")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/branches/finish", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"branch_id": "branch-1", "status": "merged"})
 
     def test_list_runtimes_calls_get(self):
         self.client.list_runtimes()
@@ -582,6 +655,12 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.command, "v2")
         self.assertEqual(args.v2_command, "start")
 
+    def test_v2_attach(self):
+        args = build_parser().parse_args(["v2", "attach", "--actor", "agent", "--client-type", "cli"])
+        self.assertEqual(args.v2_command, "attach")
+        self.assertEqual(args.actor, "agent")
+        self.assertEqual(args.client_type, "cli")
+
     def test_v2_status(self):
         args = build_parser().parse_args(["v2", "status", "--workspace-root", "/workspace"])
         self.assertEqual(args.v2_command, "status")
@@ -621,6 +700,16 @@ class TestParser(unittest.TestCase):
         args = build_parser().parse_args(["v2", "document-rebind", "--document-id", "doc-1"])
         self.assertEqual(args.v2_command, "document-rebind")
         self.assertEqual(args.document_id, "doc-1")
+
+    def test_v2_branch_start(self):
+        args = build_parser().parse_args(["v2", "branch-start", "--document-id", "doc-1"])
+        self.assertEqual(args.v2_command, "branch-start")
+        self.assertEqual(args.document_id, "doc-1")
+
+    def test_v2_branch_finish(self):
+        args = build_parser().parse_args(["v2", "branch-finish", "--branch-id", "branch-1", "--status-value", "merged"])
+        self.assertEqual(args.v2_command, "branch-finish")
+        self.assertEqual(args.branch_id, "branch-1")
 
     def test_v2_runtime_start(self):
         args = build_parser().parse_args(["v2", "runtime-start", "--mode", "shared"])
@@ -692,6 +781,9 @@ class TestCommands(unittest.TestCase):
         client.open_document.return_value = {"status": "ok", "document": {"document_id": "doc-1"}}
         client.refresh_document.return_value = {"status": "ok", "document": {"document_id": "doc-1", "sync_state": "external-change"}}
         client.rebind_document.return_value = {"status": "ok", "document": {"document_id": "doc-1", "sync_state": "in-sync"}}
+        client.list_branches.return_value = {"status": "ok", "branches": []}
+        client.start_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "active"}}
+        client.finish_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "merged"}}
         client.list_runtimes.return_value = {"status": "ok", "runtimes": []}
         client.start_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1"}}
         client.stop_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1", "status": "stopped"}}
@@ -835,6 +927,25 @@ class TestCommands(unittest.TestCase):
         ):
             code = main(["v2", "start"])
         self.assertEqual(code, 0)
+
+    def test_v2_attach(self):
+        client = self._mock_client()
+        with (
+            mock.patch("agent_repl.cli._client", return_value=client),
+            mock.patch("agent_repl.cli.V2Client.attach", return_value={"status": "ok", "attached": True, "session": {"session_id": "sess-1"}}) as mock_attach,
+        ):
+            code = main(["v2", "attach", "--actor", "agent", "--client-type", "cli", "--label", "worker"])
+        self.assertEqual(code, 0)
+        mock_attach.assert_called_once_with(
+            "/Users/giladrubin/python_workspace/agent-repl",
+            actor="agent",
+            client="cli",
+            label="worker",
+            capabilities=None,
+            session_id=None,
+            timeout=DEFAULT_START_TIMEOUT,
+            runtime_dir=None,
+        )
 
     def test_v2_status(self):
         client = self._mock_v2_client()
@@ -990,6 +1101,58 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         client.rebind_document.assert_called_once_with("doc-1")
+
+    def test_v2_branches(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "branches"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.list_branches.assert_called_once()
+
+    def test_v2_branch_start(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main([
+                    "v2", "branch-start",
+                    "--document-id", "doc-1",
+                    "--owner-session-id", "sess-1",
+                    "--title", "Experiment",
+                    "--purpose", "Risky parallel work",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.start_branch.assert_called_once_with(
+            document_id="doc-1",
+            owner_session_id="sess-1",
+            parent_branch_id=None,
+            title="Experiment",
+            purpose="Risky parallel work",
+            branch_id=None,
+        )
+
+    def test_v2_branch_finish(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "branch-finish", "--branch-id", "branch-1", "--status-value", "merged"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.finish_branch.assert_called_once_with("branch-1", status="merged")
 
     def test_v2_runtimes(self):
         client = self._mock_v2_client()

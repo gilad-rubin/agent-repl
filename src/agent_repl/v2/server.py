@@ -119,6 +119,32 @@ class RunRecord:
 
 
 @dataclass
+class BranchRecord:
+    branch_id: str
+    document_id: str
+    owner_session_id: str | None
+    parent_branch_id: str | None
+    title: str | None
+    purpose: str | None
+    status: str
+    created_at: float
+    updated_at: float
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "branch_id": self.branch_id,
+            "document_id": self.document_id,
+            "owner_session_id": self.owner_session_id,
+            "parent_branch_id": self.parent_branch_id,
+            "title": self.title,
+            "purpose": self.purpose,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
 class CoreState:
     workspace_root: str
     runtime_dir: str
@@ -132,6 +158,7 @@ class CoreState:
     runtime_file: str | None = None
     session_records: dict[str, SessionRecord] = field(default_factory=dict)
     document_records: dict[str, DocumentRecord] = field(default_factory=dict)
+    branch_records: dict[str, BranchRecord] = field(default_factory=dict)
     runtime_records: dict[str, RuntimeRecord] = field(default_factory=dict)
     run_records: dict[str, RunRecord] = field(default_factory=dict)
 
@@ -160,6 +187,7 @@ class CoreState:
             "core-authority",
             "session-ready",
             "projection-clients",
+            "branch-ready",
             "runtime-ready",
             "run-ledger",
             "file-sync",
@@ -334,6 +362,65 @@ class CoreState:
         return {
             "status": "ok",
             "document": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
+    def list_branches_payload(self) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "branches": [record.payload() for record in self.branch_records.values()],
+            "count": len(self.branch_records),
+            "workspace_root": self.workspace_root,
+        }
+
+    def start_branch(
+        self,
+        *,
+        branch_id: str,
+        document_id: str,
+        owner_session_id: str | None,
+        parent_branch_id: str | None,
+        title: str | None,
+        purpose: str | None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        if branch_id in self.branch_records:
+            return {"error": f"Duplicate branch_id: {branch_id}"}, HTTPStatus.BAD_REQUEST
+        if document_id not in self.document_records:
+            return {"error": f"Unknown document_id: {document_id}"}, HTTPStatus.BAD_REQUEST
+        if owner_session_id is not None and owner_session_id not in self.session_records:
+            return {"error": f"Unknown owner_session_id: {owner_session_id}"}, HTTPStatus.BAD_REQUEST
+        if parent_branch_id is not None and parent_branch_id not in self.branch_records:
+            return {"error": f"Unknown parent_branch_id: {parent_branch_id}"}, HTTPStatus.BAD_REQUEST
+        now = time.time()
+        record = BranchRecord(
+            branch_id=branch_id,
+            document_id=document_id,
+            owner_session_id=owner_session_id,
+            parent_branch_id=parent_branch_id,
+            title=title,
+            purpose=purpose,
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
+        self.branch_records[branch_id] = record
+        return {
+            "status": "ok",
+            "branch": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
+    def finish_branch(self, branch_id: str, status: str) -> tuple[dict[str, Any], HTTPStatus]:
+        if status not in {"merged", "rejected", "abandoned"}:
+            return {"error": f"Invalid branch status: {status}"}, HTTPStatus.BAD_REQUEST
+        record = self.branch_records.get(branch_id)
+        if record is None:
+            return {"error": f"Unknown branch_id: {branch_id}"}, HTTPStatus.NOT_FOUND
+        record.status = status
+        record.updated_at = time.time()
+        return {
+            "status": "ok",
+            "branch": record.payload(),
             "workspace_root": self.workspace_root,
         }, HTTPStatus.OK
 
@@ -524,6 +611,9 @@ def _handler_factory(state: CoreState):
             if self.path == "/api/documents":
                 self._json(HTTPStatus.OK, state.list_documents_payload())
                 return
+            if self.path == "/api/branches":
+                self._json(HTTPStatus.OK, state.list_branches_payload())
+                return
             if self.path == "/api/runtimes":
                 self._json(HTTPStatus.OK, state.list_runtimes_payload())
                 return
@@ -612,6 +702,41 @@ def _handler_factory(state: CoreState):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
                     return
                 body, status = state.rebind_document(document_id)
+                self._json(status, body)
+                return
+            if self.path == "/api/branches/start":
+                branch_id = payload.get("branch_id")
+                document_id = payload.get("document_id")
+                owner_session_id = payload.get("owner_session_id")
+                parent_branch_id = payload.get("parent_branch_id")
+                title = payload.get("title")
+                purpose = payload.get("purpose")
+                if not isinstance(branch_id, str) or not branch_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
+                    return
+                if not isinstance(document_id, str) or not document_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
+                    return
+                body, status = state.start_branch(
+                    branch_id=branch_id,
+                    document_id=document_id,
+                    owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
+                    parent_branch_id=parent_branch_id if isinstance(parent_branch_id, str) else None,
+                    title=title if isinstance(title, str) else None,
+                    purpose=purpose if isinstance(purpose, str) else None,
+                )
+                self._json(status, body)
+                return
+            if self.path == "/api/branches/finish":
+                branch_id = payload.get("branch_id")
+                branch_status = payload.get("status")
+                if not isinstance(branch_id, str) or not branch_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
+                    return
+                if not isinstance(branch_status, str) or not branch_status:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing status"})
+                    return
+                body, status = state.finish_branch(branch_id, branch_status)
                 self._json(status, body)
                 return
             if self.path == "/api/runtimes/start":

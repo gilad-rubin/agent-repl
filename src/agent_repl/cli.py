@@ -296,6 +296,31 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.v2_command == "branches":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_branches()
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "branch-start":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).start_branch(
+            document_id=args.document_id,
+            owner_session_id=getattr(args, "owner_session_id", None),
+            parent_branch_id=getattr(args, "parent_branch_id", None),
+            title=getattr(args, "title", None),
+            purpose=getattr(args, "purpose", None),
+            branch_id=getattr(args, "branch_id", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "branch-finish":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).finish_branch(
+            args.branch_id,
+            status=args.status_value,
+        )
+        _out(result, args.pretty)
+        return 0
+
     if args.v2_command == "runtimes":
         result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_runtimes()
         _out(result, args.pretty)
@@ -545,6 +570,26 @@ def build_parser() -> argparse.ArgumentParser:
     vp = v2sub.add_parser("document-rebind", help="Explicitly accept the current file snapshot as the canonical bound state")
     vp.add_argument("--document-id", required=True)
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("branches", help="List v2 collaboration branches for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("branch-start", help="Create a v2 collaboration branch for a document")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--document-id", required=True)
+    vp.add_argument("--owner-session-id")
+    vp.add_argument("--parent-branch-id")
+    vp.add_argument("--title")
+    vp.add_argument("--purpose")
+    vp.add_argument("--branch-id")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("branch-finish", help="Move a collaboration branch to a terminal review outcome")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--branch-id", required=True)
+    vp.add_argument("--status-value", required=True, choices=["merged", "rejected", "abandoned"])
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = v2sub.add_parser("runtimes", help="List v2 runtimes registered in this workspace")
