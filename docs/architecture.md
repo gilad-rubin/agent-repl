@@ -1,5 +1,13 @@
 # Architecture
 
+This document describes the current shipped bridge architecture used by `agent-repl` today.
+
+For the v2 target architecture, see:
+
+- [v2 Design Docs](v2/README.md)
+- [v2 North Star](v2/north-star.md)
+- [v2 Review Rubric](v2/review-rubric.md)
+
 agent-repl uses a bridge architecture: a VS Code extension runs an HTTP server, and the CLI talks to it. Notebook reads and edits go through VS Code's notebook API. Execution can run through either a background Jupyter session (`no-yank`) or VS Code's native notebook command path (`native`).
 
 ## Components

@@ -100,7 +100,11 @@ Recompiling the repo alone does not update an already-installed extension under 
 - [Getting Started](docs/getting-started.md) — End-to-end tutorial
 - [Command Reference](docs/commands.md) — All 14 commands with examples
 - [Prompt Loop](docs/prompt-loop.md) — Notebook-as-conversation pattern
-- [Architecture](docs/architecture.md) — How the bridge works
+- [Architecture](docs/architecture.md) — How the current bridge works
+- [v2 Design Docs](docs/v2/README.md) — North-star architecture, reference stack, and review rubric
+- [v2 Core Authority](docs/v2/core-authority.md) — Canonical authority, sessions, actors, and continuity
+- [v2 Runtime and Execution](docs/v2/runtime-and-execution.md) — Run ownership, runtime lifecycle, and zombie-kernel philosophy
+- [v2 File Compatibility](docs/v2/file-compatibility.md) — `.ipynb` compatibility, richer state, and external sync boundaries
 - [Installation](docs/installation.md) — Setup guide
 
 ## Architecture
