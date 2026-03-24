@@ -105,6 +105,7 @@ Recompiling the repo alone does not update an already-installed extension under 
 - [v2 Core Authority](docs/v2/core-authority.md) — Canonical authority, sessions, actors, and continuity
 - [v2 Runtime and Execution](docs/v2/runtime-and-execution.md) — Run ownership, runtime lifecycle, and zombie-kernel philosophy
 - [v2 File Compatibility](docs/v2/file-compatibility.md) — `.ipynb` compatibility, richer state, and external sync boundaries
+- [v2 Collaboration](docs/v2/collaboration.md) — Branching, ownership, review, and sub-notebook collaboration
 - [Installation](docs/installation.md) — Setup guide
 
 ## Architecture

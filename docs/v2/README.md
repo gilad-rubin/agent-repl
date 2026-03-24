@@ -10,6 +10,7 @@ These documents describe the system we want to build, the boundaries we want to 
 - [Core Authority and Sessions](core-authority.md) — what the core owns, how actors connect, and how continuity works
 - [Runtime and Execution](runtime-and-execution.md) — runtime ownership, run state, and zombie-kernel philosophy
 - [File Compatibility and Sync](file-compatibility.md) — how `.ipynb`, richer v2 state, and external file changes should coexist
+- [Collaboration, Branching, and Sub-Notebooks](collaboration.md) — how humans and agents should work safely in parallel
 - [Reference Stack](reference-stack.md) — external technologies to adopt, prototype against, study, or avoid
 - [Review Rubric](review-rubric.md) — the recurring architecture checks to run after each meaningful slice
 
