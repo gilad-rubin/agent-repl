@@ -505,6 +505,10 @@ class CoreState:
             return {"error": f"Unknown runtime_id: {runtime_id}"}, HTTPStatus.BAD_REQUEST
         if runtime.status == "stopped":
             return {"error": f"Runtime is stopped: {runtime_id}"}, HTTPStatus.BAD_REQUEST
+        if target_type == "document" and target_ref not in self.document_records:
+            return {"error": f"Unknown document target_ref: {target_ref}"}, HTTPStatus.BAD_REQUEST
+        if target_type == "branch" and target_ref not in self.branch_records:
+            return {"error": f"Unknown branch target_ref: {target_ref}"}, HTTPStatus.BAD_REQUEST
         now = time.time()
         record = RunRecord(
             run_id=run_id,
@@ -537,7 +541,12 @@ class CoreState:
         record.updated_at = now
         runtime = self.runtime_records.get(record.runtime_id)
         if runtime is not None:
-            runtime.status = "ready"
+            active_runtime_runs = sum(
+                1
+                for item in self.run_records.values()
+                if item.runtime_id == record.runtime_id and item.status in {"queued", "running"}
+            )
+            runtime.status = "busy" if active_runtime_runs else "ready"
             runtime.updated_at = now
         self.runs = sum(1 for item in self.run_records.values() if item.status in {"queued", "running"})
         return {

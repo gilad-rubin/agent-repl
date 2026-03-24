@@ -126,6 +126,7 @@ class V2Client:
 
         cwd = os.path.realpath(os.getcwd())
         workspace_target = _resolve_workspace_hint(workspace_hint, cwd)
+        candidates: list[tuple[int, float, V2Client]] = []
 
         for fpath in files:
             try:
@@ -145,9 +146,14 @@ class V2Client:
                 url = f"http://127.0.0.1:{info['port']}"
                 client = cls(url, info["token"])
                 client.health()
-                return client
+                specificity = len(Path(workspace_root).parts)
+                candidates.append((specificity, os.path.getmtime(fpath), client))
             except Exception:
                 continue
+
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            return candidates[0][2]
 
         raise RuntimeError(
             f"No running agent-repl v2 core daemon matched '{workspace_target}'"

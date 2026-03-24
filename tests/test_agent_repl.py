@@ -152,6 +152,42 @@ class TestV2Discovery(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "No running agent-repl v2 core daemon matched '/workspace'"):
                 V2Client.discover()
 
+    def test_discover_prefers_most_specific_workspace_match(self):
+        info_parent = json.dumps({
+            "pid": 123,
+            "port": 23456,
+            "token": "tok-parent",
+            "workspace_root": "/workspace",
+        })
+        info_child = json.dumps({
+            "pid": 456,
+            "port": 34567,
+            "token": "tok-child",
+            "workspace_root": "/workspace/subproject",
+        })
+        read_map = {
+            "/tmp/agent-repl-v2-core-parent.json": info_parent,
+            "/tmp/agent-repl-v2-core-child.json": info_child,
+        }
+        mtime_map = {
+            "/tmp/agent-repl-v2-core-parent.json": 20.0,
+            "/tmp/agent-repl-v2-core-child.json": 10.0,
+        }
+        with (
+            mock.patch(
+                "agent_repl.v2.client.glob.glob",
+                return_value=["/tmp/agent-repl-v2-core-parent.json", "/tmp/agent-repl-v2-core-child.json"],
+            ),
+            mock.patch("agent_repl.v2.client.os.path.getmtime", side_effect=lambda path: mtime_map[path]),
+            mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace/subproject"),
+            mock.patch("agent_repl.v2.client.Path.read_text", autospec=True, side_effect=lambda self: read_map[str(self)]),
+            mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
+            mock.patch.object(V2Client, "health", return_value={"status": "ok"}),
+        ):
+            client = V2Client.discover()
+        self.assertEqual(client.base_url, "http://127.0.0.1:34567")
+        self.assertEqual(client.token, "tok-child")
+
     def test_attach_starts_or_reuses_daemon_then_session(self):
         with (
             mock.patch.object(V2Client, "start", return_value={"status": "ok", "workspace_root": "/workspace", "already_running": True}),
@@ -290,6 +326,60 @@ class TestV2CoreState(unittest.TestCase):
         finished_body, finished_status = self.state.finish_branch("branch-1", "merged")
         self.assertEqual(finished_status, 200)
         self.assertEqual(finished_body["branch"]["status"], "merged")
+
+    def test_finish_run_keeps_runtime_busy_while_another_run_is_active(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        runtime = self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
+        self.assertEqual(runtime["runtime"]["status"], "ready")
+
+        first_body, first_status = self.state.start_run(
+            run_id="run-1",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.assertEqual(first_status, 200)
+        second_body, second_status = self.state.start_run(
+            run_id="run-2",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.assertEqual(second_status, 200)
+
+        finish_body, finish_status = self.state.finish_run(first_body["run"]["run_id"], "completed")
+        self.assertEqual(finish_status, 200)
+        self.assertEqual(self.state.runtime_records["rt-1"].status, "busy")
+
+        final_body, final_status = self.state.finish_run(second_body["run"]["run_id"], "completed")
+        self.assertEqual(final_status, 200)
+        self.assertEqual(self.state.runtime_records["rt-1"].status, "ready")
+
+    def test_start_run_rejects_unknown_document_and_branch_targets(self):
+        self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
+        bad_document_body, bad_document_status = self.state.start_run(
+            run_id="run-doc",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref="doc-missing",
+            kind="execute",
+        )
+        self.assertEqual(bad_document_status, 400)
+        self.assertIn("Unknown document target_ref", bad_document_body["error"])
+
+        bad_branch_body, bad_branch_status = self.state.start_run(
+            run_id="run-branch",
+            runtime_id="rt-1",
+            target_type="branch",
+            target_ref="branch-missing",
+            kind="execute",
+        )
+        self.assertEqual(bad_branch_status, 400)
+        self.assertIn("Unknown branch target_ref", bad_branch_body["error"])
 
 
 # ---------------------------------------------------------------------------
