@@ -166,6 +166,7 @@ class CoreState:
     branch_records: dict[str, BranchRecord] = field(default_factory=dict)
     runtime_records: dict[str, RuntimeRecord] = field(default_factory=dict)
     run_records: dict[str, RunRecord] = field(default_factory=dict)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = os.path.realpath(self.workspace_root)
@@ -279,20 +280,21 @@ class CoreState:
     def persist(self) -> None:
         if self.state_file is None:
             return
-        Path(self.state_file).parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": self.version,
-            "workspace_root": self.workspace_root,
-            "saved_at": time.time(),
-            "sessions": [record.payload() for record in self.session_records.values()],
-            "documents": [record.payload() for record in self.document_records.values()],
-            "branches": [record.payload() for record in self.branch_records.values()],
-            "runtimes": [record.payload() for record in self.runtime_records.values()],
-            "runs": [record.payload() for record in self.run_records.values()],
-        }
-        tmp_path = f"{self.state_file}.tmp"
-        Path(tmp_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
-        os.replace(tmp_path, self.state_file)
+        with self._lock:
+            Path(self.state_file).parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": self.version,
+                "workspace_root": self.workspace_root,
+                "saved_at": time.time(),
+                "sessions": [record.payload() for record in self.session_records.values()],
+                "documents": [record.payload() for record in self.document_records.values()],
+                "branches": [record.payload() for record in self.branch_records.values()],
+                "runtimes": [record.payload() for record in self.runtime_records.values()],
+                "runs": [record.payload() for record in self.run_records.values()],
+            }
+            tmp_path = f"{self.state_file}.tmp"
+            Path(tmp_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
+            os.replace(tmp_path, self.state_file)
 
     def touch_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
         record = self.session_records.get(session_id)
@@ -407,6 +409,61 @@ class CoreState:
         real_path, relative_path = self._resolve_document_path(path)
         client = self._bridge_client(real_path)
         payload = client.create(relative_path, cells=cells, kernel_id=kernel_id)
+        self._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
+
+    def notebook_edit(self, path: str, operations: list[dict[str, Any]]) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        client = self._bridge_client(real_path)
+        payload = client.edit(relative_path, operations)
+        self._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
+
+    def notebook_execute_cell(
+        self,
+        path: str,
+        *,
+        cell_id: str | None,
+        cell_index: int | None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        client = self._bridge_client(real_path)
+        payload = client.execute_cell(
+            relative_path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            wait=False,
+        )
+        return payload, HTTPStatus.OK
+
+    def notebook_insert_execute(
+        self,
+        path: str,
+        *,
+        source: str,
+        cell_type: str,
+        at_index: int,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        client = self._bridge_client(real_path)
+        payload = client.insert_and_execute(
+            relative_path,
+            source,
+            cell_type=cell_type,
+            at_index=at_index,
+            wait=False,
+        )
+        return payload, HTTPStatus.OK
+
+    def notebook_execution(self, execution_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        client = self._bridge_client(self.workspace_root)
+        payload = client.execution(execution_id)
+        return payload, HTTPStatus.OK
+
+    def notebook_execute_all(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        client = self._bridge_client(real_path)
+        payload = client.execute_all(relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -874,6 +931,70 @@ def _handler_factory(state: CoreState):
                         cells=resolved_cells,
                         kernel_id=kernel_id if isinstance(kernel_id, str) else None,
                     )
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/edit":
+                    path = payload.get("path")
+                    operations = payload.get("operations")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    if not isinstance(operations, list):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing operations"})
+                        return
+                    body, status = state.notebook_edit(
+                        path,
+                        [item for item in operations if isinstance(item, dict)],
+                    )
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/execute-cell":
+                    path = payload.get("path")
+                    cell_id = payload.get("cell_id")
+                    cell_index = payload.get("cell_index")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    body, status = state.notebook_execute_cell(
+                        path,
+                        cell_id=cell_id if isinstance(cell_id, str) else None,
+                        cell_index=cell_index if isinstance(cell_index, int) else None,
+                    )
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/insert-and-execute":
+                    path = payload.get("path")
+                    source = payload.get("source")
+                    cell_type = payload.get("cell_type")
+                    at_index = payload.get("at_index")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    if not isinstance(source, str):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing source"})
+                        return
+                    body, status = state.notebook_insert_execute(
+                        path,
+                        source=source,
+                        cell_type=cell_type if isinstance(cell_type, str) else "code",
+                        at_index=at_index if isinstance(at_index, int) else -1,
+                    )
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/execution":
+                    execution_id = payload.get("execution_id")
+                    if not isinstance(execution_id, str) or not execution_id:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing execution_id"})
+                        return
+                    body, status = state.notebook_execution(execution_id)
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/execute-all":
+                    path = payload.get("path")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    body, status = state.notebook_execute_all(path)
                     self._json(status, body)
                     return
                 if self.path == "/api/branches/start":

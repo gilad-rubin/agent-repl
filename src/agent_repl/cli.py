@@ -106,7 +106,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_edit(args: argparse.Namespace) -> int:
-    client = _client(args.path)
+    client = _notebook_client(args.path)
     op: dict[str, Any] = {"op": args.edit_command}
 
     if args.edit_command == "replace-source":
@@ -138,19 +138,28 @@ def cmd_edit(args: argparse.Namespace) -> int:
         elif args.index is not None:
             op["cell_index"] = args.index
 
-    result = client.edit(args.path, [op])
+    if hasattr(client, "notebook_edit"):
+        result = client.notebook_edit(args.path, [op])
+    else:
+        result = client.edit(args.path, [op])
     _out(result, args.pretty)
     return 0
 
 
 def cmd_exec(args: argparse.Namespace) -> int:
-    client = _client(args.path)
+    client = _notebook_client(args.path)
     wait = not getattr(args, "no_wait", False)
     timeout = getattr(args, "timeout", 30)
     if args.code:
-        result = client.insert_and_execute(args.path, args.code, wait=wait, timeout=timeout)
+        if hasattr(client, "notebook_insert_execute"):
+            result = client.notebook_insert_execute(args.path, args.code, wait=wait, timeout=timeout)
+        else:
+            result = client.insert_and_execute(args.path, args.code, wait=wait, timeout=timeout)
     elif args.cell_id:
-        result = client.execute_cell(args.path, cell_id=args.cell_id, wait=wait, timeout=timeout)
+        if hasattr(client, "notebook_execute_cell"):
+            result = client.notebook_execute_cell(args.path, cell_id=args.cell_id, wait=wait, timeout=timeout)
+        else:
+            result = client.execute_cell(args.path, cell_id=args.cell_id, wait=wait, timeout=timeout)
     else:
         print(json.dumps({"error": "Provide --cell-id or -c/--code"}, indent=2), file=sys.stderr)
         return 1
@@ -163,13 +172,21 @@ def cmd_ix(args: argparse.Namespace) -> int:
     wait = not getattr(args, "no_wait", False)
     timeout = getattr(args, "timeout", 30)
     at_index = getattr(args, "at_index", -1)
-    result = _client(args.path).insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
+    client = _notebook_client(args.path)
+    if hasattr(client, "notebook_insert_execute"):
+        result = client.notebook_insert_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
+    else:
+        result = client.insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_run_all(args: argparse.Namespace) -> int:
-    result = _client(args.path).execute_all(args.path)
+    client = _notebook_client(args.path)
+    if hasattr(client, "notebook_execute_all"):
+        result = client.notebook_execute_all(args.path)
+    else:
+        result = client.execute_all(args.path)
     _out(result, args.pretty)
     return 0
 

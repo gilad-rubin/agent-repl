@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import tempfile
 import sys
+import threading
 import tomllib
 import unittest
 from io import StringIO
@@ -322,6 +323,43 @@ class TestV2CoreState(unittest.TestCase):
         self.assertEqual(refreshed["sync_state"], "missing")
         self.assertFalse(refreshed["observed_snapshot"]["exists"])
 
+    def test_persist_serializes_concurrent_writes(self):
+        started = threading.Event()
+        release = threading.Event()
+        overlap_detected = threading.Event()
+        active_writers = 0
+        active_lock = threading.Lock()
+        original_write_text = Path.write_text
+
+        def guarded_write_text(path_obj, *args, **kwargs):
+            nonlocal active_writers
+            if str(path_obj).endswith(".tmp"):
+                with active_lock:
+                    active_writers += 1
+                    if active_writers > 1:
+                        overlap_detected.set()
+                    started.set()
+                release.wait(timeout=2)
+                try:
+                    return original_write_text(path_obj, *args, **kwargs)
+                finally:
+                    with active_lock:
+                        active_writers -= 1
+            return original_write_text(path_obj, *args, **kwargs)
+
+        first = threading.Thread(target=self.state.persist)
+        second = threading.Thread(target=self.state.persist)
+
+        with mock.patch("pathlib.Path.write_text", new=guarded_write_text):
+            first.start()
+            self.assertTrue(started.wait(timeout=1))
+            second.start()
+            release.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        self.assertFalse(overlap_detected.is_set())
+
     def test_notebook_contents_proxies_through_bridge_and_syncs_document_record(self):
         bridge = mock.Mock(spec=BridgeClient)
         bridge.contents.return_value = {
@@ -363,6 +401,44 @@ class TestV2CoreState(unittest.TestCase):
             kernel_id="subtext-venv",
         )
         self.assertEqual(len(self.state.document_records), 1)
+
+    def test_notebook_edit_proxies_through_bridge_and_syncs_document_record(self):
+        bridge = mock.Mock(spec=BridgeClient)
+        bridge.edit.return_value = {"path": "notebooks/demo.ipynb", "results": [{"op": "replace-source", "changed": True}]}
+
+        with mock.patch.object(self.state, "_bridge_client", return_value=bridge):
+            body, status = self.state.notebook_edit(
+                "notebooks/demo.ipynb",
+                [{"op": "replace-source", "cell_id": "cell-1", "source": "x = 2"}],
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["results"][0]["op"], "replace-source")
+        bridge.edit.assert_called_once_with(
+            "notebooks/demo.ipynb",
+            [{"op": "replace-source", "cell_id": "cell-1", "source": "x = 2"}],
+        )
+        self.assertEqual(len(self.state.document_records), 1)
+
+    def test_notebook_execute_cell_proxies_wait_false(self):
+        bridge = mock.Mock(spec=BridgeClient)
+        bridge.execute_cell.return_value = {"status": "started", "execution_id": "exec-1", "cell_id": "cell-1"}
+
+        with mock.patch.object(self.state, "_bridge_client", return_value=bridge):
+            body, status = self.state.notebook_execute_cell(
+                "notebooks/demo.ipynb",
+                cell_id="cell-1",
+                cell_index=None,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "started")
+        bridge.execute_cell.assert_called_once_with(
+            "notebooks/demo.ipynb",
+            cell_id="cell-1",
+            cell_index=None,
+            wait=False,
+        )
 
     def test_session_can_detach_touch_and_resume(self):
         created = self.state.start_session("agent", "cli", "worker", "sess-1")
@@ -554,6 +630,12 @@ class TestBridgeEndpoints(unittest.TestCase):
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/notebook/execute-cell", url)
 
+    def test_execution_calls_get(self):
+        self.client.execution("exec-1")
+        url = self.mock_get.call_args[0][0]
+        self.assertIn("/api/notebook/execution", url)
+        self.assertEqual(self.mock_get.call_args.kwargs["params"], {"id": "exec-1"})
+
     def test_insert_and_execute_calls_post(self):
         self.client.insert_and_execute("nb.ipynb", "x = 1")
         url = self.mock_post.call_args[0][0]
@@ -743,6 +825,39 @@ class TestV2Endpoints(unittest.TestCase):
                 "kernel_id": "subtext-venv",
             },
         )
+
+    def test_notebook_edit_calls_post(self):
+        self.client.notebook_edit("nb.ipynb", [{"op": "replace-source", "cell_id": "cell-1", "source": "x = 2"}])
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/edit", url)
+
+    def test_notebook_execute_cell_polls(self):
+        self.client.notebook_execution = mock.Mock(return_value={"status": "ok", "outputs": []})
+        with mock.patch.object(self.client, "_post", return_value={"status": "started", "execution_id": "exec-1", "cell_id": "cell-1"}) as post:
+            result = self.client.notebook_execute_cell("nb.ipynb", cell_id="cell-1")
+        self.assertEqual(result["status"], "ok")
+        post.assert_called_once()
+        self.client.notebook_execution.assert_called_once_with("exec-1")
+
+    def test_notebook_insert_execute_polls(self):
+        self.client.notebook_execution = mock.Mock(return_value={"status": "ok", "outputs": []})
+        with mock.patch.object(self.client, "_post", return_value={"status": "started", "execution_id": "exec-2", "cell_id": "cell-2"}) as post:
+            result = self.client.notebook_insert_execute("nb.ipynb", "x = 1")
+        self.assertEqual(result["status"], "ok")
+        post.assert_called_once()
+        self.client.notebook_execution.assert_called_once_with("exec-2")
+
+    def test_notebook_execution_calls_post(self):
+        self.client.notebook_execution("exec-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/execution", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"execution_id": "exec-1"})
+
+    def test_notebook_execute_all_calls_post(self):
+        self.client.notebook_execute_all("nb.ipynb")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/execute-all", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "nb.ipynb"})
 
     def test_list_branches_calls_get(self):
         self.client.list_branches()
@@ -1024,6 +1139,11 @@ class TestCommands(unittest.TestCase):
         client.notebook_contents.return_value = {"path": "nb.ipynb", "cells": []}
         client.notebook_status.return_value = {"path": "nb.ipynb", "kernel_state": "idle"}
         client.notebook_create.return_value = {"status": "ok", "path": "nb.ipynb"}
+        client.notebook_edit.return_value = {"path": "nb.ipynb", "results": []}
+        client.notebook_execute_cell.return_value = {"status": "ok"}
+        client.notebook_insert_execute.return_value = {"status": "ok", "cell_id": "new-cell"}
+        client.notebook_execution.return_value = {"status": "ok"}
+        client.notebook_execute_all.return_value = {"status": "ok"}
         client.list_branches.return_value = {"status": "ok", "branches": []}
         client.start_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "active"}}
         client.finish_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "merged"}}
@@ -1097,6 +1217,24 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30)
 
+    def test_ix_prefers_core_execution_surface(self):
+        bridge = self._mock_client()
+        core = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["ix", "nb.ipynb", "-s", "x=1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_insert_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30)
+        bridge.insert_and_execute.assert_not_called()
+
     def test_ix_no_wait(self):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1", "--no-wait"], client)
@@ -1114,6 +1252,24 @@ class TestCommands(unittest.TestCase):
         code, _ = self._run(["exec", "nb.ipynb", "--cell-id", "abc"], client)
         self.assertEqual(code, 0)
         client.execute_cell.assert_called_once_with("nb.ipynb", cell_id="abc", wait=True, timeout=30)
+
+    def test_exec_prefers_core_execution_surface(self):
+        bridge = self._mock_client()
+        core = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["exec", "nb.ipynb", "--cell-id", "abc"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_execute_cell.assert_called_once_with("nb.ipynb", cell_id="abc", wait=True, timeout=30)
+        bridge.execute_cell.assert_not_called()
 
     def test_respond(self):
         client = self._mock_client()
@@ -1173,6 +1329,45 @@ class TestCommands(unittest.TestCase):
             cells=[{"type": "code", "source": "x=1"}],
             kernel_id="/tmp/.venv/bin/python",
         )
+
+    def test_edit_prefers_core_execution_surface(self):
+        bridge = self._mock_client()
+        core = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["edit", "nb.ipynb", "replace-source", "--cell-id", "abc", "-s", "x=2"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_edit.assert_called_once_with(
+            "nb.ipynb",
+            [{"op": "replace-source", "source": "x=2", "cell_id": "abc"}],
+        )
+        bridge.edit.assert_not_called()
+
+    def test_run_all_prefers_core_execution_surface(self):
+        bridge = self._mock_client()
+        core = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["run-all", "nb.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_execute_all.assert_called_once_with("nb.ipynb")
+        bridge.execute_all.assert_not_called()
 
     def test_reload_outputs_response(self):
         client = self._mock_client(reload={

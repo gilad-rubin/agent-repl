@@ -7,7 +7,7 @@ import { resolveNotebook, resolveNotebookUri, resolveOrOpenNotebook, findOpenNot
 import { applyEdits, EditOp } from './notebook/operations';
 import { getCellId, ensureIds, resolveCell, withCellId, newCellId } from './notebook/identity';
 import { toJupyter, stripForAgent } from './notebook/outputs';
-import { executeCell, getExecution, getStatus, insertAndExecute, resetExecutionState, resetJupyterApiCache, getJupyterApi } from './execution/queue';
+import { executeCell, getExecution, getStatus, insertAndExecute, resetExecutionState, resetJupyterApiCache, getJupyterApi, startExecution } from './execution/queue';
 
 type KernelRecord = {
     id: string;
@@ -551,16 +551,16 @@ async function attachKernelWithFallback(
         return { method: 'already-selected', diagnostics };
     }
 
+    if (await attachKernelQuietly(doc, kernel, diagnostics)) {
+        return { method: 'jupyter.openNotebook', diagnostics };
+    }
+
     const focus = captureEditorFocus();
     try {
         const editor = await ensureNotebookEditor(doc, {
             preserveFocus: true,
             preview: false,
         });
-
-        if (await attachKernelQuietly(doc, kernel, diagnostics)) {
-            return { method: 'jupyter.openNotebook', diagnostics };
-        }
 
         if (await selectKernelViaCommand(
             doc,
@@ -757,7 +757,7 @@ export function buildRoutes(maxQueue: number): Routes {
                 path: string; cwd?: string; cell_id?: string; cell_index?: number;
             };
             const doc = await resolveOrOpenNotebook(path, cwd);
-            return executeCell(doc.uri.fsPath, { cell_id, cell_index }, maxQueue);
+            return startExecution(doc.uri.fsPath, { cell_id, cell_index }, maxQueue);
         },
 
         'GET /api/notebook/execution': async (_body, q) => {
@@ -985,11 +985,6 @@ export function buildRoutes(maxQueue: number): Routes {
                 } else {
                     kernelStatus = 'needs_selection';
                 }
-
-                await ensureNotebookEditor(doc, {
-                    preserveFocus: true,
-                    preview: false,
-                });
             } finally {
                 await restoreEditorFocus(focus);
             }

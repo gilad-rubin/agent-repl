@@ -230,7 +230,59 @@ class V2Client:
             body["cells"] = cells
         if kernel_id is not None:
             body["kernel_id"] = kernel_id
-        return self._post("/api/notebooks/create", body)
+        return self._post("/api/notebooks/create", body, timeout=60)
+
+    def notebook_edit(self, path: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._post("/api/notebooks/edit", {"path": path, "operations": operations})
+
+    def notebook_execute_cell(
+        self,
+        path: str,
+        *,
+        cell_id: str | None = None,
+        cell_index: int | None = None,
+        wait: bool = True,
+        timeout: float = 30,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path}
+        if cell_id is not None:
+            body["cell_id"] = cell_id
+        if cell_index is not None:
+            body["cell_index"] = cell_index
+        result = self._post("/api/notebooks/execute-cell", body, timeout=30)
+        if wait and result.get("execution_id"):
+            return self._poll_execution(result, timeout)
+        return result
+
+    def notebook_insert_execute(
+        self,
+        path: str,
+        source: str,
+        *,
+        cell_type: str = "code",
+        at_index: int = -1,
+        wait: bool = True,
+        timeout: float = 30,
+    ) -> dict[str, Any]:
+        result = self._post(
+            "/api/notebooks/insert-and-execute",
+            {
+                "path": path,
+                "source": source,
+                "cell_type": cell_type,
+                "at_index": at_index,
+            },
+            timeout=30,
+        )
+        if wait and result.get("execution_id"):
+            return self._poll_execution(result, timeout)
+        return result
+
+    def notebook_execution(self, execution_id: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/execution", {"execution_id": execution_id})
+
+    def notebook_execute_all(self, path: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/execute-all", {"path": path}, timeout=120)
 
     def list_branches(self) -> dict[str, Any]:
         return self._get("/api/branches")
@@ -309,13 +361,29 @@ class V2Client:
     def finish_run(self, run_id: str, *, status: str) -> dict[str, Any]:
         return self._post("/api/runs/finish", {"run_id": run_id, "status": status})
 
-    def _get(self, endpoint: str) -> dict[str, Any]:
-        response = self._session.get(f"{self.base_url}{endpoint}", timeout=10)
+    def _poll_execution(self, initial: dict[str, Any], timeout: float) -> dict[str, Any]:
+        execution_id = initial["execution_id"]
+        deadline = time.monotonic() + timeout
+        interval = 0.2
+        while time.monotonic() < deadline:
+            time.sleep(interval)
+            result = self.notebook_execution(execution_id)
+            status = result.get("status")
+            if status not in ("running", "queued", "started"):
+                for key in ("cell_id", "cell_index", "operation"):
+                    if key in initial and key not in result:
+                        result[key] = initial[key]
+                return result
+            interval = min(interval * 1.5, 1.0)
+        return {**initial, "status": "timeout", "timeout_seconds": timeout}
+
+    def _get(self, endpoint: str, timeout: float = 10) -> dict[str, Any]:
+        response = self._session.get(f"{self.base_url}{endpoint}", timeout=timeout)
         self._raise_for_status(response)
         return response.json()
 
-    def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
-        response = self._session.post(f"{self.base_url}{endpoint}", json=body, timeout=10)
+    def _post(self, endpoint: str, body: dict[str, Any], timeout: float = 10) -> dict[str, Any]:
+        response = self._session.post(f"{self.base_url}{endpoint}", json=body, timeout=timeout)
         self._raise_for_status(response)
         return response.json()
 

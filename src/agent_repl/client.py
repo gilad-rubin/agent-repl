@@ -137,6 +137,9 @@ class BridgeClient:
     def execute_all(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebook/execute-all", self._path_body(path))
 
+    def execution(self, execution_id: str) -> dict[str, Any]:
+        return self._get("/api/notebook/execution", params={"id": execution_id})
+
     def restart_kernel(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebook/restart-kernel", self._path_body(path))
 

@@ -45,15 +45,16 @@ function matchesCellKeyPath(key: string, fsPath?: string): boolean {
 }
 
 function updateKernelState(): void {
-    const prev = kernelState;
     kernelState = executingCells.size > 0 ? 'busy' : 'idle';
+}
 
-    // When kernel transitions to idle, drain queued agent cells
-    if (prev === 'busy' && kernelState === 'idle') {
-        for (const path of queues.keys()) {
-            processNext(path);
+function hasExecutingCell(path: string): boolean {
+    for (const info of executingCells.values()) {
+        if (info.fsPath === path) {
+            return true;
         }
     }
+    return false;
 }
 
 export function executionSummaryIndicatesCompletion(
@@ -83,6 +84,7 @@ export function initExecutionMonitor(): vscode.Disposable {
                 // Execution completed
                 executingCells.delete(key);
                 updateKernelState();
+                processNext(fsPath);
 
                 // Fire completion callback (used by runCell)
                 const cb = completionCallbacks.get(key);
@@ -150,7 +152,7 @@ export function resetExecutionState(
 
 function isNotebookBusy(path: string): boolean {
     const queue = queues.get(path) ?? [];
-    return kernelState === 'busy' || queue.some(e => e.status === 'running');
+    return hasExecutingCell(path) || queue.some(e => e.status === 'running');
 }
 
 /**
@@ -173,7 +175,7 @@ async function reconcileKernelState(path: string): Promise<void> {
         return;
     }
 
-    if (kernelState !== 'busy' && !hasRunningQueueEntry) { return; }
+    if (!hasExecutingCell(path) && !hasRunningQueueEntry) { return; }
 
     try {
         const doc = resolveNotebook(path);
@@ -257,6 +259,15 @@ export async function executeCell(
     });
 }
 
+/** Start execution without waiting for completion so callers can poll explicitly. */
+export async function startExecution(
+    path: string,
+    selector: { cell_id?: string; cell_index?: number },
+    maxQueue: number
+): Promise<any> {
+    return enqueueExecution(path, selector, maxQueue);
+}
+
 /** Get an execution result by ID (for polling). */
 export function getExecution(executionId: string): any {
     for (const queue of queues.values()) {
@@ -327,7 +338,7 @@ export async function getStatus(path: string): Promise<any> {
 
     return {
         path,
-        kernel_state: isNotebookBusy(path) ? 'busy' : kernelState,
+        kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
         busy: isNotebookBusy(path),
         running,
         queued
