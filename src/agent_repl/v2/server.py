@@ -198,6 +198,8 @@ class CoreState:
     headless_runtimes: dict[str, HeadlessNotebookRuntime] = field(default_factory=dict, repr=False)
     _validated_kernel_pythons: set[str] = field(default_factory=set, init=False, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _notebook_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
+    _notebook_locks_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = os.path.realpath(self.workspace_root)
@@ -419,7 +421,8 @@ class CoreState:
 
     def notebook_contents(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_contents(real_path, relative_path)
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_contents(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -437,13 +440,15 @@ class CoreState:
         kernel_id: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_create(real_path, relative_path, cells=cells, kernel_id=kernel_id)
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_create(real_path, relative_path, cells=cells, kernel_id=kernel_id)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_edit(self, path: str, operations: list[dict[str, Any]]) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_edit(real_path, relative_path, operations)
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_edit(real_path, relative_path, operations)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -455,12 +460,13 @@ class CoreState:
         cell_index: int | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_execute_cell(
-            real_path,
-            relative_path,
-            cell_id=cell_id,
-            cell_index=cell_index,
-        )
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_execute_cell(
+                real_path,
+                relative_path,
+                cell_id=cell_id,
+                cell_index=cell_index,
+            )
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -473,13 +479,14 @@ class CoreState:
         at_index: int,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_insert_execute(
-            real_path,
-            relative_path,
-            source=source,
-            cell_type=cell_type,
-            at_index=at_index,
-        )
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_insert_execute(
+                real_path,
+                relative_path,
+                source=source,
+                cell_type=cell_type,
+                at_index=at_index,
+            )
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -492,7 +499,8 @@ class CoreState:
 
     def notebook_execute_all(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_execute_all(real_path, relative_path)
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_execute_all(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -563,7 +571,8 @@ class CoreState:
                 "error": f"No active headless runtime is bound to '{relative_path}'",
                 "path": relative_path,
             }, HTTPStatus.NOT_FOUND
-        payload = self._headless_notebook_project_visible(real_path, relative_path, cells=cells)
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_project_visible(real_path, relative_path, cells=cells)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -581,7 +590,8 @@ class CoreState:
                 "error": f"No active headless runtime is bound to '{relative_path}'",
                 "path": relative_path,
             }, HTTPStatus.NOT_FOUND
-        payload = self._headless_notebook_execute_visible_cell(real_path, relative_path, cell_index=cell_index, source=source)
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_execute_visible_cell(real_path, relative_path, cell_index=cell_index, source=source)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -593,7 +603,8 @@ class CoreState:
 
     def notebook_restart_and_run_all(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_restart_and_run_all(real_path, relative_path)
+        with self._notebook_lock(real_path):
+            payload = self._headless_notebook_restart_and_run_all(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -723,6 +734,14 @@ class CoreState:
         for real_path in list(self.headless_runtimes.keys()):
             self._shutdown_headless_runtime(real_path)
 
+    def _notebook_lock(self, real_path: str) -> threading.RLock:
+        with self._notebook_locks_guard:
+            lock = self._notebook_locks.get(real_path)
+            if lock is None:
+                lock = threading.RLock()
+                self._notebook_locks[real_path] = lock
+            return lock
+
     def _rollback_inserted_cell(self, real_path: str, cell_id: str) -> None:
         """Remove a cell that was inserted but whose execution failed at the infra level."""
         try:
@@ -838,9 +857,9 @@ class CoreState:
         return cell
 
     def _headless_notebook_contents(self, real_path: str, relative_path: str) -> dict[str, Any]:
-        notebook, changed = self._load_notebook(real_path)
-        if changed:
-            self._save_notebook(real_path, notebook)
+        # Read-only: generate cell IDs in memory but do NOT save.
+        # IDs are persisted on the first actual write operation.
+        notebook, _changed = self._load_notebook(real_path)
         cells = []
         code_index = 0
         for index, cell in enumerate(notebook.cells):

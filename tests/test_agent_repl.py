@@ -1058,6 +1058,73 @@ class TestV2CoreState(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "pip install ipykernel"):
                 self.state._ensure_kernel_capable_python("/fake/python")
 
+    def test_cat_does_not_mutate_notebook_on_disk(self):
+        notebook_path = "notebooks/demo.ipynb"
+        real_path = os.path.join(str(self.workspace_root), notebook_path)
+        # Write a notebook without agent-repl cell IDs
+        import nbformat
+        nb = nbformat.v4.new_notebook(cells=[
+            nbformat.v4.new_code_cell(source="x = 1"),
+            nbformat.v4.new_markdown_cell(source="# hello"),
+        ])
+        Path(real_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(real_path, "w") as f:
+            nbformat.write(nb, f)
+        before = Path(real_path).read_text()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            body, status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(status, 200)
+            self.assertEqual(len(body["cells"]), 2)
+            # Cell IDs should be in the response
+            self.assertTrue(body["cells"][0]["cell_id"])
+
+        # File should be identical — cat must not write
+        after = Path(real_path).read_text()
+        self.assertEqual(before, after)
+
+    def test_concurrent_edits_do_not_corrupt_notebook(self):
+        notebook_path = "notebooks/concurrent.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "a = 1"},
+                    {"type": "code", "source": "b = 2"},
+                    {"type": "code", "source": "c = 3"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+
+            contents, _ = self.state.notebook_contents(notebook_path)
+            cell_ids = [c["cell_id"] for c in contents["cells"]]
+
+            errors = []
+            def delete_cell(cid):
+                try:
+                    self.state.notebook_edit(notebook_path, [{"op": "delete", "cell_id": cid}])
+                except Exception as e:
+                    errors.append(str(e))
+
+            t1 = threading.Thread(target=delete_cell, args=(cell_ids[2],))
+            t2 = threading.Thread(target=delete_cell, args=(cell_ids[1],))
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+
+            # File should be valid JSON regardless of race
+            real_path = os.path.join(str(self.workspace_root), notebook_path)
+            content = Path(real_path).read_text()
+            import json
+            parsed = json.loads(content)  # should not raise
+            self.assertIn("cells", parsed)
+            # Should have exactly 1 cell left
+            self.assertEqual(len(parsed["cells"]), 1)
+
 
 # ---------------------------------------------------------------------------
 # BridgeClient endpoint calls

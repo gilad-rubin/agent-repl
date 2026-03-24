@@ -588,7 +588,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("new", help="Create a new notebook")
     p.add_argument("path")
     p.add_argument("--cells-json")
-    p.add_argument("--kernel", help="Kernel ID to auto-select (skips interactive picker)")
+    p.add_argument("--kernel", help="Python executable path (e.g. /opt/miniconda3/bin/python3 or python3)")
 
     # kernels
     sub.add_parser("kernels", help="List available notebook kernels")
@@ -596,7 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
     # select-kernel
     p = sub.add_parser("select-kernel", help="Select kernel for a notebook")
     p.add_argument("path")
-    p.add_argument("--kernel-id", help="Kernel ID to select programmatically")
+    p.add_argument("--kernel-id", help="Python executable path or name (e.g. /opt/miniconda3/bin/python3 or python3)")
     p.add_argument("--interactive", action="store_true", help="Open the VS Code kernel picker instead of defaulting to the workspace .venv")
     p.add_argument("--extension", default="ms-toolsai.jupyter", help="Extension ID")
 
