@@ -85,6 +85,25 @@ The architecture should allow:
 
 This is one of the clearest places where v2 must depart from v1 behavior.
 
+## Server-Managed Kernel Continuity
+
+The current prototype direction should be:
+
+- `agent-repl` starts and owns the kernel from the server side
+- the kernel stays alive even when no editor is open
+- later opening the notebook should attach the editor to that same live runtime
+- human follow-up execution should continue from the same in-memory state when the runtime still exists
+
+This is the concrete behavior we want from editor continuity.
+
+The internal implementation may evolve, including through experiments with
+packages such as `nextgen-kernels-api`, but the product contract should remain
+the same:
+
+- one runtime authority
+- later-opened editors attach to it
+- live memory continuity is preserved when possible
+
 ## Runtime Reuse
 
 Runtime reuse should be policy-driven.

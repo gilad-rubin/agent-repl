@@ -637,6 +637,43 @@ class TestV2CoreState(unittest.TestCase):
             self.assertEqual(contents_body["cells"][0]["source"], "x = 9\nx")
             self.assertEqual(contents_body["cells"][0]["outputs"][0]["data"]["text/plain"], "9")
 
+    def test_headless_runtime_keeps_live_memory_for_next_visible_cell_execution(self):
+        notebook_path = "notebooks/headless-continuity.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "x = 9\nx"},
+                    {"type": "code", "source": "x + 1"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            seed_exec, seed_status = self.state.notebook_execute_cell(notebook_path, cell_id=None, cell_index=0)
+            self.assertEqual(seed_status, 200)
+            self.assertEqual(seed_exec["status"], "ok")
+            self.assertEqual(seed_exec["outputs"][0]["data"]["text/plain"], "9")
+
+            visible_exec, visible_status = self.state.notebook_execute_visible_cell(
+                notebook_path,
+                cell_index=1,
+                source="x + 1",
+            )
+            self.assertEqual(visible_status, 200)
+            self.assertEqual(visible_exec["status"], "ok")
+            self.assertEqual(visible_exec["outputs"][0]["data"]["text/plain"], "10")
+
+            runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+            self.assertEqual(runtime_status, 200)
+            self.assertTrue(runtime_body["active"])
+            self.assertEqual(runtime_body["mode"], "headless")
+            self.assertFalse(runtime_body["runtime"]["busy"])
+            self.assertEqual(os.path.realpath(runtime_body["runtime"]["python_path"]), os.path.realpath(kernel_python))
+
     def test_headless_edit_delete_and_move_update_structure(self):
         notebook_path = "notebooks/headless-structure.ipynb"
         kernel_python = _python_with_ipykernel()
