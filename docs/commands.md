@@ -372,6 +372,8 @@ agent-repl v2 start --workspace-root /path/to/workspace
 ### v2 attach
 
 Ensure the v2 core daemon is running, then attach or resume a client session against that workspace authority.
+When the VS Code extension bridge starts, it now attempts this attach flow automatically for the
+primary workspace folder unless `agent-repl.v2AutoAttach` is disabled in extension settings.
 
 ```bash
 agent-repl v2 attach --actor agent --client-type cli --label "worker"
