@@ -573,6 +573,39 @@ class TestV2CoreState(unittest.TestCase):
             self.assertEqual(runtime_body["mode"], "headless")
             self.assertEqual(runtime_body["runtime"]["python_path"], os.path.realpath(kernel_python))
 
+    def test_headless_notebook_projection_returns_runtime_and_contents(self):
+        notebook_path = "notebooks/headless-projection.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "x = 4\nx"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            exec_body, exec_status = self.state.notebook_execute_cell(
+                notebook_path,
+                cell_id=None,
+                cell_index=0,
+            )
+            self.assertEqual(exec_status, 200)
+            self.assertEqual(exec_body["status"], "ok")
+
+            projection_body, projection_status = self.state.notebook_projection(notebook_path)
+            self.assertEqual(projection_status, 200)
+            self.assertTrue(projection_body["active"])
+            self.assertEqual(projection_body["mode"], "headless")
+            self.assertEqual(projection_body["runtime"]["python_path"], os.path.realpath(kernel_python))
+            self.assertEqual(len(projection_body["contents"]["cells"]), 1)
+            self.assertEqual(projection_body["contents"]["cells"][0]["source"], "x = 4\nx")
+            self.assertEqual(
+                projection_body["contents"]["cells"][0]["outputs"][0]["data"]["text/plain"],
+                "4",
+            )
+
     def test_headless_execute_visible_cell_updates_source_and_outputs(self):
         notebook_path = "notebooks/headless-visible.ipynb"
         kernel_python = _python_with_ipykernel()
@@ -1232,6 +1265,11 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.v2_command, "notebook-runtime")
         self.assertEqual(args.path, "notebooks/demo.ipynb")
 
+    def test_v2_notebook_projection(self):
+        args = build_parser().parse_args(["v2", "notebook-projection", "notebooks/demo.ipynb"])
+        self.assertEqual(args.v2_command, "notebook-projection")
+        self.assertEqual(args.path, "notebooks/demo.ipynb")
+
     def test_v2_execute_visible_cell(self):
         args = build_parser().parse_args(["v2", "execute-visible-cell", "notebooks/demo.ipynb", "--cell-index", "2", "-s", "x = 1"])
         self.assertEqual(args.v2_command, "execute-visible-cell")
@@ -1333,6 +1371,7 @@ class TestCommands(unittest.TestCase):
         client.notebook_restart.return_value = {"status": "ok"}
         client.notebook_restart_and_run_all.return_value = {"status": "ok"}
         client.notebook_runtime.return_value = {"status": "ok", "active": True}
+        client.notebook_projection.return_value = {"status": "ok", "active": True, "contents": {"path": "nb.ipynb", "cells": []}}
         client.notebook_execute_visible_cell.return_value = {"status": "ok"}
         client.list_branches.return_value = {"status": "ok", "branches": []}
         client.start_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "active"}}
@@ -1835,6 +1874,19 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         client.notebook_runtime.assert_called_once_with("notebooks/demo.ipynb")
+
+    def test_v2_notebook_projection(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "notebook-projection", "notebooks/demo.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.notebook_projection.assert_called_once_with("notebooks/demo.ipynb")
 
     def test_v2_execute_visible_cell(self):
         client = self._mock_v2_client()

@@ -545,6 +545,18 @@ class CoreState:
             "runtime": runtime.payload() if runtime is not None else None,
         }, HTTPStatus.OK
 
+    def notebook_projection(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        runtime = self.headless_runtimes.get(real_path)
+        return {
+            "status": "ok",
+            "path": relative_path,
+            "active": runtime is not None,
+            "mode": "headless" if runtime is not None else None,
+            "runtime": runtime.payload() if runtime is not None else None,
+            "contents": self._headless_notebook_contents(real_path, relative_path) if runtime is not None else None,
+        }, HTTPStatus.OK
+
     def notebook_execute_visible_cell(
         self,
         path: str,
@@ -1596,6 +1608,14 @@ def _handler_factory(state: CoreState):
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
                         return
                     body, status = state.notebook_runtime(path)
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/projection":
+                    path = payload.get("path")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    body, status = state.notebook_projection(path)
                     self._json(status, body)
                     return
                 if self.path == "/api/notebooks/execute-visible-cell":

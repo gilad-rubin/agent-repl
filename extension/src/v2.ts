@@ -3,9 +3,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as util from 'util';
 import * as vscode from 'vscode';
+import { toVSCode } from './notebook/outputs';
 
 const execFile = util.promisify(childProcess.execFile);
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const PROJECTION_SYNC_INTERVAL_MS = 1_000;
 export const PROJECTION_CONTROLLER_ID = 'agent-repl.headless-runtime';
 
 type CliPlan = {
@@ -215,10 +217,53 @@ type VisibleCellExecutionResult = {
     execution_count?: number | null;
 };
 
+type ProjectionCell = {
+    index: number;
+    cell_id?: string;
+    cell_type: string;
+    source: string;
+    outputs?: Array<Record<string, any>>;
+    execution_count?: number | null;
+    metadata?: Record<string, any>;
+};
+
+type NotebookProjectionState = {
+    status: string;
+    path: string;
+    active: boolean;
+    mode?: string | null;
+    runtime?: {
+        busy?: boolean;
+        current_execution?: {
+            cell_id?: string;
+            cell_index?: number;
+        } | null;
+        python_path?: string;
+    } | null;
+    contents?: {
+        path: string;
+        cells: ProjectionCell[];
+    } | null;
+};
+
+type ProjectionExecution = {
+    cellId?: string;
+    cellIndex: number;
+    execution: vscode.NotebookCellExecution;
+};
+
+type TrackedProjection = {
+    notebook: vscode.NotebookDocument;
+    lastAppliedSignature?: string;
+    activeExecution?: ProjectionExecution;
+};
+
 export class HeadlessNotebookProjection implements vscode.Disposable {
     private readonly controller: vscode.NotebookController;
     private readonly disposables: vscode.Disposable[] = [];
     private readonly attaching = new Set<string>();
+    private readonly tracked = new Map<string, TrackedProjection>();
+    private syncTimer: NodeJS.Timeout | undefined;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -236,8 +281,22 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         };
         this.disposables.push(this.controller);
         this.disposables.push(
+            this.controller.onDidChangeSelectedNotebooks(({ notebook, selected }) => {
+                if (selected) {
+                    this.trackNotebook(notebook);
+                    return;
+                }
+                this.untrackNotebook(notebook.uri.fsPath);
+            }),
+        );
+        this.disposables.push(
             vscode.workspace.onDidOpenNotebookDocument((notebook) => {
                 void this.attachNotebookIfRunning(notebook);
+            }),
+        );
+        this.disposables.push(
+            vscode.workspace.onDidCloseNotebookDocument((notebook) => {
+                this.untrackNotebook(notebook.uri.fsPath);
             }),
         );
         this.disposables.push(
@@ -247,9 +306,20 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
                 }
             }),
         );
+        this.syncTimer = setInterval(() => {
+            void this.syncTrackedNotebooks();
+        }, PROJECTION_SYNC_INTERVAL_MS);
     }
 
     dispose(): void {
+        if (this.syncTimer) {
+            clearInterval(this.syncTimer);
+            this.syncTimer = undefined;
+        }
+        for (const tracked of this.tracked.values()) {
+            tracked.activeExecution?.execution.end(false, Date.now());
+        }
+        this.tracked.clear();
         for (const disposable of this.disposables) {
             disposable.dispose();
         }
@@ -294,10 +364,41 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
                     extension: this.extensionId,
                 });
             }
+            this.trackNotebook(notebook);
+            await this.syncNotebookProjection(notebook);
             return true;
         } finally {
             this.attaching.delete(key);
         }
+    }
+
+    async syncNotebookProjection(notebook: vscode.NotebookDocument): Promise<boolean> {
+        const tracked = this.trackNotebook(notebook);
+        const workspaceRoot = workspaceRootForPath(notebook.uri.fsPath);
+        if (!workspaceRoot) {
+            return false;
+        }
+        const config = vscode.workspace.getConfiguration('agent-repl');
+        const state = await runCliJson<NotebookProjectionState>(workspaceRoot, config, [
+            'v2', 'notebook-projection',
+            '--workspace-root', workspaceRoot,
+            notebook.uri.fsPath,
+        ]);
+        if (!state.active || state.mode !== 'headless' || !state.contents) {
+            this.finishTrackedExecution(tracked, undefined);
+            return false;
+        }
+
+        let changed = false;
+        const signature = JSON.stringify(state.contents.cells);
+        if (!notebook.isDirty && tracked.lastAppliedSignature !== signature) {
+            await applyProjectionSnapshot(notebook, state.contents.cells);
+            tracked.lastAppliedSignature = signature;
+            changed = true;
+        }
+
+        this.syncTrackedExecution(tracked, state);
+        return changed;
     }
 
     private async executeCells(cells: readonly vscode.NotebookCell[], notebook: vscode.NotebookDocument): Promise<void> {
@@ -336,31 +437,110 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         }
         await notebook.save();
     }
+
+    private trackNotebook(notebook: vscode.NotebookDocument): TrackedProjection {
+        const existing = this.tracked.get(notebook.uri.fsPath);
+        if (existing) {
+            existing.notebook = notebook;
+            return existing;
+        }
+        const tracked: TrackedProjection = { notebook };
+        this.tracked.set(notebook.uri.fsPath, tracked);
+        return tracked;
+    }
+
+    private untrackNotebook(fsPath: string): void {
+        const tracked = this.tracked.get(fsPath);
+        if (!tracked) {
+            return;
+        }
+        this.finishTrackedExecution(tracked, undefined);
+        this.tracked.delete(fsPath);
+    }
+
+    private async syncTrackedNotebooks(): Promise<void> {
+        for (const tracked of this.tracked.values()) {
+            try {
+                await this.syncNotebookProjection(tracked.notebook);
+            } catch (err: any) {
+                console.warn('[agent-repl] notebook projection sync failed:', err?.message ?? String(err));
+            }
+        }
+    }
+
+    private syncTrackedExecution(tracked: TrackedProjection, state: NotebookProjectionState): void {
+        const current = state.runtime?.current_execution;
+        const busy = Boolean(state.runtime?.busy && current && typeof current.cell_index === 'number');
+        if (!busy || !current || typeof current.cell_index !== 'number') {
+            this.finishTrackedExecution(tracked, state);
+            return;
+        }
+        const matchesExisting = tracked.activeExecution &&
+            tracked.activeExecution.cellIndex === current.cell_index &&
+            tracked.activeExecution.cellId === current.cell_id;
+        if (matchesExisting) {
+            return;
+        }
+        this.finishTrackedExecution(tracked, undefined);
+        if (current.cell_index < 0 || current.cell_index >= tracked.notebook.cellCount) {
+            return;
+        }
+        const execution = this.controller.createNotebookCellExecution(tracked.notebook.cellAt(current.cell_index));
+        execution.start(Date.now());
+        tracked.activeExecution = {
+            cellId: current.cell_id,
+            cellIndex: current.cell_index,
+            execution,
+        };
+    }
+
+    private finishTrackedExecution(tracked: TrackedProjection, state: NotebookProjectionState | undefined): void {
+        const active = tracked.activeExecution;
+        if (!active) {
+            return;
+        }
+        const snapshotCell = state?.contents?.cells?.[active.cellIndex];
+        if (snapshotCell) {
+            if (typeof snapshotCell.execution_count === 'number') {
+                active.execution.executionOrder = snapshotCell.execution_count;
+            }
+            void active.execution.replaceOutput(toNotebookOutputs(snapshotCell.outputs ?? []));
+            active.execution.end(!hasErrorOutput(snapshotCell.outputs ?? []), Date.now());
+        } else {
+            active.execution.end(false, Date.now());
+        }
+        tracked.activeExecution = undefined;
+    }
+}
+
+async function applyProjectionSnapshot(
+    notebook: vscode.NotebookDocument,
+    cells: ProjectionCell[],
+): Promise<void> {
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(notebook.uri, [
+        vscode.NotebookEdit.replaceCells(
+            new vscode.NotebookRange(0, notebook.cellCount),
+            cells.map((cell) => {
+                const kind = cell.cell_type === 'code' ? vscode.NotebookCellKind.Code : vscode.NotebookCellKind.Markup;
+                const languageId = cell.cell_type === 'code' ? 'python' : 'markdown';
+                const cellData = new vscode.NotebookCellData(kind, cell.source ?? '', languageId);
+                cellData.metadata = cell.metadata ?? {};
+                cellData.outputs = toNotebookOutputs(cell.outputs ?? []);
+                return cellData;
+            }),
+        ),
+    ]);
+    await vscode.workspace.applyEdit(edit);
+    await notebook.save();
 }
 
 function toNotebookOutputs(outputs: Array<Record<string, any>>): vscode.NotebookCellOutput[] {
-    return outputs.map((output) => {
-        const outputType = output.output_type;
-        if (outputType === 'stream') {
-            return new vscode.NotebookCellOutput([
-                vscode.NotebookCellOutputItem.text(String(output.text ?? ''), output.name === 'stderr' ? 'application/vnd.code.notebook.stderr' : 'application/vnd.code.notebook.stdout'),
-            ]);
-        }
-        if (outputType === 'error') {
-            return new vscode.NotebookCellOutput([
-                vscode.NotebookCellOutputItem.error(new Error(String(output.evalue ?? output.ename ?? 'Execution failed'))),
-            ]);
-        }
-        const data = output.data ?? {};
-        const items: vscode.NotebookCellOutputItem[] = [];
-        if (typeof data['text/plain'] === 'string') {
-            items.push(vscode.NotebookCellOutputItem.text(data['text/plain']));
-        }
-        if (items.length === 0) {
-            items.push(vscode.NotebookCellOutputItem.text(JSON.stringify(data)));
-        }
-        return new vscode.NotebookCellOutput(items, output.metadata ?? {});
-    });
+    return outputs.map((output) => toVSCode(output as any));
+}
+
+function hasErrorOutput(outputs: Array<Record<string, any>>): boolean {
+    return outputs.some((output) => output.output_type === 'error');
 }
 
 async function runCliJson<T>(workspaceRoot: string, config: vscode.WorkspaceConfiguration, args: string[]): Promise<T> {

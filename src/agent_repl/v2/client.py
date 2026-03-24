@@ -287,6 +287,9 @@ class V2Client:
     def notebook_runtime(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/runtime", {"path": path}, timeout=120)
 
+    def notebook_projection(self, path: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/projection", {"path": path}, timeout=120)
+
     def notebook_execute_visible_cell(self, path: str, *, cell_index: int, source: str) -> dict[str, Any]:
         return self._post(
             "/api/notebooks/execute-visible-cell",

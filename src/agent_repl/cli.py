@@ -366,6 +366,11 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.v2_command == "notebook-projection":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).notebook_projection(args.path)
+        _out(result, args.pretty)
+        return 0
+
     if args.v2_command == "execute-visible-cell":
         result = _v2_client(workspace_root, runtime_dir=runtime_dir).notebook_execute_visible_cell(
             args.path,
@@ -653,6 +658,11 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = v2sub.add_parser("notebook-runtime", help="Inspect whether a notebook currently has an active headless runtime")
+    vp.add_argument("path")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("notebook-projection", help="Fetch the runtime-owned snapshot for an actively projected headless notebook")
     vp.add_argument("path")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
