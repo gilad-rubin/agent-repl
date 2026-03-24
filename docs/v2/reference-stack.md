@@ -153,3 +153,5 @@ The current best stack posture is:
 - prototype kernel/session decoupling ideas before committing
 - use commercial or polished notebook AI systems mainly as workflow references
 - avoid switching the foundation to Deepnote or any client-owned notebook surface
+
+For the detailed RTC posture, see [RTC Evaluation](rtc-evaluation.md).
