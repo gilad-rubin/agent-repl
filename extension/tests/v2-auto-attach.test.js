@@ -31,9 +31,28 @@ test('v2CliPlans prefers uv run when a pyproject exists in the workspace root', 
 
     try {
         const { v2CliPlans } = loadV2Module();
-        const plans = v2CliPlans('/workspace');
+        const plans = v2CliPlans('/workspace', { get: () => undefined });
         assert.deepEqual(plans[0], { command: 'uv', args: ['run', 'agent-repl'], cwd: '/workspace' });
         assert.deepEqual(plans[1], { command: 'agent-repl', args: [], cwd: '/workspace' });
+    } finally {
+        fs.existsSync = originalExistsSync;
+    }
+});
+
+test('v2CliPlans prefers configured and workspace-local launchers before PATH fallbacks', () => {
+    const originalExistsSync = fs.existsSync;
+    fs.existsSync = (target) => (
+        target === '/workspace/.venv/bin/agent-repl' ||
+        target === '/workspace/pyproject.toml'
+    );
+
+    try {
+        const { v2CliPlans } = loadV2Module();
+        const plans = v2CliPlans('/workspace', { get: () => '/custom/agent-repl' });
+        assert.deepEqual(plans[0], { command: '/custom/agent-repl', args: [], cwd: '/workspace' });
+        assert.deepEqual(plans[1], { command: '/workspace/.venv/bin/agent-repl', args: [], cwd: '/workspace' });
+        assert.deepEqual(plans[2], { command: 'uv', args: ['run', 'agent-repl'], cwd: '/workspace' });
+        assert.deepEqual(plans[3], { command: 'agent-repl', args: [], cwd: '/workspace' });
     } finally {
         fs.existsSync = originalExistsSync;
     }

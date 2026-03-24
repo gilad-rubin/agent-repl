@@ -22,12 +22,49 @@ export function primaryWorkspaceRoot(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-export function v2CliPlans(workspaceRoot: string): CliPlan[] {
+function workspaceExecutable(workspaceRoot: string, executable: string): string {
+    const binDir = process.platform === 'win32' ? 'Scripts' : 'bin';
+    return path.join(workspaceRoot, '.venv', binDir, executable);
+}
+
+function existingWorkspaceCliPath(workspaceRoot: string): string | undefined {
+    const executable = process.platform === 'win32' ? 'agent-repl.exe' : 'agent-repl';
+    const candidate = workspaceExecutable(workspaceRoot, executable);
+    return fs.existsSync(candidate) ? candidate : undefined;
+}
+
+function configuredCliPath(config: vscode.WorkspaceConfiguration): string | undefined {
+    const value = config.get<string>('cliPath');
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : undefined;
+}
+
+export function v2CliPlans(workspaceRoot: string, config: vscode.WorkspaceConfiguration): CliPlan[] {
     const plans: CliPlan[] = [];
-    if (fs.existsSync(path.join(workspaceRoot, 'pyproject.toml'))) {
-        plans.push({ command: 'uv', args: ['run', 'agent-repl'], cwd: workspaceRoot });
+    const seen = new Set<string>();
+    const push = (command: string, args: string[]) => {
+        const key = `${command}\0${args.join('\0')}`;
+        if (!seen.has(key)) {
+            plans.push({ command, args, cwd: workspaceRoot });
+            seen.add(key);
+        }
+    };
+
+    const cliPath = configuredCliPath(config);
+    if (cliPath) {
+        push(cliPath, []);
     }
-    plans.push({ command: 'agent-repl', args: [], cwd: workspaceRoot });
+
+    const workspaceCli = existingWorkspaceCliPath(workspaceRoot);
+    if (workspaceCli) {
+        push(workspaceCli, []);
+    }
+
+    if (fs.existsSync(path.join(workspaceRoot, 'pyproject.toml'))) {
+        push('uv', ['run', 'agent-repl']);
+    }
+
+    push('agent-repl', []);
     return plans;
 }
 
@@ -123,7 +160,7 @@ export class V2AutoAttach implements vscode.Disposable {
     private async runCli(workspaceRoot: string, args: string[]): Promise<any> {
         let lastError: Error | undefined;
         const diagnostics: string[] = [];
-        for (const plan of v2CliPlans(workspaceRoot)) {
+        for (const plan of v2CliPlans(workspaceRoot, vscode.workspace.getConfiguration('agent-repl'))) {
             try {
                 const result = await execFile(plan.command, [...plan.args, ...args], {
                     cwd: plan.cwd,

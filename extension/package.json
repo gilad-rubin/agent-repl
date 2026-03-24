@@ -32,6 +32,7 @@
         "agent-repl.port": { "type": "number", "default": 0, "description": "Fixed port (0 = auto)" },
         "agent-repl.autoStart": { "type": "boolean", "default": true, "description": "Start bridge when the workspace loads" },
         "agent-repl.v2AutoAttach": { "type": "boolean", "default": true, "description": "Automatically attach the VS Code window to the workspace-scoped v2 core when the bridge starts" },
+        "agent-repl.cliPath": { "type": "string", "default": "", "description": "Optional explicit path or command name for launching the agent-repl CLI from the extension host" },
         "agent-repl.maxQueueSize": { "type": "number", "default": 20, "description": "Max queued executions" },
         "agent-repl.executionTimeout": { "type": "number", "default": 300, "description": "Execution timeout (seconds)" },
         "agent-repl.executionMode": {

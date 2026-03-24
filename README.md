@@ -48,6 +48,7 @@ Creating a brand-new notebook still goes through Jupyter kernel attachment, so t
 - **Hot-reload** — Update extension routes without restarting the bridge
 - **Experimental v2 core daemon** — Start a workspace-scoped core authority process with attach/resume session flows, collaboration branches, document, runtime, run, and file-sync registration independent of VS Code, with workspace-owned state persistence across daemon restarts
 - **VS Code v2 projection attach** — The extension now auto-attaches the editor window to the matching v2 core session when the bridge starts, so editor presence becomes part of the shared runtime contract
+- **Deterministic v2 launcher discovery** — Auto-attach now prefers an explicit CLI path and workspace-local `.venv` launchers before falling back to PATH-based resolution
 - **Explicit file sync boundaries** — Registered v2 documents track bound file snapshots, detect external changes, and require explicit rebinding instead of silently accepting disk drift
 
 ## The Prompt Loop

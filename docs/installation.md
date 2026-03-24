@@ -72,6 +72,8 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 |---------|---------|-------------|
 | `agent-repl.port` | `0` (auto) | Fixed port for the bridge server |
 | `agent-repl.autoStart` | `true` | Start bridge automatically on notebook open |
+| `agent-repl.v2AutoAttach` | `true` | Auto-attach the VS Code window to the matching v2 core when the bridge starts |
+| `agent-repl.cliPath` | `""` | Optional explicit `agent-repl` launcher path or command for extension-host v2 auto-attach |
 | `agent-repl.maxQueueSize` | `20` | Maximum queued executions per notebook |
 | `agent-repl.executionTimeout` | `300` | Execution timeout in seconds |
 | `agent-repl.executionMode` | `no-yank` | `no-yank` prefers background execution to avoid stealing focus; `native` always uses VS Code's notebook command path |
@@ -82,6 +84,11 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 - Make sure VS Code/Cursor is open with a `.ipynb` file
 - Check that the extension is installed: look for "Agent REPL" in the activity bar
 - Manually start: Command Palette → "Agent REPL: Start Bridge"
+
+**"v2 auto-attach cannot find agent-repl"**
+- Set `agent-repl.cliPath` if the extension host cannot resolve the CLI from PATH
+- The extension prefers this order for v2 auto-attach: configured `cliPath`, workspace-local `.venv` launcher, `uv run agent-repl`, then plain `agent-repl`
+- Check the extension host logs for the full launcher attempt diagnostics
 
 **Connection file not found**
 - The extension writes to `~/Library/Jupyter/runtime/` (macOS) or `~/.local/share/jupyter/runtime/` (Linux)
