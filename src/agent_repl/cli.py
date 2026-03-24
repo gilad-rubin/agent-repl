@@ -368,6 +368,14 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.v2_command == "project-visible-notebook":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).notebook_project_visible(
+            args.path,
+            cells=_read_json_payload(args, field_name="cells"),
+        )
+        _out(result, args.pretty)
+        return 0
+
     if args.v2_command == "execute-visible-cell":
         result = _v2_client(workspace_root, runtime_dir=runtime_dir).notebook_execute_visible_cell(
             args.path,
@@ -469,6 +477,21 @@ def _read_source(args: argparse.Namespace) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read()
     raise SystemExit("Error: provide --source/-s or pipe to stdin")
+
+
+def _read_json_payload(args: argparse.Namespace, *, field_name: str) -> list[dict[str, Any]]:
+    inline = getattr(args, f"{field_name}_json", None)
+    if inline is not None:
+        payload = json.loads(inline)
+    else:
+        payload_file = getattr(args, f"{field_name}_file", None)
+        if not payload_file:
+            raise SystemExit(f"Error: provide --{field_name}-json or --{field_name}-file")
+        with open(payload_file, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    if not isinstance(payload, list):
+        raise SystemExit(f"Error: --{field_name}-json / --{field_name}-file must contain a JSON array")
+    return [item for item in payload if isinstance(item, dict)]
 
 
 # ------------------------------------------------------------------
@@ -661,6 +684,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     vp = v2sub.add_parser("notebook-projection", help="Fetch the runtime-owned snapshot for an actively projected headless notebook")
     vp.add_argument("path")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("project-visible-notebook", help=argparse.SUPPRESS)
+    vp.add_argument("path")
+    vp.add_argument("--cells-json")
+    vp.add_argument("--cells-file")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 

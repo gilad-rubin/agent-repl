@@ -163,6 +163,8 @@ function loadV2Module(workspaceFolders = [], options = {}) {
                     execCalls.push([command, args]);
                     const key = args.includes('execute-visible-cell')
                         ? 'execute-visible-cell'
+                        : args.includes('project-visible-notebook')
+                            ? 'project-visible-notebook'
                         : args.includes('notebook-projection')
                             ? 'notebook-projection'
                             : args.includes('notebook-runtime')
@@ -447,6 +449,10 @@ test('HeadlessNotebookProjection executes the visible cell source against the sh
         [{ uri: { fsPath: '/workspace' } }],
         {
             execResponses: {
+                'project-visible-notebook': {
+                    status: 'ok',
+                    cell_count: 1,
+                },
                 'execute-visible-cell': {
                     status: 'ok',
                     execution_count: 3,
@@ -459,13 +465,15 @@ test('HeadlessNotebookProjection executes the visible cell source against the sh
     try {
         const controller = getController();
         await controller.executeHandler([cell], doc, controller);
-        assert.equal(execCalls.length, 1);
-        assert.ok(execCalls[0][1].includes('execute-visible-cell'));
+        assert.equal(execCalls.length, 2);
+        assert.ok(execCalls[0][1].includes('project-visible-notebook'));
         assert.ok(execCalls[0][1].includes('/workspace/notebooks/demo.ipynb'));
-        assert.ok(execCalls[0][1].includes('--cell-index'));
-        assert.ok(execCalls[0][1].includes('0'));
-        assert.ok(execCalls[0][1].includes('--source'));
-        assert.ok(execCalls[0][1].includes('x = 9\nx'));
+        assert.ok(execCalls[1][1].includes('execute-visible-cell'));
+        assert.ok(execCalls[1][1].includes('/workspace/notebooks/demo.ipynb'));
+        assert.ok(execCalls[1][1].includes('--cell-index'));
+        assert.ok(execCalls[1][1].includes('0'));
+        assert.ok(execCalls[1][1].includes('--source'));
+        assert.ok(execCalls[1][1].includes('x = 9\nx'));
         assert.equal(executions.length, 1);
         assert.equal(executions[0].executionOrder, 3);
         assert.equal(executions[0].success, true);

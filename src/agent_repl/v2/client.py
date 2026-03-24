@@ -303,6 +303,13 @@ class V2Client:
     def notebook_projection(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/projection", {"path": path}, timeout=120)
 
+    def notebook_project_visible(self, path: str, *, cells: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._post(
+            "/api/notebooks/project-visible",
+            {"path": path, "cells": cells},
+            timeout=120,
+        )
+
     def notebook_execute_visible_cell(self, path: str, *, cell_index: int, source: str) -> dict[str, Any]:
         return self._post(
             "/api/notebooks/execute-visible-cell",

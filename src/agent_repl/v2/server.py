@@ -519,6 +519,23 @@ class CoreState:
             "contents": self._headless_notebook_contents(real_path, relative_path) if runtime is not None else None,
         }, HTTPStatus.OK
 
+    def notebook_project_visible(
+        self,
+        path: str,
+        *,
+        cells: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        runtime = self.headless_runtimes.get(real_path)
+        if runtime is None:
+            return {
+                "error": f"No active headless runtime is bound to '{relative_path}'",
+                "path": relative_path,
+            }, HTTPStatus.NOT_FOUND
+        payload = self._headless_notebook_project_visible(real_path, relative_path, cells=cells)
+        self._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
+
     def notebook_execute_visible_cell(
         self,
         path: str,
@@ -728,6 +745,50 @@ class CoreState:
                 normalized.append(json.loads(json.dumps(output)))
         return normalized
 
+    def _incoming_cell_id(self, payload: dict[str, Any]) -> str | None:
+        cell_id = payload.get("cell_id")
+        if isinstance(cell_id, str) and cell_id:
+            return cell_id
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        custom = metadata.get("custom")
+        if not isinstance(custom, dict):
+            return None
+        agent_repl = custom.get("agent-repl")
+        if not isinstance(agent_repl, dict):
+            return None
+        candidate = agent_repl.get("cell_id")
+        return candidate if isinstance(candidate, str) and candidate else None
+
+    def _materialize_visible_cell(self, payload: dict[str, Any], existing_by_id: dict[str, Any]) -> Any:
+        cell_type = "code" if payload.get("cell_type") == "code" else "markdown"
+        source = payload.get("source", "")
+        metadata = payload.get("metadata")
+        metadata_dict = json.loads(json.dumps(metadata)) if isinstance(metadata, dict) else {}
+        stable_cell_id = self._incoming_cell_id(payload)
+        existing = existing_by_id.get(stable_cell_id) if stable_cell_id else None
+
+        if cell_type == "code":
+            cell = nbformat.v4.new_code_cell(source=source)
+            if existing is not None and getattr(existing, "cell_type", None) == "code" and getattr(existing, "source", "") == source:
+                cell.outputs = [nbformat.from_dict(output) for output in self._canonical_outputs(getattr(existing, "outputs", []))]
+                cell.execution_count = getattr(existing, "execution_count", None)
+            else:
+                cell.outputs = []
+                cell.execution_count = None
+        else:
+            cell = nbformat.v4.new_markdown_cell(source=source)
+
+        cell.metadata = metadata_dict
+        if stable_cell_id:
+            custom = dict(cell.metadata.get("custom", {}) or {})
+            agent_repl = dict(custom.get("agent-repl", {}) or {})
+            agent_repl["cell_id"] = stable_cell_id
+            custom["agent-repl"] = agent_repl
+            cell.metadata["custom"] = custom
+        return cell
+
     def _headless_notebook_contents(self, real_path: str, relative_path: str) -> dict[str, Any]:
         notebook, changed = self._load_notebook(real_path)
         if changed:
@@ -809,6 +870,32 @@ class CoreState:
                 "type": "headless",
             },
             "message": f"Selected kernel: {python_path}",
+            "mode": "headless",
+        }
+
+    def _headless_notebook_project_visible(
+        self,
+        real_path: str,
+        relative_path: str,
+        *,
+        cells: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        notebook, _ = self._load_notebook(real_path)
+        existing_by_id = {
+            self._cell_id(cell, index): cell
+            for index, cell in enumerate(notebook.cells)
+        }
+        notebook.cells = [
+            self._materialize_visible_cell(payload, existing_by_id)
+            for payload in cells
+        ]
+        for index, cell in enumerate(notebook.cells):
+            self._ensure_cell_identity(cell, index)
+        self._save_notebook(real_path, notebook)
+        return {
+            "status": "ok",
+            "path": relative_path,
+            "cell_count": len(notebook.cells),
             "mode": "headless",
         }
 
@@ -1590,6 +1677,21 @@ def _handler_factory(state: CoreState):
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
                         return
                     body, status = state.notebook_projection(path)
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/project-visible":
+                    path = payload.get("path")
+                    cells = payload.get("cells")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    if not isinstance(cells, list):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing cells"})
+                        return
+                    body, status = state.notebook_project_visible(
+                        path,
+                        cells=[item for item in cells if isinstance(item, dict)],
+                    )
                     self._json(status, body)
                     return
                 if self.path == "/api/notebooks/execute-visible-cell":

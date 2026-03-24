@@ -1,9 +1,10 @@
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as util from 'util';
 import * as vscode from 'vscode';
-import { toVSCode } from './notebook/outputs';
+import { toJupyter, toVSCode } from './notebook/outputs';
 
 const execFile = util.promisify(childProcess.execFile);
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -217,6 +218,13 @@ type VisibleCellExecutionResult = {
     execution_count?: number | null;
 };
 
+type ProjectVisibleNotebookResult = {
+    status: string;
+    path: string;
+    cell_count: number;
+    mode?: string | null;
+};
+
 type ProjectionCell = {
     index: number;
     cell_id?: string;
@@ -407,6 +415,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             throw new Error(`No workspace root matched '${notebook.uri.fsPath}'`);
         }
         const config = vscode.workspace.getConfiguration('agent-repl');
+        await this.projectVisibleNotebook(workspaceRoot, config, notebook);
         for (const cell of cells) {
             if (cell.kind !== vscode.NotebookCellKind.Code) {
                 continue;
@@ -436,6 +445,39 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             }
         }
         await notebook.save();
+    }
+
+    private async projectVisibleNotebook(
+        workspaceRoot: string,
+        config: vscode.WorkspaceConfiguration,
+        notebook: vscode.NotebookDocument,
+    ): Promise<void> {
+        const notebookCells = typeof notebook.getCells === 'function'
+            ? notebook.getCells()
+            : Array.from({ length: notebook.cellCount }, (_unused, index) => notebook.cellAt(index));
+        const projection = notebookCells.map((cell) => ({
+            cell_type: cell.kind === vscode.NotebookCellKind.Code ? 'code' : 'markdown',
+            source: cell.document.getText(),
+            cell_id: cell.metadata?.custom?.['agent-repl']?.cell_id,
+            metadata: cell.metadata ?? {},
+            outputs: toJupyter(cell),
+            execution_count: cell.executionSummary?.executionOrder ?? null,
+        }));
+        const tempFile = path.join(
+            os.tmpdir(),
+            `agent-repl-visible-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+        );
+        await fs.promises.writeFile(tempFile, JSON.stringify(projection), 'utf8');
+        try {
+            await runCliJson<ProjectVisibleNotebookResult>(workspaceRoot, config, [
+                'v2', 'project-visible-notebook',
+                '--workspace-root', workspaceRoot,
+                notebook.uri.fsPath,
+                '--cells-file', tempFile,
+            ]);
+        } finally {
+            void fs.promises.unlink(tempFile).catch(() => undefined);
+        }
     }
 
     private trackNotebook(notebook: vscode.NotebookDocument): TrackedProjection {
