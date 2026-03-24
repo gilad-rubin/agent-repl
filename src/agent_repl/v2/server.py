@@ -346,7 +346,8 @@ class CoreState:
             return {"error": f"Path is outside workspace: {path}"}, HTTPStatus.BAD_REQUEST
 
         now = time.time()
-        observed_snapshot = _snapshot_file(real_path)
+        relative_path = os.path.relpath(real_path, os.path.realpath(self.workspace_root))
+        observed_snapshot = _snapshot_document(real_path, relative_path=relative_path, workspace_root=self.workspace_root)
         for record in self.document_records.values():
             if record.path == real_path:
                 record.observed_snapshot = observed_snapshot
@@ -363,7 +364,7 @@ class CoreState:
         record = DocumentRecord(
             document_id=str(uuid.uuid4()),
             path=real_path,
-            relative_path=os.path.relpath(real_path, os.path.realpath(self.workspace_root)),
+            relative_path=relative_path,
             file_format=_file_format(real_path),
             sync_state=_compute_sync_state(observed_snapshot, observed_snapshot),
             bound_snapshot=observed_snapshot,
@@ -384,7 +385,11 @@ class CoreState:
         record = self.document_records.get(document_id)
         if record is None:
             return {"error": f"Unknown document_id: {document_id}"}, HTTPStatus.NOT_FOUND
-        record.observed_snapshot = _snapshot_file(record.path)
+        record.observed_snapshot = _snapshot_document(
+            record.path,
+            relative_path=record.relative_path,
+            workspace_root=self.workspace_root,
+        )
         record.sync_state = _compute_sync_state(record.bound_snapshot, record.observed_snapshot)
         record.updated_at = time.time()
         self.persist()
@@ -398,7 +403,11 @@ class CoreState:
         record = self.document_records.get(document_id)
         if record is None:
             return {"error": f"Unknown document_id: {document_id}"}, HTTPStatus.NOT_FOUND
-        observed_snapshot = _snapshot_file(record.path)
+        observed_snapshot = _snapshot_document(
+            record.path,
+            relative_path=record.relative_path,
+            workspace_root=self.workspace_root,
+        )
         record.bound_snapshot = observed_snapshot
         record.observed_snapshot = observed_snapshot
         record.sync_state = _compute_sync_state(record.bound_snapshot, record.observed_snapshot)
@@ -934,10 +943,66 @@ def _snapshot_file(path: str) -> dict[str, Any]:
     digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
     return {
         "exists": True,
+        "source_kind": "file",
         "size_bytes": stat.st_size,
         "mtime": stat.st_mtime,
         "sha256": digest,
         "observed_at": observed_at,
+    }
+
+
+def _snapshot_document(path: str, *, relative_path: str, workspace_root: str) -> dict[str, Any]:
+    live_snapshot = _snapshot_live_document(path, relative_path=relative_path, workspace_root=workspace_root)
+    if live_snapshot is not None:
+        return live_snapshot
+    return _snapshot_file(path)
+
+
+def _snapshot_live_document(path: str, *, relative_path: str, workspace_root: str) -> dict[str, Any] | None:
+    if _file_format(path) != "ipynb":
+        return None
+
+    try:
+        from agent_repl.client import BridgeClient
+
+        client = BridgeClient.discover(workspace_hint=path)
+        payload = client.contents(relative_path)
+    except Exception:
+        return None
+
+    cells = payload.get("cells")
+    if not isinstance(cells, list):
+        return None
+
+    canonical_cells = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        canonical_cells.append(
+            {
+                "cell_id": cell.get("cell_id"),
+                "cell_type": cell.get("cell_type"),
+                "source": cell.get("source"),
+                "outputs": cell.get("outputs"),
+                "execution_count": cell.get("execution_count"),
+                "metadata": cell.get("metadata"),
+            }
+        )
+
+    observed_at = time.time()
+    encoded = json.dumps(
+        {"path": relative_path, "cells": canonical_cells},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return {
+        "exists": True,
+        "source_kind": "bridge-live",
+        "size_bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "observed_at": observed_at,
+        "cell_count": len(canonical_cells),
     }
 
 

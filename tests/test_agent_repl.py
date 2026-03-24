@@ -268,6 +268,47 @@ class TestV2CoreState(unittest.TestCase):
         self.assertEqual(rebound["sync_state"], "in-sync")
         self.assertEqual(rebound["bound_snapshot"]["sha256"], rebound["observed_snapshot"]["sha256"])
 
+    def test_refresh_document_prefers_live_notebook_snapshot_over_stale_disk_state(self):
+        live_bound = {
+            "exists": True,
+            "source_kind": "bridge-live",
+            "size_bytes": 100,
+            "sha256": "live-bound",
+            "observed_at": 1.0,
+            "cell_count": 2,
+        }
+        live_changed = {
+            "exists": True,
+            "source_kind": "bridge-live",
+            "size_bytes": 140,
+            "sha256": "live-changed",
+            "observed_at": 2.0,
+            "cell_count": 3,
+        }
+        file_snapshot = {
+            "exists": True,
+            "size_bytes": 11,
+            "mtime": 1.0,
+            "sha256": "disk-stale",
+            "observed_at": 1.0,
+        }
+
+        with (
+            mock.patch("agent_repl.v2.server._snapshot_live_document", side_effect=[live_bound, live_changed]),
+            mock.patch("agent_repl.v2.server._snapshot_file", return_value=file_snapshot),
+        ):
+            body, status = self.state.open_document("notebooks/demo.ipynb")
+            self.assertEqual(status, 200)
+            document = body["document"]
+            self.assertEqual(document["bound_snapshot"]["sha256"], "live-bound")
+            self.assertEqual(document["sync_state"], "in-sync")
+
+            refresh_body, refresh_status = self.state.refresh_document(document["document_id"])
+            self.assertEqual(refresh_status, 200)
+            refreshed = refresh_body["document"]
+            self.assertEqual(refreshed["observed_snapshot"]["sha256"], "live-changed")
+            self.assertEqual(refreshed["sync_state"], "external-change")
+
     def test_refresh_document_reports_missing_file(self):
         body, status = self.state.open_document("notebooks/demo.ipynb")
         self.assertEqual(status, 200)
