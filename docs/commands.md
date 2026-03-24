@@ -351,6 +351,50 @@ No arguments. Prints "Extension host restarting..." on success.
 
 ---
 
+## v2
+
+Experimental workspace-scoped core daemon commands for the v2 architecture work.
+
+```
+agent-repl v2 {start|status|stop} [--workspace-root PATH] [--pretty]
+```
+
+### v2 start
+
+Start the experimental v2 core daemon for the current workspace and return its status payload.
+
+```bash
+agent-repl v2 start
+agent-repl v2 start --workspace-root /path/to/workspace
+```
+
+### v2 status
+
+Inspect the experimental v2 core daemon bound to a workspace.
+
+```bash
+agent-repl v2 status
+agent-repl v2 status --workspace-root /path/to/workspace
+```
+
+### v2 stop
+
+Stop the experimental v2 core daemon bound to a workspace.
+
+```bash
+agent-repl v2 stop
+agent-repl v2 stop --workspace-root /path/to/workspace
+```
+
+Current behavior:
+
+- the daemon is workspace-scoped
+- it runs independently of VS Code
+- it currently exposes core authority health/status scaffolding only
+- this is the first executable v2 slice, not the finished v2 workflow
+
+---
+
 ## Shared Concepts
 
 ### Source Input

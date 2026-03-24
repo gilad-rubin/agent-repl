@@ -35,6 +35,9 @@ agent-repl exec analysis.ipynb --cell-id <id>
 agent-repl edit analysis.ipynb replace-source --cell-id <id> -s 'new code'
 agent-repl status analysis.ipynb
 agent-repl restart analysis.ipynb
+agent-repl v2 start
+agent-repl v2 status
+agent-repl v2 stop
 ```
 
 - `ix` waits for completion by default, with a default timeout of 30 seconds
@@ -44,6 +47,7 @@ agent-repl restart analysis.ipynb
 - prefer `--cell-id` over `--index`; IDs survive reordering while indexes do not
 - source input is shared across commands: `-s`, `--source-file`, or stdin
 - `run-all` and `restart-run-all` trigger notebook execution and return immediately; follow them with `status` until the kernel is idle before assuming the notebook is ready
+- `v2 start`, `v2 status`, and `v2 stop` are experimental workspace-core commands for the new architecture direction; they do not replace the bridge workflow yet
 
 ## Notebook Creation
 

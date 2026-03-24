@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
 from agent_repl.client import BridgeClient
+from agent_repl.v2.client import DEFAULT_START_TIMEOUT, V2Client
+from agent_repl.v2.server import serve_forever
 
 
 def _out(data: Any, pretty: bool = False) -> None:
@@ -15,6 +18,10 @@ def _out(data: Any, pretty: bool = False) -> None:
 
 def _client(workspace_hint: str | None = None) -> BridgeClient:
     return BridgeClient.discover(workspace_hint=workspace_hint)
+
+
+def _v2_client(workspace_hint: str | None = None, runtime_dir: str | None = None) -> V2Client:
+    return V2Client.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir)
 
 
 # ------------------------------------------------------------------
@@ -201,6 +208,36 @@ def cmd_respond(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_v2(args: argparse.Namespace) -> int:
+    workspace_root = os.path.realpath(getattr(args, "workspace_root", None) or os.getcwd())
+    runtime_dir = getattr(args, "runtime_dir", None)
+
+    if args.v2_command == "start":
+        result = V2Client.start(
+            workspace_root,
+            timeout=getattr(args, "timeout", DEFAULT_START_TIMEOUT),
+            runtime_dir=runtime_dir,
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "status":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).status()
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "stop":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).shutdown()
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "serve":
+        serve_forever(workspace_root, runtime_dir=args.runtime_dir)
+        return 0
+
+    raise RuntimeError("Unknown v2 command")
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
@@ -327,6 +364,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-s", "--source")
     p.add_argument("--source-file")
 
+    # v2
+    p = sub.add_parser("v2", help="Experimental v2 core daemon commands")
+    v2sub = p.add_subparsers(dest="v2_command")
+
+    vp = v2sub.add_parser("start", help="Start the experimental v2 core daemon for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to bind the daemon to (default: cwd)")
+    vp.add_argument("--timeout", type=float, default=DEFAULT_START_TIMEOUT, help="Seconds to wait for the daemon to become reachable")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("status", help="Show v2 core daemon status for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("stop", help="Stop the v2 core daemon for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to stop (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("serve", help=argparse.SUPPRESS)
+    vp.add_argument("--workspace-root", required=True)
+    vp.add_argument("--runtime-dir", required=True)
+
     return parser
 
 
@@ -364,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         "select-kernel": cmd_select_kernel,
         "prompts": cmd_prompts,
         "respond": cmd_respond,
+        "v2": cmd_v2,
     }
 
     handler = handlers.get(args.command)

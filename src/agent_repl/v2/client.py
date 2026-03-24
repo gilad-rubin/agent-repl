@@ -1,0 +1,188 @@
+"""Client and discovery helpers for the experimental v2 core daemon."""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from agent_repl.client import _bridge_error_message
+
+
+RUNTIME_FILE_PREFIX = "agent-repl-v2-core-"
+DEFAULT_START_TIMEOUT = 5.0
+
+
+class V2Client:
+    """HTTP client for the experimental v2 core daemon."""
+
+    def __init__(self, base_url: str, token: str):
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self._session = requests.Session()
+        self._session.headers["Authorization"] = f"token {token}"
+
+    @classmethod
+    def start(
+        cls,
+        workspace_root: str,
+        *,
+        timeout: float = DEFAULT_START_TIMEOUT,
+        runtime_dir: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_root = os.path.realpath(workspace_root)
+        runtime_dir = os.path.realpath(runtime_dir or _runtime_dir())
+
+        try:
+            client = cls.discover(workspace_root, runtime_dir=runtime_dir)
+        except RuntimeError:
+            client = None
+
+        if client is not None:
+            result = client.status()
+            result["already_running"] = True
+            return result
+
+        Path(runtime_dir).mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["AGENT_REPL_V2_RUNTIME_DIR"] = runtime_dir
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "agent_repl",
+                "v2",
+                "serve",
+                "--workspace-root",
+                workspace_root,
+                "--runtime-dir",
+                runtime_dir,
+            ],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                client = cls.discover(workspace_root, runtime_dir=runtime_dir)
+                result = client.status()
+                result["already_running"] = False
+                return result
+            except RuntimeError:
+                time.sleep(0.1)
+
+        raise RuntimeError("Timed out waiting for agent-repl v2 core daemon to start")
+
+    @classmethod
+    def discover(
+        cls,
+        workspace_hint: str | None = None,
+        *,
+        runtime_dir: str | None = None,
+    ) -> "V2Client":
+        runtime = os.path.realpath(runtime_dir or _runtime_dir())
+        pattern = os.path.join(runtime, f"{RUNTIME_FILE_PREFIX}*.json")
+        files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+
+        cwd = os.path.realpath(os.getcwd())
+        workspace_target = _resolve_workspace_hint(workspace_hint, cwd)
+
+        for fpath in files:
+            try:
+                info = json.loads(Path(fpath).read_text())
+                pid = info.get("pid")
+                if pid and not _pid_alive(pid):
+                    try:
+                        os.unlink(fpath)
+                    except OSError:
+                        pass
+                    continue
+
+                workspace_root = os.path.realpath(info["workspace_root"])
+                if not _path_within(workspace_target, workspace_root):
+                    continue
+
+                url = f"http://127.0.0.1:{info['port']}"
+                client = cls(url, info["token"])
+                client.health()
+                return client
+            except Exception:
+                continue
+
+        raise RuntimeError(
+            f"No running agent-repl v2 core daemon matched '{workspace_target}'"
+        )
+
+    def health(self) -> dict[str, Any]:
+        return self._get("/api/health")
+
+    def status(self) -> dict[str, Any]:
+        return self._get("/api/status")
+
+    def shutdown(self) -> dict[str, Any]:
+        return self._post("/api/shutdown", {})
+
+    def _get(self, endpoint: str) -> dict[str, Any]:
+        response = self._session.get(f"{self.base_url}{endpoint}", timeout=10)
+        self._raise_for_status(response)
+        return response.json()
+
+    def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
+        response = self._session.post(f"{self.base_url}{endpoint}", json=body, timeout=10)
+        self._raise_for_status(response)
+        return response.json()
+
+    def _raise_for_status(self, response: requests.Response) -> None:
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = _bridge_error_message(response)
+            if detail:
+                status = getattr(response, "status_code", "HTTP error")
+                reason = getattr(response, "reason", "") or "HTTP error"
+                url = getattr(response, "url", None)
+                location = f" for url: {url}" if url else ""
+                raise RuntimeError(f"{status} {reason}{location}: {detail}") from exc
+            raise
+
+
+def _runtime_dir() -> str:
+    override = os.environ.get("AGENT_REPL_V2_RUNTIME_DIR")
+    if override:
+        return os.path.realpath(override)
+    if sys.platform == "darwin":
+        return os.path.realpath(os.path.join(os.path.expanduser("~"), "Library", "Jupyter", "runtime"))
+    return os.path.realpath(os.path.join(os.path.expanduser("~"), ".local", "share", "jupyter", "runtime"))
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _resolve_workspace_hint(workspace_hint: str | None, cwd: str) -> str:
+    if not workspace_hint:
+        return cwd
+    if os.path.isabs(workspace_hint):
+        return os.path.realpath(workspace_hint)
+    return os.path.realpath(os.path.join(cwd, workspace_hint))
+
+
+def _path_within(candidate: str, root: str) -> bool:
+    try:
+        common = os.path.commonpath([os.path.realpath(candidate), os.path.realpath(root)])
+        return common == os.path.realpath(root)
+    except ValueError:
+        return False

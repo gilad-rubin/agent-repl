@@ -46,6 +46,7 @@ Creating a brand-new notebook still goes through Jupyter kernel attachment, so t
 - **Smart output filtering** — Rich media (HTML, images, widgets) stripped for agents; notebook file keeps everything for humans
 - **Stable cell IDs** — UUID-based cell identity survives moves, deletes, and reordering
 - **Hot-reload** — Update extension routes without restarting the bridge
+- **Experimental v2 core daemon** — Start a workspace-scoped core authority process independent of VS Code
 
 ## The Prompt Loop
 
@@ -79,6 +80,7 @@ The `respond` command atomically: marks the prompt in-progress → inserts a res
 | `prompts` | List prompt cells |
 | `respond` | Answer a prompt cell |
 | `reload` | Hot-reload extension routes |
+| `v2` | Experimental core daemon commands: `start`, `status`, `stop` |
 
 All commands output JSON. Pass `--pretty` for formatted output.
 
@@ -98,7 +100,7 @@ Recompiling the repo alone does not update an already-installed extension under 
 ## Documentation
 
 - [Getting Started](docs/getting-started.md) — End-to-end tutorial
-- [Command Reference](docs/commands.md) — All 14 commands with examples
+- [Command Reference](docs/commands.md) — All CLI commands, including experimental `v2`
 - [Prompt Loop](docs/prompt-loop.md) — Notebook-as-conversation pattern
 - [Architecture](docs/architecture.md) — How the current bridge works
 - [v2 Design Docs](docs/v2/README.md) — North-star architecture, reference stack, and review rubric
