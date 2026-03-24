@@ -1,6 +1,6 @@
-# v2 File Compatibility and Sync
+# File Compatibility and Sync
 
-This document defines the desired architectural relationship between `agent-repl` v2 and file-based notebook representations.
+This document defines the desired architectural relationship between `agent-repl` and file-based notebook representations.
 
 The goal is to keep compatibility strong without letting file format semantics become the center of the product.
 

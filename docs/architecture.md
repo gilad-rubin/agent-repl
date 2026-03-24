@@ -2,11 +2,11 @@
 
 This document describes the current shipped bridge architecture used by `agent-repl` today.
 
-For the v2 target architecture, see:
+For the north-star target architecture, see:
 
-- [v2 Design Docs](v2/README.md)
-- [v2 North Star](v2/north-star.md)
-- [v2 Review Rubric](v2/review-rubric.md)
+- [Design Docs](v2/README.md)
+- [North Star](v2/north-star.md)
+- [Review Rubric](v2/review-rubric.md)
 
 agent-repl uses a bridge architecture: a VS Code extension runs an HTTP server, and the CLI talks to it. Notebook reads and edits go through VS Code's notebook API. Execution can run through either a background Jupyter session (`no-yank`) or VS Code's native notebook command path (`native`).
 
@@ -150,7 +150,7 @@ Execution behavior is controlled by the `agent-repl.executionMode` setting:
 
 Completed execution responses include `execution_mode` so callers can see which backend actually ran, and `execution_preference` so they can see which mode was requested.
 
-`no-yank` is best when a human is working elsewhere in the editor and only wants to glance at notebook progress. The remaining rough edge is the first kernel attach path: creating a new notebook or forcing initial kernel selection still goes through Jupyter's startup UI, which may briefly reveal the notebook.
+`no-yank` is best when a human is working elsewhere in the editor and only wants to glance at notebook progress. The target behavior is that notebook creation and kernel attachment also stay in the background; if those flows reveal the notebook, prompt the user, or ask for a kernel restart, treat that as a bug rather than expected behavior.
 
 ## Hot Reload
 

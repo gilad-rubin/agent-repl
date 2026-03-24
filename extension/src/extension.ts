@@ -67,7 +67,7 @@ async function startBridge(
         try {
             await v2AutoAttach?.attachIfEnabled(config);
         } catch (err: any) {
-            console.warn('[agent-repl] v2 auto-attach retry failed:', err?.message ?? String(err));
+            console.warn('[agent-repl] session auto-attach retry failed:', err?.message ?? String(err));
         }
         vscode.window.showInformationMessage(`Agent REPL already running on port ${server.port}`);
         return;
@@ -129,7 +129,7 @@ async function startBridge(
         try {
             await v2AutoAttach?.attachIfEnabled(config);
         } catch (err: any) {
-            console.warn('[agent-repl] v2 auto-attach failed:', err?.message ?? String(err));
+            console.warn('[agent-repl] session auto-attach failed:', err?.message ?? String(err));
         }
 
         vscode.window.showInformationMessage(`Agent REPL started on port ${port}`);

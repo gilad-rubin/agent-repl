@@ -11,11 +11,10 @@ The extension auto-starts when you open a notebook. Verify the CLI and bridge st
 
 ```bash
 agent-repl --version
-agent-repl v2 --help
 agent-repl reload --pretty
 ```
 
-If `agent-repl v2 --help` fails, reinstall the CLI. If `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, reinstall the extension with `make install-ext`, then reload or reopen that VS Code window.
+If `agent-repl --version` is older than the repo version you meant to test, reinstall the CLI. If `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, reinstall the extension with `make install-ext`, then reload or reopen that VS Code window.
 
 ## Create a Notebook
 
@@ -29,7 +28,7 @@ agent-repl new demo.ipynb
 
 The notebook appears in VS Code immediately with a selected kernel when a workspace `.venv` can be matched. If no `.venv` exists, create returns `"kernel_status": "needs_selection"`, lists the discovered kernels, and includes the exact `agent-repl select-kernel demo.ipynb` command to run next.
 
-The first create or kernel-attach step may briefly reveal the notebook because Jupyter owns that startup flow.
+Create and kernel attach should stay in the background. If VS Code reveals the notebook, prompts for manual intervention, or asks the user to restart the kernel, treat that as a bug and capture the returned JSON plus the active `execution_mode`.
 
 ## Execute Code
 

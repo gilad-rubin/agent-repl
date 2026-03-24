@@ -1,6 +1,6 @@
-# v2 Design Docs
+# Design Docs
 
-This folder contains the durable architecture docs for `agent-repl` v2.
+This folder contains the durable architecture docs for `agent-repl`.
 
 These documents describe the system we want to build, the boundaries we want to preserve, and the reference systems we want to compare against. They are not implementation plans.
 
@@ -21,7 +21,7 @@ Use these docs to answer:
 - what should be authoritative
 - what compatibility layers should remain non-authoritative
 - how humans and agents should collaborate
-- how to judge whether a slice moves us toward or away from v2
+- how to judge whether a slice moves us toward or away from the north star
 
 These docs should stay stable enough that we can compare every serious change against them without rewriting the target each time.
 

@@ -34,9 +34,13 @@ function existingWorkspaceCliPath(workspaceRoot: string): string | undefined {
 }
 
 function configuredCliPath(config: vscode.WorkspaceConfiguration): string | undefined {
-    const value = config.get<string>('cliPath');
+    const value = config.get<string>('cliCommand') ?? config.get<string>('cliPath');
     const trimmed = value?.trim();
     return trimmed ? trimmed : undefined;
+}
+
+function autoAttachEnabled(config: vscode.WorkspaceConfiguration): boolean {
+    return config.get<boolean>('sessionAutoAttach', config.get<boolean>('v2AutoAttach', true));
 }
 
 export function v2CliPlans(workspaceRoot: string, config: vscode.WorkspaceConfiguration): CliPlan[] {
@@ -75,14 +79,16 @@ export class V2AutoAttach implements vscode.Disposable {
     constructor(private readonly context: vscode.ExtensionContext) {}
 
     async attachIfEnabled(config: vscode.WorkspaceConfiguration): Promise<void> {
-        if (!config.get<boolean>('v2AutoAttach', true)) {
+        if (!autoAttachEnabled(config)) {
             return;
         }
         const workspaceRoot = primaryWorkspaceRoot();
         if (!workspaceRoot) {
             return;
         }
-        const storedSessionId = this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot));
+        const storedSessionId =
+            this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot)) ??
+            this.context.workspaceState.get<string>(legacySessionStorageKey(workspaceRoot));
         const result = await this.runCli(
             workspaceRoot,
             [
@@ -99,10 +105,11 @@ export class V2AutoAttach implements vscode.Disposable {
         );
         const sessionId = result?.session?.session_id;
         if (typeof sessionId !== 'string' || !sessionId) {
-            throw new Error('v2 attach returned no session_id');
+            throw new Error('session attach returned no session_id');
         }
         this.session = { workspaceRoot, sessionId };
         await this.context.workspaceState.update(sessionStorageKey(workspaceRoot), sessionId);
+        await this.context.workspaceState.update(legacySessionStorageKey(workspaceRoot), undefined);
         this.startHeartbeat();
     }
 
@@ -120,7 +127,7 @@ export class V2AutoAttach implements vscode.Disposable {
                 '--session-id', current.sessionId,
             ]);
         } catch (err: any) {
-            console.warn('[agent-repl] v2 auto-attach detach failed:', err?.message ?? String(err));
+            console.warn('[agent-repl] session auto-attach detach failed:', err?.message ?? String(err));
         }
     }
 
@@ -153,7 +160,7 @@ export class V2AutoAttach implements vscode.Disposable {
                 '--session-id', this.session.sessionId,
             ]);
         } catch (err: any) {
-            console.warn('[agent-repl] v2 auto-attach heartbeat failed:', err?.message ?? String(err));
+            console.warn('[agent-repl] session auto-attach heartbeat failed:', err?.message ?? String(err));
         }
     }
 
@@ -174,12 +181,16 @@ export class V2AutoAttach implements vscode.Disposable {
             }
         }
         if (diagnostics.length > 0) {
-            throw new Error(`No working agent-repl launcher found for v2 auto-attach. Attempts: ${diagnostics.join(' | ')}`);
+            throw new Error(`No working agent-repl launcher found for session auto-attach. Attempts: ${diagnostics.join(' | ')}`);
         }
-        throw lastError ?? new Error('No working agent-repl launcher found for v2 auto-attach');
+        throw lastError ?? new Error('No working agent-repl launcher found for session auto-attach');
     }
 }
 
 function sessionStorageKey(workspaceRoot: string): string {
+    return `agent-repl.session:${workspaceRoot}`;
+}
+
+function legacySessionStorageKey(workspaceRoot: string): string {
     return `agent-repl.v2.session:${workspaceRoot}`;
 }

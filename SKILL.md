@@ -9,15 +9,14 @@ CLI for AI agents to work with a live Jupyter notebook through the VS Code/Curso
 
 Everything prints JSON to stdout.
 
-Before validating v2 behavior from another workspace, check the install state first:
+Before validating behavior from another workspace, check the install state first:
 
 ```bash
 agent-repl --version
-agent-repl v2 --help
 agent-repl reload --pretty
 ```
 
-- if `agent-repl --version` or `agent-repl v2 --help` fails, reinstall the CLI with `make install-dev` or `uv tool install /path/to/agent-repl --reinstall`
+- if `agent-repl --version` fails, reinstall the CLI with `make install-dev` or `uv tool install /path/to/agent-repl --reinstall`
 - if `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, reinstall the extension with `make install-ext`, then reload or reopen that VS Code window
 - when you intentionally want to test repo source before reinstalling, prefer `uv run --project /Users/giladrubin/python_workspace/agent-repl agent-repl ...`
 
@@ -38,17 +37,13 @@ agent-repl cat demo.ipynb
 - `cat` after execution is the fastest way to verify outputs and capture new `cell_id` values
 - if `status` says the notebook is closed or not open yet, `cat` may return fallback IDs like `index-1`; once the notebook becomes live, re-run `cat --no-outputs` before using `--cell-id`
 
-## Validation Loop (v2)
+## Validation Loop
 
-For the prompt "test out the new agent-repl v2 capabilities", use this order:
+For the prompt "test out the new agent-repl capabilities", use this order:
 
 ```bash
 agent-repl --version
-agent-repl v2 --help
 agent-repl reload --pretty
-agent-repl v2 start
-agent-repl v2 session-start --actor agent --client-type cli --label "validation"
-agent-repl v2 runtime-start --mode shared --label primary --environment .venv
 ```
 
 Then validate a brand-new notebook:
@@ -57,7 +52,6 @@ Then validate a brand-new notebook:
 agent-repl new tmp/validation.ipynb --cells-json '[{"type":"markdown","source":"# Validation"},{"type":"code","source":"x = 2\\nprint(x)"}]'
 agent-repl status tmp/validation.ipynb
 agent-repl cat tmp/validation.ipynb --no-outputs
-agent-repl v2 document-open tmp/validation.ipynb
 agent-repl exec tmp/validation.ipynb --cell-id <seed-cell-id>
 agent-repl edit tmp/validation.ipynb replace-source --cell-id <seed-cell-id> -s 'x = 7\nx ** 2'
 agent-repl exec tmp/validation.ipynb --cell-id <seed-cell-id>
@@ -95,26 +89,6 @@ agent-repl exec analysis.ipynb --cell-id <id>
 agent-repl edit analysis.ipynb replace-source --cell-id <id> -s 'new code'
 agent-repl status analysis.ipynb
 agent-repl restart analysis.ipynb
-agent-repl v2 start
-agent-repl v2 attach --actor agent --client-type cli --label "worker"
-agent-repl v2 status
-agent-repl v2 stop
-agent-repl v2 session-start --actor agent --client-type cli --label "worker"
-agent-repl v2 sessions
-agent-repl v2 session-touch --session-id <session-id>
-agent-repl v2 session-detach --session-id <session-id>
-agent-repl v2 document-open analysis.ipynb
-agent-repl v2 documents
-agent-repl v2 document-refresh --document-id <document-id>
-agent-repl v2 document-rebind --document-id <document-id>
-agent-repl v2 branch-start --document-id <document-id> --owner-session-id <session-id> --title "Experiment"
-agent-repl v2 branches
-agent-repl v2 branch-finish --branch-id <branch-id> --status-value merged
-agent-repl v2 runtime-start --mode shared --label primary --environment .venv
-agent-repl v2 runtimes
-agent-repl v2 run-start --runtime-id <id> --target-type document --target-ref <document-id>
-agent-repl v2 runs
-agent-repl v2 run-finish --run-id <id> --status-value completed
 ```
 
 - `ix` waits for completion by default, with a default timeout of 30 seconds
@@ -124,7 +98,7 @@ agent-repl v2 run-finish --run-id <id> --status-value completed
 - prefer `--cell-id` over `--index`; IDs survive reordering while indexes do not
 - source input is shared across commands: `-s`, `--source-file`, or stdin
 - `run-all` and `restart-run-all` trigger notebook execution and return immediately; follow them with `status` until the kernel is idle before assuming the notebook is ready
-- `v2` commands are experimental workspace-core commands for daemon/session/document/runtime/run continuity; use the top-level bridge commands (`new`, `cat`, `status`, `ix`, `edit`, `exec`, `select-kernel`) for actual notebook mutation and execution
+- the top-level commands are the normal workflow surface; if you need to debug the internal core daemon, keep that as an explicit maintenance task rather than part of the standard notebook loop
 
 ## Notebook Creation
 
@@ -161,7 +135,7 @@ agent-repl select-kernel analysis.ipynb
 - `select-kernel` now defaults to the workspace `.venv` when it exists
 - use `agent-repl select-kernel analysis.ipynb --interactive` to open the VS Code kernel picker explicitly
 - use the exact `id` returned by `agent-repl kernels` when you need a non-default kernel
-- creating a notebook or selecting a kernel may briefly reveal the notebook tab while Jupyter initializes
+- creating a notebook or selecting a kernel should stay in the background on the quiet path; if VS Code prompts or steals focus, treat that as a product bug rather than expected behavior
 
 ## Timeouts and Busy Kernels
 
@@ -196,7 +170,7 @@ Use the JSON response from `new` directly:
 - if it returned kernel choices such as `available_kernels`, use `select-kernel` for the workspace default or `kernels` to inspect the exact IDs
 - if the notebook is open in the editor and auto-select still failed, retry `select-kernel` before falling back to manual UI clicks
 
-Creating a brand-new notebook may briefly steal focus while Jupyter starts. Once the kernel is attached, `ix` and `exec` can usually stay on the no-yank path.
+Creating a brand-new notebook and attaching a kernel should stay in the background. If VS Code prompts, steals focus, or asks the user to restart a kernel, treat that as a product bug and capture the exact command plus the returned JSON.
 
 </important>
 

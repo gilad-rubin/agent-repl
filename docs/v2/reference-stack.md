@@ -1,6 +1,6 @@
-# v2 Reference Stack
+# Reference Stack
 
-This document captures the current external reference posture for `agent-repl` v2.
+This document captures the current external reference posture for `agent-repl`.
 
 It describes which systems we should:
 
@@ -122,7 +122,7 @@ Deepnote is a useful benchmark and a possible source of ideas around:
 - local runtimes
 - agent tooling
 
-But it should not be the v2 foundation.
+But it should not be the foundation.
 
 Why not:
 

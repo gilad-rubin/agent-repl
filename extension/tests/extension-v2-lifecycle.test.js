@@ -19,7 +19,7 @@ function loadExtensionModule() {
                 autoStart: true,
                 maxQueueSize: 20,
                 port: 0,
-                v2AutoAttach: true,
+                sessionAutoAttach: true,
             };
             return Object.prototype.hasOwnProperty.call(values, name) ? values[name] : fallback;
         },
@@ -158,7 +158,7 @@ function loadExtensionModule() {
     }
 }
 
-test('extension lifecycle auto-attaches to the v2 core on start and detaches on stop', async () => {
+test('extension lifecycle auto-attaches to the shared core on start and detaches on stop', async () => {
     const {
         extension,
         registeredCommands,

@@ -557,7 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source-file")
 
     # v2
-    p = sub.add_parser("v2", help="Experimental v2 core daemon commands")
+    p = sub.add_parser("v2", help=argparse.SUPPRESS, description="Internal core daemon diagnostics")
     v2sub = p.add_subparsers(dest="v2_command")
 
     vp = v2sub.add_parser("start", help="Start the experimental v2 core daemon for this workspace")
@@ -689,6 +689,25 @@ def build_parser() -> argparse.ArgumentParser:
     vp = v2sub.add_parser("serve", help=argparse.SUPPRESS)
     vp.add_argument("--workspace-root", required=True)
     vp.add_argument("--runtime-dir", required=True)
+
+    public_commands = [
+        "reload",
+        "cat",
+        "status",
+        "edit",
+        "exec",
+        "ix",
+        "run-all",
+        "restart",
+        "restart-run-all",
+        "new",
+        "kernels",
+        "select-kernel",
+        "prompts",
+        "respond",
+    ]
+    sub.metavar = "{" + ",".join(public_commands) + "}"
+    sub._choices_actions = [action for action in sub._choices_actions if action.dest != "v2"]
 
     return parser
 

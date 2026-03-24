@@ -1,4 +1,4 @@
-# v2 Core Authority and Sessions
+# Core Authority and Sessions
 
 This document goes one level deeper on the `agent-repl-core` authority model.
 

@@ -1,6 +1,6 @@
-# v2 Review Rubric
+# Review Rubric
 
-This document defines the recurring review loop for `agent-repl` v2 work.
+This document defines the recurring review loop for `agent-repl` work.
 
 Use it after every meaningful spike, refactor, or feature slice.
 

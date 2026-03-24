@@ -1757,7 +1757,7 @@ class TestVersionSurface(unittest.TestCase):
         self.assertEqual(exited.exception.code, 0)
         self.assertRegex(stdout.getvalue().strip(), r"^\d+\.\d+\.\d+$")
 
-    def test_help_mentions_v2_command_group(self):
+    def test_help_hides_internal_core_command_group(self):
         stdout = StringIO()
         old = sys.stdout
         sys.stdout = stdout
@@ -1767,7 +1767,7 @@ class TestVersionSurface(unittest.TestCase):
         finally:
             sys.stdout = old
         self.assertEqual(exited.exception.code, 0)
-        self.assertIn("v2", stdout.getvalue())
+        self.assertNotIn("v2", stdout.getvalue())
 
     def test_python_and_extension_versions_stay_in_sync(self):
         root = Path(__file__).resolve().parents[1]
@@ -1777,19 +1777,29 @@ class TestVersionSurface(unittest.TestCase):
 
 
 class TestDocsSurface(unittest.TestCase):
-    def test_repo_skill_covers_v2_validation_traps(self):
+    def test_repo_skill_uses_single_agent_repl_workflow(self):
         root = Path(__file__).resolve().parents[1]
         skill = (root / "SKILL.md").read_text()
-        self.assertIn("agent-repl v2 --help", skill)
+        self.assertIn("agent-repl --version", skill)
         self.assertIn("index-1", skill)
         self.assertIn("starter cells are created, not auto-executed", skill)
-        self.assertIn("use the top-level bridge commands", skill)
+        self.assertNotIn("agent-repl v2 --help", skill)
+        self.assertNotIn("may briefly steal focus", skill)
 
     def test_getting_started_matches_ix_wait_behavior(self):
         root = Path(__file__).resolve().parents[1]
         guide = (root / "docs" / "getting-started.md").read_text()
         self.assertIn("ix` waits for completion by default", guide)
         self.assertNotIn("ix` returns immediately", guide)
+        self.assertNotIn("agent-repl v2 --help", guide)
+        self.assertNotIn("may briefly reveal the notebook", guide)
+
+    def test_readme_uses_single_agent_repl_surface(self):
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / "README.md").read_text()
+        self.assertNotIn("Experimental v2 core daemon", readme)
+        self.assertNotIn("| `v2` |", readme)
+        self.assertNotIn("including experimental `v2`", readme)
 
     def test_command_reference_warns_about_closed_notebook_fallback_ids(self):
         root = Path(__file__).resolve().parents[1]
@@ -1797,7 +1807,17 @@ class TestDocsSurface(unittest.TestCase):
         self.assertIn("index-1", commands)
         self.assertIn("Use `--no-wait` only when you intentionally want fire-and-forget behavior.", commands)
         self.assertIn("agent-repl reload --pretty", commands)
-        self.assertIn("Use top-level bridge commands such as `new`, `cat`, `status`, `ix`, `edit`, `exec`, and `select-kernel`", commands)
+        self.assertNotIn("## v2", commands)
+        self.assertNotIn("agent-repl v2", commands)
+
+    def test_public_docs_lock_in_workspace_venv_as_default_kernel(self):
+        root = Path(__file__).resolve().parents[1]
+        skill = (root / "SKILL.md").read_text()
+        commands = (root / "docs" / "commands.md").read_text()
+        self.assertIn("`new` prefers the workspace `.venv` when it exists", skill)
+        self.assertIn("`select-kernel` now defaults to the workspace `.venv` when it exists", skill)
+        self.assertIn("Without it, `agent-repl` first tries the workspace `.venv` automatically when one exists.", commands)
+        self.assertIn("Use `--interactive` to open VS Code's kernel picker explicitly.", commands)
 
 
 class TestV2ServerRobustness(unittest.TestCase):

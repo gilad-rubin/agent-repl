@@ -113,8 +113,8 @@ async function main() {
         path.join(settingsDir, 'settings.json'),
         JSON.stringify({
             'agent-repl.autoStart': true,
-            'agent-repl.v2AutoAttach': true,
-            'agent-repl.cliPath': CLI_PATH,
+            'agent-repl.sessionAutoAttach': true,
+            'agent-repl.cliCommand': CLI_PATH,
         }, null, 2),
         'utf8',
     );

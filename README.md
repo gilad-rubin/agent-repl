@@ -38,7 +38,7 @@ The `ix` command (insert-execute) adds a cell to the notebook and runs it. The c
 
 Agent-triggered execution defaults to `no-yank`, which prefers the background Jupyter path so the notebook can keep updating without stealing editor focus. If you want the original VS Code behavior, set `agent-repl.executionMode` to `native`.
 
-Creating a brand-new notebook still goes through Jupyter kernel attachment, so the first create/select-kernel step may briefly reveal the notebook. `agent-repl new` and `agent-repl select-kernel` now prefer the workspace `.venv` automatically when it exists, and the JSON response says which kernel was selected. Use `agent-repl select-kernel ... --interactive` when you want the VS Code kernel picker explicitly. Once the kernel is already attached, `exec` and `ix` can usually stay on the no-yank path.
+Creating a brand-new notebook and attaching a kernel should stay in the background. `agent-repl new` and `agent-repl select-kernel` prefer the workspace `.venv` automatically when it exists, and the JSON response says which kernel was selected. Use `agent-repl select-kernel ... --interactive` only when you explicitly want the VS Code kernel picker. If create or kernel attach reveals a notebook, prompts the user, or asks for a kernel restart, treat that as a product bug.
 
 ## Key Features
 
@@ -48,10 +48,10 @@ Creating a brand-new notebook still goes through Jupyter kernel attachment, so t
 - **Smart output filtering** — Rich media (HTML, images, widgets) stripped for agents; notebook file keeps everything for humans
 - **Stable cell IDs** — UUID-based cell identity survives moves, deletes, and reordering
 - **Hot-reload** — Update extension routes without restarting the bridge
-- **Experimental v2 core daemon** — Start a workspace-scoped core authority process with attach/resume session flows, collaboration branches, document, runtime, run, and file-sync registration independent of VS Code, with workspace-owned state persistence across daemon restarts
-- **VS Code v2 projection attach** — The extension now auto-attaches the editor window to the matching v2 core session when the bridge starts, so editor presence becomes part of the shared runtime contract
-- **Deterministic v2 launcher discovery** — Auto-attach now prefers an explicit CLI path and workspace-local `.venv` launchers before falling back to PATH-based resolution
-- **Explicit file sync boundaries** — Registered v2 documents track bound file snapshots, detect external changes, and require explicit rebinding instead of silently accepting disk drift
+- **Workspace-scoped core authority** — Session continuity, document state, runtime ownership, and file-sync boundaries now live in one shared workspace process
+- **Editor projection attach** — The extension auto-attaches the editor window to the matching shared session when the bridge starts, so editor presence becomes part of the runtime contract
+- **Deterministic launcher discovery** — Auto-attach prefers an explicit CLI command and workspace-local `.venv` launchers before falling back to PATH-based resolution
+- **Explicit file sync boundaries** — Registered documents track bound file snapshots, detect external changes, and require explicit rebinding instead of silently accepting disk drift
 
 ## The Prompt Loop
 
@@ -85,7 +85,6 @@ The `respond` command atomically: marks the prompt in-progress → inserts a res
 | `prompts` | List prompt cells |
 | `respond` | Answer a prompt cell |
 | `reload` | Hot-reload extension routes |
-| `v2` | Experimental core daemon commands: lifecycle plus attach/resume session, document, runtime, run, and file-sync ops |
 
 All commands output JSON. Pass `--pretty` for formatted output.
 
@@ -115,20 +114,20 @@ make install-ext
 ```
 
 Or manually run `cd extension && npm run compile && npx vsce package`, then install the `.vsix`.
-For the packaged v2 auto-attach smoke check, run `cd extension && npm run test:artifact`.
+For the packaged auto-attach smoke check, run `cd extension && npm run test:artifact`.
 Recompiling the repo alone does not update an already-installed extension under `~/.vscode/extensions/`; reinstall the `.vsix` after rebuilding, or run the repo in an Extension Development Host.
 
 ## Documentation
 
 - [Getting Started](docs/getting-started.md) — End-to-end tutorial
-- [Command Reference](docs/commands.md) — All CLI commands, including experimental `v2`
+- [Command Reference](docs/commands.md) — All public CLI commands
 - [Prompt Loop](docs/prompt-loop.md) — Notebook-as-conversation pattern
 - [Architecture](docs/architecture.md) — How the current bridge works
-- [v2 Design Docs](docs/v2/README.md) — North-star architecture, reference stack, and review rubric
-- [v2 Core Authority](docs/v2/core-authority.md) — Canonical authority, sessions, actors, and continuity
-- [v2 Runtime and Execution](docs/v2/runtime-and-execution.md) — Run ownership, runtime lifecycle, and zombie-kernel philosophy
-- [v2 File Compatibility](docs/v2/file-compatibility.md) — `.ipynb` compatibility, richer state, and external sync boundaries
-- [v2 Collaboration](docs/v2/collaboration.md) — Branching, ownership, review, and sub-notebook collaboration
+- [North-Star Design Docs](docs/v2/README.md) — Architecture direction, reference stack, and review rubric
+- [Core Authority](docs/v2/core-authority.md) — Canonical authority, sessions, actors, and continuity
+- [Runtime and Execution](docs/v2/runtime-and-execution.md) — Run ownership, runtime lifecycle, and zombie-kernel philosophy
+- [File Compatibility](docs/v2/file-compatibility.md) — `.ipynb` compatibility, richer state, and external sync boundaries
+- [Collaboration](docs/v2/collaboration.md) — Branching, ownership, review, and sub-notebook collaboration
 - [Installation](docs/installation.md) — Setup guide
 
 ## Architecture

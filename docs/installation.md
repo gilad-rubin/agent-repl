@@ -50,7 +50,6 @@ Verify:
 
 ```bash
 agent-repl --version
-agent-repl v2 --help
 ```
 
 ```
@@ -84,8 +83,8 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 |---------|---------|-------------|
 | `agent-repl.port` | `0` (auto) | Fixed port for the bridge server |
 | `agent-repl.autoStart` | `true` | Start bridge automatically on notebook open |
-| `agent-repl.v2AutoAttach` | `true` | Auto-attach the VS Code window to the matching v2 core when the bridge starts |
-| `agent-repl.cliPath` | `""` | Optional explicit `agent-repl` launcher path or command for extension-host v2 auto-attach |
+| `agent-repl.sessionAutoAttach` | `true` | Auto-attach the VS Code window to the matching shared workspace session when the bridge starts |
+| `agent-repl.cliCommand` | `""` | Optional explicit `agent-repl` launcher path or command for extension-host auto-attach |
 | `agent-repl.maxQueueSize` | `20` | Maximum queued executions per notebook |
 | `agent-repl.executionTimeout` | `300` | Execution timeout in seconds |
 | `agent-repl.executionMode` | `no-yank` | `no-yank` prefers background execution to avoid stealing focus; `native` always uses VS Code's notebook command path |
@@ -97,7 +96,7 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 - Check that the extension is installed: look for "Agent REPL" in the activity bar
 - Manually start: Command Palette → "Agent REPL: Start Bridge"
 
-**"Installed CLI is missing new commands like `v2`"**
+**"Installed CLI is missing recent changes from the repo"**
 - Check the installed version with `agent-repl --version`
 - Reinstall local path installs with `uv tool install /path/to/agent-repl --reinstall` or `make install-dev`
 - When working from source without reinstalling, prefer `uv run --project /path/to/agent-repl agent-repl ...`
@@ -106,9 +105,9 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 - Run `make install-ext`
 - Then run `agent-repl reload --pretty` from the target workspace and confirm both `extension_root` and `routes_module` point at the new installed version
 
-**"v2 auto-attach cannot find agent-repl"**
-- Set `agent-repl.cliPath` if the extension host cannot resolve the CLI from PATH
-- The extension prefers this order for v2 auto-attach: configured `cliPath`, workspace-local `.venv` launcher, `uv run agent-repl`, then plain `agent-repl`
+**"Auto-attach cannot find agent-repl"**
+- Set `agent-repl.cliCommand` if the extension host cannot resolve the CLI from PATH
+- The extension prefers this order for auto-attach: configured `cliCommand`, workspace-local `.venv` launcher, `uv run agent-repl`, then plain `agent-repl`
 - Check the extension host logs for the full launcher attempt diagnostics
 
 **Connection file not found**

@@ -1,6 +1,6 @@
-# v2 Collaboration, Branching, and Sub-Notebooks
+# Collaboration, Branching, and Sub-Notebooks
 
-This document describes how `agent-repl` v2 should support safe, legible collaboration between humans and agents.
+This document describes how `agent-repl` should support safe, legible collaboration between humans and agents.
 
 It focuses on the collaboration model, not the implementation mechanics.
 

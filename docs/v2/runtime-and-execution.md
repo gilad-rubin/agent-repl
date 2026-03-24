@@ -1,6 +1,6 @@
-# v2 Runtime and Execution
+# Runtime and Execution
 
-This document defines the target execution architecture for `agent-repl` v2.
+This document defines the target execution architecture for `agent-repl`.
 
 It focuses on authority, lifecycle, and recoverability rather than on specific implementation choices.
 

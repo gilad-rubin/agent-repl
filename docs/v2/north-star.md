@@ -1,8 +1,8 @@
-# agent-repl v2 North Star
+# agent-repl North Star
 
 ## Purpose
 
-This document describes the target architecture for `agent-repl` v2.
+This document describes the target architecture for `agent-repl`.
 
 It defines:
 
@@ -15,7 +15,7 @@ It does not describe phases or implementation steps.
 
 ## Vision
 
-`agent-repl` v2 should be a local-first, Jupyter-compatible shared notebook runtime where humans and agents work against the same canonical live state.
+`agent-repl` should be a local-first, Jupyter-compatible shared notebook runtime where humans and agents work against the same canonical live state.
 
 It should feel:
 
@@ -35,9 +35,9 @@ The clean architecture is:
 - VS Code and CLI are clients of the shared runtime
 - humans and agents are peer actors in the same system
 
-## What v2 Is
+## What agent-repl Is
 
-`agent-repl` v2 is:
+`agent-repl` is:
 
 - a canonical notebook runtime
 - a collaboration system for humans and agents
@@ -45,9 +45,9 @@ The clean architecture is:
 - a projection system for editor and file surfaces
 - a recovery-friendly stateful service
 
-## What v2 Is Not
+## What agent-repl Is Not
 
-`agent-repl` v2 is not:
+`agent-repl` is not:
 
 - a smarter VS Code bridge
 - a live `.ipynb` watcher with extra commands
