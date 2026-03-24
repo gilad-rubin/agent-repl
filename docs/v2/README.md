@@ -7,6 +7,8 @@ These documents describe the system we want to build, the boundaries we want to 
 ## Documents
 
 - [North Star](north-star.md) — the desired end-state architecture
+- [Interaction Contract](interaction-contract.md) — the agreed human/agent notebook behavior and UX contract
+- [Interaction Implementation Plan](interaction-implementation-plan.md) — the workstreams and acceptance gates needed to satisfy that contract
 - [Core Authority and Sessions](core-authority.md) — what the core owns, how actors connect, and how continuity works
 - [Runtime and Execution](runtime-and-execution.md) — runtime ownership, run state, and zombie-kernel philosophy
 - [File Compatibility and Sync](file-compatibility.md) — how `.ipynb`, richer v2 state, and external file changes should coexist
