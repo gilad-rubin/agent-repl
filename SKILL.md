@@ -42,6 +42,11 @@ agent-repl v2 session-start --actor agent --client-type cli --label "worker"
 agent-repl v2 sessions
 agent-repl v2 document-open analysis.ipynb
 agent-repl v2 documents
+agent-repl v2 runtime-start --mode shared --label primary --environment .venv
+agent-repl v2 runtimes
+agent-repl v2 run-start --runtime-id <id> --target-type document --target-ref <document-id>
+agent-repl v2 runs
+agent-repl v2 run-finish --run-id <id> --status-value completed
 ```
 
 - `ix` waits for completion by default, with a default timeout of 30 seconds
@@ -51,7 +56,7 @@ agent-repl v2 documents
 - prefer `--cell-id` over `--index`; IDs survive reordering while indexes do not
 - source input is shared across commands: `-s`, `--source-file`, or stdin
 - `run-all` and `restart-run-all` trigger notebook execution and return immediately; follow them with `status` until the kernel is idle before assuming the notebook is ready
-- `v2` commands are experimental workspace-core commands for the new architecture direction; they now cover daemon lifecycle plus session/document registration, but they do not replace the bridge workflow yet
+- `v2` commands are experimental workspace-core commands for the new architecture direction; they now cover daemon lifecycle plus session/document/runtime/run registration, but they do not replace the bridge workflow yet
 
 ## Notebook Creation
 

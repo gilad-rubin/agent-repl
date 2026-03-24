@@ -261,6 +261,50 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.v2_command == "runtimes":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_runtimes()
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "runtime-start":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).start_runtime(
+            mode=args.mode,
+            label=getattr(args, "label", None),
+            runtime_id=getattr(args, "runtime_id", None),
+            environment=getattr(args, "environment", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "runtime-stop":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).stop_runtime(args.runtime_id)
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "runs":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_runs()
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "run-start":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).start_run(
+            runtime_id=args.runtime_id,
+            target_type=args.target_type,
+            target_ref=args.target_ref,
+            kind=args.kind,
+            run_id=getattr(args, "run_id", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "run-finish":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).finish_run(
+            args.run_id,
+            status=args.status_value,
+        )
+        _out(result, args.pretty)
+        return 0
+
     if args.v2_command == "serve":
         serve_forever(workspace_root, runtime_dir=args.runtime_dir)
         return 0
@@ -435,6 +479,42 @@ def build_parser() -> argparse.ArgumentParser:
     vp = v2sub.add_parser("document-open", help="Register a canonical v2 document for this workspace")
     vp.add_argument("path")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("runtimes", help="List v2 runtimes registered in this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("runtime-start", help="Register or resume a v2 runtime in this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--mode", required=True, choices=["interactive", "shared", "headless", "pinned", "ephemeral"])
+    vp.add_argument("--label")
+    vp.add_argument("--environment")
+    vp.add_argument("--runtime-id")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("runtime-stop", help="Mark a v2 runtime as stopped")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-id", required=True)
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("runs", help="List v2 runs for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("run-start", help="Register a running v2 run")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-id", required=True)
+    vp.add_argument("--target-type", required=True, choices=["document", "node", "branch"])
+    vp.add_argument("--target-ref", required=True)
+    vp.add_argument("--kind", default="execute")
+    vp.add_argument("--run-id")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("run-finish", help="Finish a v2 run with a terminal status")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--run-id", required=True)
+    vp.add_argument("--status-value", required=True, choices=["completed", "failed", "interrupted"])
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = v2sub.add_parser("serve", help=argparse.SUPPRESS)

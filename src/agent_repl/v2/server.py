@@ -54,6 +54,52 @@ class DocumentRecord:
 
 
 @dataclass
+class RuntimeRecord:
+    runtime_id: str
+    mode: str
+    label: str | None
+    environment: str | None
+    status: str
+    created_at: float
+    updated_at: float
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "runtime_id": self.runtime_id,
+            "mode": self.mode,
+            "label": self.label,
+            "environment": self.environment,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class RunRecord:
+    run_id: str
+    runtime_id: str
+    target_type: str
+    target_ref: str
+    kind: str
+    status: str
+    created_at: float
+    updated_at: float
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "runtime_id": self.runtime_id,
+            "target_type": self.target_type,
+            "target_ref": self.target_ref,
+            "kind": self.kind,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
 class CoreState:
     workspace_root: str
     runtime_dir: str
@@ -67,6 +113,8 @@ class CoreState:
     runtime_file: str | None = None
     session_records: dict[str, SessionRecord] = field(default_factory=dict)
     document_records: dict[str, DocumentRecord] = field(default_factory=dict)
+    runtime_records: dict[str, RuntimeRecord] = field(default_factory=dict)
+    run_records: dict[str, RunRecord] = field(default_factory=dict)
 
     def health_payload(self) -> dict[str, Any]:
         return {
@@ -84,6 +132,7 @@ class CoreState:
     def status_payload(self) -> dict[str, Any]:
         self.documents = len(self.document_records)
         self.sessions = len(self.session_records)
+        self.runs = sum(1 for record in self.run_records.values() if record.status in {"queued", "running"})
         payload = self.health_payload()
         payload["runtime_dir"] = self.runtime_dir
         payload["capabilities"] = [
@@ -91,6 +140,7 @@ class CoreState:
             "core-authority",
             "session-ready",
             "runtime-ready",
+            "run-ledger",
         ]
         return payload
 
@@ -184,6 +234,128 @@ class CoreState:
             "workspace_root": self.workspace_root,
         }, HTTPStatus.OK
 
+    def list_runtimes_payload(self) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "runtimes": [record.payload() for record in self.runtime_records.values()],
+            "count": len(self.runtime_records),
+            "workspace_root": self.workspace_root,
+        }
+
+    def start_runtime(
+        self,
+        *,
+        runtime_id: str,
+        mode: str,
+        label: str | None,
+        environment: str | None,
+    ) -> dict[str, Any]:
+        now = time.time()
+        existing = self.runtime_records.get(runtime_id)
+        if existing is None:
+            record = RuntimeRecord(
+                runtime_id=runtime_id,
+                mode=mode,
+                label=label,
+                environment=environment,
+                status="ready",
+                created_at=now,
+                updated_at=now,
+            )
+            self.runtime_records[runtime_id] = record
+            created = True
+        else:
+            existing.mode = mode
+            existing.label = label
+            existing.environment = environment
+            existing.status = "ready"
+            existing.updated_at = now
+            record = existing
+            created = False
+        return {
+            "status": "ok",
+            "created": created,
+            "runtime": record.payload(),
+            "workspace_root": self.workspace_root,
+        }
+
+    def stop_runtime(self, runtime_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        record = self.runtime_records.get(runtime_id)
+        if record is None:
+            return {"error": f"Unknown runtime_id: {runtime_id}"}, HTTPStatus.NOT_FOUND
+        record.status = "stopped"
+        record.updated_at = time.time()
+        return {
+            "status": "ok",
+            "runtime": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
+    def list_runs_payload(self) -> dict[str, Any]:
+        self.runs = sum(1 for record in self.run_records.values() if record.status in {"queued", "running"})
+        return {
+            "status": "ok",
+            "runs": [record.payload() for record in self.run_records.values()],
+            "count": len(self.run_records),
+            "active_count": self.runs,
+            "workspace_root": self.workspace_root,
+        }
+
+    def start_run(
+        self,
+        *,
+        run_id: str,
+        runtime_id: str,
+        target_type: str,
+        target_ref: str,
+        kind: str,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        runtime = self.runtime_records.get(runtime_id)
+        if runtime is None:
+            return {"error": f"Unknown runtime_id: {runtime_id}"}, HTTPStatus.BAD_REQUEST
+        if runtime.status == "stopped":
+            return {"error": f"Runtime is stopped: {runtime_id}"}, HTTPStatus.BAD_REQUEST
+        now = time.time()
+        record = RunRecord(
+            run_id=run_id,
+            runtime_id=runtime_id,
+            target_type=target_type,
+            target_ref=target_ref,
+            kind=kind,
+            status="running",
+            created_at=now,
+            updated_at=now,
+        )
+        self.run_records[run_id] = record
+        runtime.status = "busy"
+        runtime.updated_at = now
+        self.runs = sum(1 for item in self.run_records.values() if item.status in {"queued", "running"})
+        return {
+            "status": "ok",
+            "run": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
+    def finish_run(self, run_id: str, status: str) -> tuple[dict[str, Any], HTTPStatus]:
+        record = self.run_records.get(run_id)
+        if record is None:
+            return {"error": f"Unknown run_id: {run_id}"}, HTTPStatus.NOT_FOUND
+        if status not in {"completed", "failed", "interrupted"}:
+            return {"error": f"Invalid run status: {status}"}, HTTPStatus.BAD_REQUEST
+        now = time.time()
+        record.status = status
+        record.updated_at = now
+        runtime = self.runtime_records.get(record.runtime_id)
+        if runtime is not None:
+            runtime.status = "ready"
+            runtime.updated_at = now
+        self.runs = sum(1 for item in self.run_records.values() if item.status in {"queued", "running"})
+        return {
+            "status": "ok",
+            "run": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
 
 def serve_forever(
     workspace_root: str,
@@ -249,6 +421,12 @@ def _handler_factory(state: CoreState):
             if self.path == "/api/documents":
                 self._json(HTTPStatus.OK, state.list_documents_payload())
                 return
+            if self.path == "/api/runtimes":
+                self._json(HTTPStatus.OK, state.list_runtimes_payload())
+                return
+            if self.path == "/api/runs":
+                self._json(HTTPStatus.OK, state.list_runs_payload())
+                return
 
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -293,6 +471,74 @@ def _handler_factory(state: CoreState):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
                     return
                 body, status = state.open_document(path)
+                self._json(status, body)
+                return
+            if self.path == "/api/runtimes/start":
+                runtime_id = payload.get("runtime_id")
+                mode = payload.get("mode")
+                label = payload.get("label")
+                environment = payload.get("environment")
+                if not isinstance(runtime_id, str) or not runtime_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
+                    return
+                if not isinstance(mode, str) or mode not in {"interactive", "shared", "headless", "pinned", "ephemeral"}:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid mode"})
+                    return
+                self._json(HTTPStatus.OK, state.start_runtime(
+                    runtime_id=runtime_id,
+                    mode=mode,
+                    label=label if isinstance(label, str) else None,
+                    environment=environment if isinstance(environment, str) else None,
+                ))
+                return
+            if self.path == "/api/runtimes/stop":
+                runtime_id = payload.get("runtime_id")
+                if not isinstance(runtime_id, str) or not runtime_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
+                    return
+                body, status = state.stop_runtime(runtime_id)
+                self._json(status, body)
+                return
+            if self.path == "/api/runs/start":
+                run_id = payload.get("run_id")
+                runtime_id = payload.get("runtime_id")
+                target_type = payload.get("target_type")
+                target_ref = payload.get("target_ref")
+                kind = payload.get("kind")
+                if not isinstance(run_id, str) or not run_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing run_id"})
+                    return
+                if not isinstance(runtime_id, str) or not runtime_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
+                    return
+                if not isinstance(target_type, str) or target_type not in {"document", "node", "branch"}:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid target_type"})
+                    return
+                if not isinstance(target_ref, str) or not target_ref:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing target_ref"})
+                    return
+                if not isinstance(kind, str) or not kind:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing kind"})
+                    return
+                body, status = state.start_run(
+                    run_id=run_id,
+                    runtime_id=runtime_id,
+                    target_type=target_type,
+                    target_ref=target_ref,
+                    kind=kind,
+                )
+                self._json(status, body)
+                return
+            if self.path == "/api/runs/finish":
+                run_id = payload.get("run_id")
+                run_status = payload.get("status")
+                if not isinstance(run_id, str) or not run_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing run_id"})
+                    return
+                if not isinstance(run_status, str) or not run_status:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing status"})
+                    return
+                body, status = state.finish_run(run_id, run_status)
                 self._json(status, body)
                 return
 

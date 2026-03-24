@@ -161,6 +161,53 @@ class V2Client:
     def open_document(self, path: str) -> dict[str, Any]:
         return self._post("/api/documents/open", {"path": path})
 
+    def list_runtimes(self) -> dict[str, Any]:
+        return self._get("/api/runtimes")
+
+    def start_runtime(
+        self,
+        *,
+        mode: str,
+        label: str | None = None,
+        runtime_id: str | None = None,
+        environment: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "mode": mode,
+            "runtime_id": runtime_id or str(uuid.uuid4()),
+        }
+        if label:
+            body["label"] = label
+        if environment:
+            body["environment"] = environment
+        return self._post("/api/runtimes/start", body)
+
+    def stop_runtime(self, runtime_id: str) -> dict[str, Any]:
+        return self._post("/api/runtimes/stop", {"runtime_id": runtime_id})
+
+    def list_runs(self) -> dict[str, Any]:
+        return self._get("/api/runs")
+
+    def start_run(
+        self,
+        *,
+        runtime_id: str,
+        target_type: str,
+        target_ref: str,
+        kind: str = "execute",
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post("/api/runs/start", {
+            "run_id": run_id or str(uuid.uuid4()),
+            "runtime_id": runtime_id,
+            "target_type": target_type,
+            "target_ref": target_ref,
+            "kind": kind,
+        })
+
+    def finish_run(self, run_id: str, *, status: str) -> dict[str, Any]:
+        return self._post("/api/runs/finish", {"run_id": run_id, "status": status})
+
     def _get(self, endpoint: str) -> dict[str, Any]:
         response = self._session.get(f"{self.base_url}{endpoint}", timeout=10)
         self._raise_for_status(response)

@@ -356,7 +356,7 @@ No arguments. Prints "Extension host restarting..." on success.
 Experimental workspace-scoped core daemon commands for the v2 architecture work.
 
 ```
-agent-repl v2 {start|status|stop|sessions|session-start|session-end|documents|document-open} [--workspace-root PATH] [--pretty]
+agent-repl v2 {start|status|stop|sessions|session-start|session-end|documents|document-open|runtimes|runtime-start|runtime-stop|runs|run-start|run-finish} [--workspace-root PATH] [--pretty]
 ```
 
 ### v2 start
@@ -427,12 +427,64 @@ Register a canonical v2 document inside the workspace-scoped core authority.
 agent-repl v2 document-open notebooks/demo.ipynb
 ```
 
+### v2 runtimes
+
+List runtimes registered in the workspace-scoped v2 core.
+
+```bash
+agent-repl v2 runtimes
+```
+
+### v2 runtime-start
+
+Register or resume a runtime in the workspace-scoped v2 core.
+
+```bash
+agent-repl v2 runtime-start --mode shared --label primary --environment .venv
+agent-repl v2 runtime-start --mode headless
+```
+
+### v2 runtime-stop
+
+Mark a registered runtime as stopped.
+
+```bash
+agent-repl v2 runtime-stop --runtime-id <runtime-id>
+```
+
+### v2 runs
+
+List runs recorded in the workspace-scoped v2 core.
+
+```bash
+agent-repl v2 runs
+```
+
+### v2 run-start
+
+Register a running execution intent against a target.
+
+```bash
+agent-repl v2 run-start --runtime-id <runtime-id> --target-type document --target-ref <document-id>
+agent-repl v2 run-start --runtime-id <runtime-id> --target-type branch --target-ref <branch-id> --kind execute
+```
+
+### v2 run-finish
+
+Finish a run with a terminal status.
+
+```bash
+agent-repl v2 run-finish --run-id <run-id> --status-value completed
+agent-repl v2 run-finish --run-id <run-id> --status-value failed
+```
+
 Current behavior:
 
 - the daemon is workspace-scoped
 - it runs independently of VS Code
-- it now exposes experimental session and document registration APIs
-- it still does not own notebook editing or execution; this is early v2 core scaffolding, not the finished workflow
+- it now exposes experimental session, document, runtime, and run registration APIs
+- runtime and run state are explicit, but real notebook editing/execution are not yet routed through this path
+- this is still early v2 core scaffolding, not the finished workflow
 
 ---
 

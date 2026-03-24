@@ -340,6 +340,49 @@ class TestV2Endpoints(unittest.TestCase):
         self.assertIn("/api/documents/open", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "notebooks/demo.ipynb"})
 
+    def test_list_runtimes_calls_get(self):
+        self.client.list_runtimes()
+        url = self.mock_get.call_args[0][0]
+        self.assertIn("/api/runtimes", url)
+
+    def test_start_runtime_calls_post(self):
+        self.client.start_runtime(mode="shared", label="primary", environment=".venv")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/runtimes/start", url)
+        payload = self.mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["mode"], "shared")
+        self.assertEqual(payload["label"], "primary")
+        self.assertEqual(payload["environment"], ".venv")
+        self.assertIn("runtime_id", payload)
+
+    def test_stop_runtime_calls_post(self):
+        self.client.stop_runtime("rt-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/runtimes/stop", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"runtime_id": "rt-1"})
+
+    def test_list_runs_calls_get(self):
+        self.client.list_runs()
+        url = self.mock_get.call_args[0][0]
+        self.assertIn("/api/runs", url)
+
+    def test_start_run_calls_post(self):
+        self.client.start_run(runtime_id="rt-1", target_type="document", target_ref="doc-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/runs/start", url)
+        payload = self.mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["runtime_id"], "rt-1")
+        self.assertEqual(payload["target_type"], "document")
+        self.assertEqual(payload["target_ref"], "doc-1")
+        self.assertEqual(payload["kind"], "execute")
+        self.assertIn("run_id", payload)
+
+    def test_finish_run_calls_post(self):
+        self.client.finish_run("run-1", status="completed")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/runs/finish", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"run_id": "run-1", "status": "completed"})
+
 
 # ---------------------------------------------------------------------------
 # CLI parser
@@ -444,6 +487,17 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.v2_command, "document-open")
         self.assertEqual(args.path, "notebooks/demo.ipynb")
 
+    def test_v2_runtime_start(self):
+        args = build_parser().parse_args(["v2", "runtime-start", "--mode", "shared"])
+        self.assertEqual(args.v2_command, "runtime-start")
+        self.assertEqual(args.mode, "shared")
+
+    def test_v2_run_start(self):
+        args = build_parser().parse_args(["v2", "run-start", "--runtime-id", "rt-1", "--target-type", "document", "--target-ref", "doc-1"])
+        self.assertEqual(args.v2_command, "run-start")
+        self.assertEqual(args.runtime_id, "rt-1")
+        self.assertEqual(args.target_type, "document")
+
 
 # ---------------------------------------------------------------------------
 # CLI command handlers
@@ -499,6 +553,12 @@ class TestCommands(unittest.TestCase):
         client.end_session.return_value = {"status": "ok", "ended": True}
         client.list_documents.return_value = {"status": "ok", "documents": []}
         client.open_document.return_value = {"status": "ok", "document": {"document_id": "doc-1"}}
+        client.list_runtimes.return_value = {"status": "ok", "runtimes": []}
+        client.start_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1"}}
+        client.stop_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1", "status": "stopped"}}
+        client.list_runs.return_value = {"status": "ok", "runs": []}
+        client.start_run.return_value = {"status": "ok", "run": {"run_id": "run-1"}}
+        client.finish_run.return_value = {"status": "ok", "run": {"run_id": "run-1", "status": "completed"}}
         for k, v in overrides.items():
             setattr(client, k, mock.Mock(return_value=v))
         return client
@@ -738,6 +798,100 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         client.open_document.assert_called_once_with("notebooks/demo.ipynb")
+
+    def test_v2_runtimes(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "runtimes"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.list_runtimes.assert_called_once()
+
+    def test_v2_runtime_start(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "runtime-start", "--mode", "shared", "--label", "primary", "--environment", ".venv"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.start_runtime.assert_called_once_with(
+            mode="shared",
+            label="primary",
+            runtime_id=None,
+            environment=".venv",
+        )
+
+    def test_v2_runtime_stop(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "runtime-stop", "--runtime-id", "rt-1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.stop_runtime.assert_called_once_with("rt-1")
+
+    def test_v2_runs(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "runs"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.list_runs.assert_called_once()
+
+    def test_v2_run_start(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main([
+                    "v2", "run-start",
+                    "--runtime-id", "rt-1",
+                    "--target-type", "document",
+                    "--target-ref", "doc-1",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.start_run.assert_called_once_with(
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref="doc-1",
+            kind="execute",
+            run_id=None,
+        )
+
+    def test_v2_run_finish(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "run-finish", "--run-id", "run-1", "--status-value", "completed"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.finish_run.assert_called_once_with("run-1", status="completed")
 
 
 if __name__ == "__main__":
