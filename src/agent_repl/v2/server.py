@@ -534,6 +534,35 @@ class CoreState:
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
+    def notebook_runtime(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        runtime = self.headless_runtimes.get(real_path)
+        return {
+            "status": "ok",
+            "path": relative_path,
+            "active": runtime is not None,
+            "mode": "headless" if runtime is not None else None,
+            "runtime": runtime.payload() if runtime is not None else None,
+        }, HTTPStatus.OK
+
+    def notebook_execute_visible_cell(
+        self,
+        path: str,
+        *,
+        cell_index: int,
+        source: str,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        runtime = self.headless_runtimes.get(real_path)
+        if runtime is None:
+            return {
+                "error": f"No active headless runtime is bound to '{relative_path}'",
+                "path": relative_path,
+            }, HTTPStatus.NOT_FOUND
+        payload = self._headless_notebook_execute_visible_cell(real_path, relative_path, cell_index=cell_index, source=source)
+        self._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
+
     def notebook_restart(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
         client = self._projection_client(real_path)
@@ -1008,6 +1037,33 @@ class CoreState:
                 continue
             executions.append(self._headless_notebook_execute_cell(real_path, relative_path, cell_id=self._cell_id(cell, index), cell_index=None))
         return {"status": "ok", "path": relative_path, "executions": executions, "mode": "headless"}
+
+    def _headless_notebook_execute_visible_cell(
+        self,
+        real_path: str,
+        relative_path: str,
+        *,
+        cell_index: int,
+        source: str,
+    ) -> dict[str, Any]:
+        notebook, changed = self._load_notebook(real_path)
+        index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
+        cell = notebook.cells[index]
+        if cell.cell_type != "code":
+            raise RuntimeError("Only code cells can be executed")
+        if cell.source != source:
+            cell.source = source
+            cell.outputs = []
+            cell.execution_count = None
+            changed = True
+        if changed:
+            self._save_notebook(real_path, notebook)
+        return self._headless_notebook_execute_cell(
+            real_path,
+            relative_path,
+            cell_id=self._cell_id(cell, index),
+            cell_index=None,
+        )
 
     def _headless_notebook_restart(self, real_path: str, relative_path: str) -> dict[str, Any]:
         runtime = self.headless_runtimes.get(real_path)
@@ -1532,6 +1588,30 @@ def _handler_factory(state: CoreState):
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
                         return
                     body, status = state.notebook_execute_all(path)
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/runtime":
+                    path = payload.get("path")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    body, status = state.notebook_runtime(path)
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/execute-visible-cell":
+                    path = payload.get("path")
+                    cell_index = payload.get("cell_index")
+                    source = payload.get("source")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    if not isinstance(cell_index, int):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing cell_index"})
+                        return
+                    if not isinstance(source, str):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing source"})
+                        return
+                    body, status = state.notebook_execute_visible_cell(path, cell_index=cell_index, source=source)
                     self._json(status, body)
                     return
                 if self.path == "/api/notebooks/restart":

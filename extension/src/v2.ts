@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 
 const execFile = util.promisify(childProcess.execFile);
 const HEARTBEAT_INTERVAL_MS = 30_000;
+export const PROJECTION_CONTROLLER_ID = 'agent-repl.headless-runtime';
 
 type CliPlan = {
     command: string;
@@ -20,6 +21,16 @@ type SessionRef = {
 
 export function primaryWorkspaceRoot(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+export function workspaceRootForPath(fsPath: string): string | undefined {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    for (const folder of folders) {
+        if (fsPath === folder.uri.fsPath || fsPath.startsWith(`${folder.uri.fsPath}${path.sep}`)) {
+            return folder.uri.fsPath;
+        }
+    }
+    return primaryWorkspaceRoot();
 }
 
 function workspaceExecutable(workspaceRoot: string, executable: string): string {
@@ -185,6 +196,193 @@ export class V2AutoAttach implements vscode.Disposable {
         }
         throw lastError ?? new Error('No working agent-repl launcher found for session auto-attach');
     }
+}
+
+type NotebookRuntimeState = {
+    status: string;
+    path: string;
+    active: boolean;
+    mode?: string | null;
+    runtime?: {
+        python_path?: string;
+        busy?: boolean;
+    } | null;
+};
+
+type VisibleCellExecutionResult = {
+    status: string;
+    outputs?: Array<Record<string, any>>;
+    execution_count?: number | null;
+};
+
+export class HeadlessNotebookProjection implements vscode.Disposable {
+    private readonly controller: vscode.NotebookController;
+    private readonly disposables: vscode.Disposable[] = [];
+    private readonly attaching = new Set<string>();
+
+    constructor(
+        private readonly context: vscode.ExtensionContext,
+        private readonly extensionId: string,
+    ) {
+        this.controller = vscode.notebooks.createNotebookController(
+            PROJECTION_CONTROLLER_ID,
+            'jupyter-notebook',
+            'Agent REPL Runtime',
+        );
+        this.controller.supportedLanguages = ['python'];
+        this.controller.description = 'Shared runtime projection';
+        this.controller.executeHandler = async (cells, notebook) => {
+            await this.executeCells(cells, notebook);
+        };
+        this.disposables.push(this.controller);
+        this.disposables.push(
+            vscode.workspace.onDidOpenNotebookDocument((notebook) => {
+                void this.attachNotebookIfRunning(notebook);
+            }),
+        );
+        this.disposables.push(
+            vscode.window.onDidChangeVisibleNotebookEditors((editors) => {
+                for (const editor of editors) {
+                    void this.attachNotebookIfRunning(editor.notebook, editor);
+                }
+            }),
+        );
+    }
+
+    dispose(): void {
+        for (const disposable of this.disposables) {
+            disposable.dispose();
+        }
+        this.disposables.length = 0;
+    }
+
+    async attachNotebookIfRunning(
+        notebook: vscode.NotebookDocument,
+        editor?: vscode.NotebookEditor,
+    ): Promise<boolean> {
+        if (notebook.notebookType !== 'jupyter-notebook') {
+            return false;
+        }
+        const workspaceRoot = workspaceRootForPath(notebook.uri.fsPath);
+        if (!workspaceRoot) {
+            return false;
+        }
+        const key = notebook.uri.fsPath;
+        if (this.attaching.has(key)) {
+            return false;
+        }
+        const config = vscode.workspace.getConfiguration('agent-repl');
+        if (!autoAttachEnabled(config)) {
+            return false;
+        }
+        this.attaching.add(key);
+        try {
+            const state = await runCliJson<NotebookRuntimeState>(workspaceRoot, config, [
+                'v2', 'notebook-runtime',
+                '--workspace-root', workspaceRoot,
+                notebook.uri.fsPath,
+            ]);
+            if (!state.active || state.mode !== 'headless') {
+                return false;
+            }
+            this.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
+            const targetEditor = editor ?? vscode.window.visibleNotebookEditors.find((candidate) => candidate.notebook === notebook);
+            if (targetEditor) {
+                await vscode.commands.executeCommand('notebook.selectKernel', {
+                    notebookEditor: targetEditor,
+                    id: this.controller.id,
+                    extension: this.extensionId,
+                });
+            }
+            return true;
+        } finally {
+            this.attaching.delete(key);
+        }
+    }
+
+    private async executeCells(cells: readonly vscode.NotebookCell[], notebook: vscode.NotebookDocument): Promise<void> {
+        const workspaceRoot = workspaceRootForPath(notebook.uri.fsPath);
+        if (!workspaceRoot) {
+            throw new Error(`No workspace root matched '${notebook.uri.fsPath}'`);
+        }
+        const config = vscode.workspace.getConfiguration('agent-repl');
+        for (const cell of cells) {
+            if (cell.kind !== vscode.NotebookCellKind.Code) {
+                continue;
+            }
+            const execution = this.controller.createNotebookCellExecution(cell);
+            execution.start(Date.now());
+            try {
+                const result = await runCliJson<VisibleCellExecutionResult>(workspaceRoot, config, [
+                    'v2', 'execute-visible-cell',
+                    '--workspace-root', workspaceRoot,
+                    notebook.uri.fsPath,
+                    '--cell-index', String(cell.index),
+                    '--source', cell.document.getText(),
+                ]);
+                if (typeof result.execution_count === 'number') {
+                    execution.executionOrder = result.execution_count;
+                }
+                await execution.replaceOutput(toNotebookOutputs(result.outputs ?? []));
+                execution.end(result.status !== 'error', Date.now());
+            } catch (err: any) {
+                await execution.replaceOutput([
+                    new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.error(err instanceof Error ? err : new Error(String(err))),
+                    ]),
+                ]);
+                execution.end(false, Date.now());
+            }
+        }
+        await notebook.save();
+    }
+}
+
+function toNotebookOutputs(outputs: Array<Record<string, any>>): vscode.NotebookCellOutput[] {
+    return outputs.map((output) => {
+        const outputType = output.output_type;
+        if (outputType === 'stream') {
+            return new vscode.NotebookCellOutput([
+                vscode.NotebookCellOutputItem.text(String(output.text ?? ''), output.name === 'stderr' ? 'application/vnd.code.notebook.stderr' : 'application/vnd.code.notebook.stdout'),
+            ]);
+        }
+        if (outputType === 'error') {
+            return new vscode.NotebookCellOutput([
+                vscode.NotebookCellOutputItem.error(new Error(String(output.evalue ?? output.ename ?? 'Execution failed'))),
+            ]);
+        }
+        const data = output.data ?? {};
+        const items: vscode.NotebookCellOutputItem[] = [];
+        if (typeof data['text/plain'] === 'string') {
+            items.push(vscode.NotebookCellOutputItem.text(data['text/plain']));
+        }
+        if (items.length === 0) {
+            items.push(vscode.NotebookCellOutputItem.text(JSON.stringify(data)));
+        }
+        return new vscode.NotebookCellOutput(items, output.metadata ?? {});
+    });
+}
+
+async function runCliJson<T>(workspaceRoot: string, config: vscode.WorkspaceConfiguration, args: string[]): Promise<T> {
+    let lastError: Error | undefined;
+    const diagnostics: string[] = [];
+    for (const plan of v2CliPlans(workspaceRoot, config)) {
+        try {
+            const result = await execFile(plan.command, [...plan.args, ...args], {
+                cwd: plan.cwd,
+                timeout: 15_000,
+            });
+            return JSON.parse(result.stdout) as T;
+        } catch (err: any) {
+            const detail = err?.stderr?.trim?.() || err?.message || String(err);
+            diagnostics.push(`${plan.command} ${[...plan.args, ...args].join(' ')} => ${detail}`);
+            lastError = err instanceof Error ? err : new Error(String(err));
+        }
+    }
+    if (diagnostics.length > 0) {
+        throw new Error(`No working agent-repl launcher found. Attempts: ${diagnostics.join(' | ')}`);
+    }
+    throw lastError ?? new Error('No working agent-repl launcher found');
 }
 
 function sessionStorageKey(workspaceRoot: string): string {

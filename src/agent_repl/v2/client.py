@@ -284,6 +284,16 @@ class V2Client:
     def notebook_execute_all(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/execute-all", {"path": path}, timeout=120)
 
+    def notebook_runtime(self, path: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/runtime", {"path": path}, timeout=120)
+
+    def notebook_execute_visible_cell(self, path: str, *, cell_index: int, source: str) -> dict[str, Any]:
+        return self._post(
+            "/api/notebooks/execute-visible-cell",
+            {"path": path, "cell_index": cell_index, "source": source},
+            timeout=120,
+        )
+
     def notebook_restart(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/restart", {"path": path}, timeout=120)
 

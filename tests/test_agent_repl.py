@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -554,6 +555,50 @@ class TestV2CoreState(unittest.TestCase):
             self.assertFalse(status_body["open"])
             self.assertEqual(status_body["kernel_state"], "idle")
 
+    def test_headless_notebook_runtime_reports_active_runtime_without_projection_client(self):
+        notebook_path = "notebooks/headless-runtime.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "x = 3\nx"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+
+            runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+            self.assertEqual(runtime_status, 200)
+            self.assertTrue(runtime_body["active"])
+            self.assertEqual(runtime_body["mode"], "headless")
+            self.assertEqual(runtime_body["runtime"]["python_path"], os.path.realpath(kernel_python))
+
+    def test_headless_execute_visible_cell_updates_source_and_outputs(self):
+        notebook_path = "notebooks/headless-visible.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "x = 1\nx"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+
+            exec_body, exec_status = self.state.notebook_execute_visible_cell(
+                notebook_path,
+                cell_index=0,
+                source="x = 9\nx",
+            )
+            self.assertEqual(exec_status, 200)
+            self.assertEqual(exec_body["status"], "ok")
+            self.assertEqual(exec_body["outputs"][0]["data"]["text/plain"], "9")
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            self.assertEqual(contents_body["cells"][0]["source"], "x = 9\nx")
+            self.assertEqual(contents_body["cells"][0]["outputs"][0]["data"]["text/plain"], "9")
+
     def test_session_can_detach_touch_and_resume(self):
         created = self.state.start_session("agent", "cli", "worker", "sess-1")
         self.assertEqual(created["session"]["status"], "attached")
@@ -973,6 +1018,21 @@ class TestV2Endpoints(unittest.TestCase):
         self.assertIn("/api/notebooks/execute-all", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "nb.ipynb"})
 
+    def test_notebook_runtime_calls_post(self):
+        self.client.notebook_runtime("nb.ipynb")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/runtime", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "nb.ipynb"})
+
+    def test_notebook_execute_visible_cell_calls_post(self):
+        self.client.notebook_execute_visible_cell("nb.ipynb", cell_index=2, source="x = 9\nx")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/execute-visible-cell", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "cell_index": 2, "source": "x = 9\nx"},
+        )
+
     def test_list_branches_calls_get(self):
         self.client.list_branches()
         url = self.mock_get.call_args[0][0]
@@ -1167,6 +1227,18 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.v2_command, "document-rebind")
         self.assertEqual(args.document_id, "doc-1")
 
+    def test_v2_notebook_runtime(self):
+        args = build_parser().parse_args(["v2", "notebook-runtime", "notebooks/demo.ipynb"])
+        self.assertEqual(args.v2_command, "notebook-runtime")
+        self.assertEqual(args.path, "notebooks/demo.ipynb")
+
+    def test_v2_execute_visible_cell(self):
+        args = build_parser().parse_args(["v2", "execute-visible-cell", "notebooks/demo.ipynb", "--cell-index", "2", "-s", "x = 1"])
+        self.assertEqual(args.v2_command, "execute-visible-cell")
+        self.assertEqual(args.path, "notebooks/demo.ipynb")
+        self.assertEqual(args.cell_index, 2)
+        self.assertEqual(args.source, "x = 1")
+
     def test_v2_branch_start(self):
         args = build_parser().parse_args(["v2", "branch-start", "--document-id", "doc-1"])
         self.assertEqual(args.v2_command, "branch-start")
@@ -1260,6 +1332,8 @@ class TestCommands(unittest.TestCase):
         client.notebook_execute_all.return_value = {"status": "ok"}
         client.notebook_restart.return_value = {"status": "ok"}
         client.notebook_restart_and_run_all.return_value = {"status": "ok"}
+        client.notebook_runtime.return_value = {"status": "ok", "active": True}
+        client.notebook_execute_visible_cell.return_value = {"status": "ok"}
         client.list_branches.return_value = {"status": "ok", "branches": []}
         client.start_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "active"}}
         client.finish_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "merged"}}
@@ -1748,6 +1822,36 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         client.rebind_document.assert_called_once_with("doc-1")
+
+    def test_v2_notebook_runtime(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "notebook-runtime", "notebooks/demo.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.notebook_runtime.assert_called_once_with("notebooks/demo.ipynb")
+
+    def test_v2_execute_visible_cell(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "execute-visible-cell", "notebooks/demo.ipynb", "--cell-index", "2", "-s", "x = 1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.notebook_execute_visible_cell.assert_called_once_with(
+            "notebooks/demo.ipynb",
+            cell_index=2,
+            source="x = 1",
+        )
 
     def test_v2_branches(self):
         client = self._mock_v2_client()

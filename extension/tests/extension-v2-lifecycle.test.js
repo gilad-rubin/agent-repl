@@ -66,6 +66,15 @@ function loadExtensionModule() {
         dispose() {}
     }
 
+    class FakeHeadlessNotebookProjection {
+        constructor(context, extensionId) {
+            this.context = context;
+            this.extensionId = extensionId;
+        }
+
+        dispose() {}
+    }
+
     const vscode = {
         StatusBarAlignment: { Left: 1 },
         workspace: {
@@ -137,7 +146,7 @@ function loadExtensionModule() {
             return { initExecutionMonitor: () => ({ dispose() {} }) };
         }
         if (request === './v2') {
-            return { V2AutoAttach: FakeV2AutoAttach };
+            return { V2AutoAttach: FakeV2AutoAttach, HeadlessNotebookProjection: FakeHeadlessNotebookProjection };
         }
         return originalLoad.call(this, request, parent, isMain);
     };
@@ -169,6 +178,7 @@ test('extension lifecycle auto-attaches to the shared core on start and detaches
         connectionWrites,
     } = loadExtensionModule();
     const context = {
+        extension: { id: 'agent-repl.agent-repl' },
         subscriptions: [],
         workspaceState: {
             get: () => undefined,

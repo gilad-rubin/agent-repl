@@ -7,18 +7,20 @@ import { PromptStatusBarProvider } from './prompts/statusBar';
 import { insertPromptCell } from './prompts/commands';
 import { ActivityPanelProvider } from './activity/panel';
 import { initExecutionMonitor } from './execution/queue';
-import { V2AutoAttach } from './v2';
+import { HeadlessNotebookProjection, V2AutoAttach } from './v2';
 
 let server: BridgeServer | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext | undefined;
 let executionMonitorDisposable: vscode.Disposable | undefined;
 let v2AutoAttach: V2AutoAttach | undefined;
+let headlessProjection: HeadlessNotebookProjection | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     extensionContext = context;
     const config = vscode.workspace.getConfiguration('agent-repl');
     v2AutoAttach = new V2AutoAttach(context);
+    headlessProjection = new HeadlessNotebookProjection(context, context.extension.id);
 
     // Status bar
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -28,6 +30,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
     context.subscriptions.push(v2AutoAttach);
+    context.subscriptions.push(headlessProjection);
 
     // Execution monitor (watches cell executionSummary for completion detection)
     executionMonitorDisposable = initExecutionMonitor();
@@ -145,6 +148,8 @@ function context_subscriptions_push(d: vscode.Disposable): void { extraDisposabl
 
 function stopBridge(): void {
     void v2AutoAttach?.detachIfAttached();
+    headlessProjection?.dispose();
+    headlessProjection = undefined;
     server?.dispose();
     server = undefined;
     removeConnectionFile();
