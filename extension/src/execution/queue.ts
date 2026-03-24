@@ -35,6 +35,7 @@ interface ExecutingCell {
 // Tracks all currently executing cells across all notebooks
 const executingCells = new Map<string, ExecutingCell>();
 let kernelState: 'idle' | 'busy' = 'idle';
+const pendingNotebookSaves = new Map<string, ReturnType<typeof setTimeout>>();
 
 function cellKey(fsPath: string, index: number): string {
     return `${fsPath}:${index}`;
@@ -148,6 +149,27 @@ export function resetExecutionState(
     for (const path of targetPaths) {
         processNext(path);
     }
+}
+
+function scheduleNotebookSave(doc: vscode.NotebookDocument): void {
+    const fsPath = doc.uri.fsPath;
+    if ((doc as { isUntitled?: boolean }).isUntitled || typeof (doc as { save?: () => Thenable<boolean> | Promise<boolean> }).save !== 'function') {
+        return;
+    }
+
+    const existing = pendingNotebookSaves.get(fsPath);
+    if (existing) {
+        clearTimeout(existing);
+    }
+
+    const handle = setTimeout(() => {
+        pendingNotebookSaves.delete(fsPath);
+        Promise.resolve((doc as { save: () => Thenable<boolean> | Promise<boolean> }).save()).catch((err: any) => {
+            console.warn('agent-repl: failed to save notebook after background update', err);
+        });
+    }, 50);
+
+    pendingNotebookSaves.set(fsPath, handle);
 }
 
 function isNotebookBusy(path: string): boolean {
@@ -376,6 +398,7 @@ export async function insertAndExecute(
     const edit = new vscode.WorkspaceEdit();
     edit.set(doc.uri, [vscode.NotebookEdit.insertCells(index, [cellData])]);
     await vscode.workspace.applyEdit(edit);
+    scheduleNotebookSave(doc);
 
     const result = await enqueueExecution(path, { cell_index: index }, maxQueue);
     return { ...result, operation: 'insert-execute', cell_id: cellId, cell_index: index };
@@ -924,6 +947,7 @@ async function replaceCellState(
     const edit = new vscode.WorkspaceEdit();
     edit.set(doc.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(cellIndex, cellIndex + 1), [data])]);
     await vscode.workspace.applyEdit(edit);
+    scheduleNotebookSave(doc);
 }
 
 async function clearAgentRunState(doc: vscode.NotebookDocument, cellIndex: number): Promise<void> {
@@ -932,6 +956,7 @@ async function clearAgentRunState(doc: vscode.NotebookDocument, cellIndex: numbe
     const edit = new vscode.WorkspaceEdit();
     edit.set(doc.uri, [vscode.NotebookEdit.updateCellMetadata(cellIndex, metadata)]);
     await vscode.workspace.applyEdit(edit);
+    scheduleNotebookSave(doc);
 }
 
 function withAgentRunStatus(

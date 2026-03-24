@@ -45,6 +45,7 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
 }
 
 test('no-yank execution passes a cancellation token to the Jupyter kernel API', async () => {
+    let saveCalls = 0;
     const cell = {
         kind: 2,
         metadata: {},
@@ -59,6 +60,11 @@ test('no-yank execution passes a cancellation token to the Jupyter kernel API', 
         uri: { fsPath: '/tmp/demo.ipynb' },
         cellAt: () => cell,
         cellCount: 1,
+        isUntitled: false,
+        async save() {
+            saveCalls += 1;
+            return true;
+        },
     };
 
     class NotebookCellData {
@@ -174,8 +180,10 @@ test('no-yank execution passes a cancellation token to the Jupyter kernel API', 
     queue.resetJupyterApiCache();
 
     const result = await queue.executeCell('/tmp/demo.ipynb', { cell_id: 'cell-1' }, 20);
+    await new Promise(resolve => setTimeout(resolve, 80));
 
     assert.equal(result.status, 'ok');
     assert.equal(result.execution_mode, 'jupyter-kernel-api');
     assert.equal(result.execution_preference, 'no-yank');
+    assert.equal(saveCalls > 0, true);
 });

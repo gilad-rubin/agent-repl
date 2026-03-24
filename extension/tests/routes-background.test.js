@@ -460,6 +460,85 @@ test('insert-and-execute route stays in the background for an already-open noteb
     assert.equal(showCalls, 0);
 });
 
+test('insert-and-execute route opens a closed notebook in the background without revealing it', async () => {
+    const uri = { fsPath: '/workspace/tmp/demo.ipynb', toString: () => 'file:///workspace/tmp/demo.ipynb' };
+    const doc = {
+        uri,
+        notebookType: 'jupyter-notebook',
+        cellCount: 0,
+        cellAt() {
+            return { kind: 2, document: { getText: () => 'print(1)' } };
+        },
+    };
+    let showCalls = 0;
+    let queueCalls = 0;
+
+    const routesModule = loadRoutesModule({
+        vscode: {
+            NotebookCellKind: { Markup: 1, Code: 2 },
+            workspace: {
+                workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
+                notebookDocuments: [],
+                openNotebookDocument: async () => doc,
+            },
+            window: {
+                showNotebookDocument: async () => {
+                    showCalls += 1;
+                    return {};
+                },
+                activeNotebookEditor: undefined,
+                activeTextEditor: undefined,
+                visibleNotebookEditors: [],
+            },
+            commands: {
+                executeCommand: async () => {
+                    throw new Error('foreground notebook command should not run');
+                },
+            },
+            extensions: { getExtension: () => undefined },
+        },
+        resolver: {
+            resolveNotebook: () => doc,
+            resolveNotebookUri: () => uri,
+            resolveOrOpenNotebook: async () => doc,
+            findOpenNotebook: () => undefined,
+            findEditor: () => undefined,
+            ensureNotebookEditor: async () => {
+                throw new Error('should not ensure editor for closed-notebook insert-and-execute');
+            },
+            captureEditorFocus: () => ({ kind: 'none' }),
+            restoreEditorFocus: async () => {},
+        },
+        queue: {
+            executeCell: async () => ({ status: 'ok' }),
+            getExecution: () => ({ status: 'ok' }),
+            getStatus: async () => ({ kernel_state: 'idle' }),
+            insertAndExecute: async () => {
+                queueCalls += 1;
+                return { status: 'started', execution_id: 'exec-ix', cell_id: 'cell-2' };
+            },
+            resetExecutionState: () => {},
+            resetJupyterApiCache: () => {},
+            getJupyterApi: async () => undefined,
+            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
+            startNotebookExecutionAll: async () => [],
+        },
+    });
+
+    const routes = routesModule.buildRoutes(20);
+    const result = await routes['POST /api/notebook/insert-and-execute']({
+        path: 'tmp/demo.ipynb',
+        cwd: '/workspace',
+        source: 'x = 2',
+        cell_type: 'code',
+        at_index: -1,
+    });
+
+    assert.equal(result.status, 'started');
+    assert.equal(queueCalls, 1);
+    assert.equal(showCalls, 0);
+});
+
 test('restart routes use background shutdown and quiet reattach without opening the notebook UI', async () => {
     const originalEnv = process.env.JUPYTER_PATH;
     const originalExistsSync = fs.existsSync;
