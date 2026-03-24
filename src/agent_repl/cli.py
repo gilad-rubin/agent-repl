@@ -32,7 +32,20 @@ def _client(workspace_hint: str | None = None) -> BridgeClient:
 
 
 def _v2_client(workspace_hint: str | None = None, runtime_dir: str | None = None) -> V2Client:
+    """Get a fresh v2 client, ensuring the daemon is up to date."""
+    workspace_root = os.path.realpath(workspace_hint or os.getcwd())
+    result = V2Client.start(workspace_root, runtime_dir=runtime_dir)
+    if result.get("stale_restart"):
+        print(
+            f"Restarted stale daemon (PID {result.get('stale_pid')}, code updated)",
+            file=sys.stderr,
+        )
     return V2Client.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir)
+
+
+def _v2_client_raw(workspace_hint: str | None = None, runtime_dir: str | None = None) -> V2Client:
+    """Bare discover without freshness check — only for v2 stop/status diagnostics."""
+    return V2Client.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir, allow_stale=True)
 
 
 def _workspace_root() -> str:
@@ -41,8 +54,13 @@ def _workspace_root() -> str:
 
 def _notebook_client(path: str) -> V2Client | BridgeClient:
     workspace_root = _workspace_root()
-    V2Client.start(workspace_root)
-    return _v2_client(path)
+    result = V2Client.start(workspace_root)
+    if result.get("stale_restart"):
+        print(
+            f"Restarted stale daemon (PID {result.get('stale_pid')}, code updated)",
+            file=sys.stderr,
+        )
+    return V2Client.discover(workspace_hint=path)
 
 
 # ------------------------------------------------------------------
@@ -306,12 +324,12 @@ def cmd_v2(args: argparse.Namespace) -> int:
         return 0
 
     if args.v2_command == "status":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).status()
+        result = _v2_client_raw(workspace_root, runtime_dir=runtime_dir).status()
         _out(result, args.pretty)
         return 0
 
     if args.v2_command == "stop":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).shutdown()
+        result = _v2_client_raw(workspace_root, runtime_dir=runtime_dir).shutdown()
         _out(result, args.pretty)
         return 0
 

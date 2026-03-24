@@ -1,6 +1,7 @@
 """Client and discovery helpers for the experimental v2 core daemon."""
 from __future__ import annotations
 
+import functools
 import glob
 import hashlib
 import json
@@ -42,15 +43,20 @@ class V2Client:
         runtime_dir = os.path.realpath(runtime_dir or _runtime_dir())
 
         try:
-            client = cls.discover(workspace_root, runtime_dir=runtime_dir)
+            client = cls.discover(
+                workspace_root, runtime_dir=runtime_dir, allow_stale=True,
+            )
         except RuntimeError:
             client = None
 
+        stale_pid: int | None = None
         if client is not None:
             result = client.status()
             if result.get("code_hash") == _current_install_hash():
                 result["already_running"] = True
                 return result
+            # Stale daemon — shut it down and start a fresh one.
+            stale_pid = result.get("pid")
             try:
                 client.shutdown()
             except Exception:
@@ -58,7 +64,9 @@ class V2Client:
             shutdown_deadline = time.monotonic() + timeout
             while time.monotonic() < shutdown_deadline:
                 try:
-                    cls.discover(workspace_root, runtime_dir=runtime_dir)
+                    cls.discover(
+                        workspace_root, runtime_dir=runtime_dir, allow_stale=True,
+                    )
                     time.sleep(0.1)
                 except RuntimeError:
                     break
@@ -90,10 +98,19 @@ class V2Client:
                 client = cls.discover(workspace_root, runtime_dir=runtime_dir)
                 result = client.status()
                 result["already_running"] = False
+                if stale_pid is not None:
+                    result["stale_restart"] = True
+                    result["stale_pid"] = stale_pid
                 return result
             except RuntimeError:
                 time.sleep(0.1)
 
+        if stale_pid is not None:
+            raise RuntimeError(
+                f"Stale daemon (PID {stale_pid}, code changed) was stopped but "
+                f"replacement failed to start within {timeout}s. "
+                f"Try: kill {stale_pid} && agent-repl v2 start"
+            )
         raise RuntimeError("Timed out waiting for agent-repl v2 core daemon to start")
 
     @classmethod
@@ -132,6 +149,7 @@ class V2Client:
         workspace_hint: str | None = None,
         *,
         runtime_dir: str | None = None,
+        allow_stale: bool = False,
     ) -> "V2Client":
         runtime = os.path.realpath(runtime_dir or _runtime_dir())
         pattern = os.path.join(runtime, f"{RUNTIME_FILE_PREFIX}*.json")
@@ -139,6 +157,7 @@ class V2Client:
 
         cwd = os.path.realpath(os.getcwd())
         workspace_target = _resolve_workspace_hint(workspace_hint, cwd)
+        current_hash = _current_install_hash() if not allow_stale else None
         candidates: list[tuple[int, float, V2Client]] = []
 
         for fpath in files:
@@ -150,6 +169,10 @@ class V2Client:
                         os.unlink(fpath)
                     except OSError:
                         pass
+                    continue
+
+                # Skip stale daemons unless caller explicitly allows them.
+                if current_hash is not None and info.get("code_hash") != current_hash:
                     continue
 
                 workspace_root = os.path.realpath(info["workspace_root"])
@@ -460,6 +483,7 @@ def _runtime_dir() -> str:
     return os.path.realpath(os.path.join(os.path.expanduser("~"), ".local", "share", "jupyter", "runtime"))
 
 
+@functools.lru_cache(maxsize=1)
 def _current_install_hash() -> str:
     package_root = Path(__file__).resolve().parents[1]
     digest = hashlib.sha256()

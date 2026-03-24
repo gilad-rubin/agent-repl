@@ -139,6 +139,47 @@ class TestV2Discovery(unittest.TestCase):
             "port": 23456,
             "token": "tok",
             "workspace_root": "/workspace",
+            "code_hash": "current",
+        })
+        with (
+            mock.patch("agent_repl.v2.client.glob.glob", return_value=["/tmp/agent-repl-v2-core-1.json"]),
+            mock.patch("agent_repl.v2.client.os.path.getmtime", return_value=1.0),
+            mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace"),
+            mock.patch("agent_repl.v2.client.Path.read_text", return_value=info),
+            mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
+            mock.patch("agent_repl.v2.client._current_install_hash", return_value="current"),
+            mock.patch.object(V2Client, "health", return_value={"status": "ok"}),
+        ):
+            client = V2Client.discover()
+        self.assertEqual(client.base_url, "http://127.0.0.1:23456")
+        self.assertEqual(client.token, "tok")
+
+    def test_discover_skips_stale_daemons(self):
+        info = json.dumps({
+            "pid": 123,
+            "port": 23456,
+            "token": "tok",
+            "workspace_root": "/workspace",
+            "code_hash": "old-hash",
+        })
+        with (
+            mock.patch("agent_repl.v2.client.glob.glob", return_value=["/tmp/agent-repl-v2-core-1.json"]),
+            mock.patch("agent_repl.v2.client.os.path.getmtime", return_value=1.0),
+            mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace"),
+            mock.patch("agent_repl.v2.client.Path.read_text", return_value=info),
+            mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
+            mock.patch("agent_repl.v2.client._current_install_hash", return_value="new-hash"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "No running agent-repl v2 core daemon"):
+                V2Client.discover()
+
+    def test_discover_allows_stale_when_requested(self):
+        info = json.dumps({
+            "pid": 123,
+            "port": 23456,
+            "token": "tok",
+            "workspace_root": "/workspace",
+            "code_hash": "old-hash",
         })
         with (
             mock.patch("agent_repl.v2.client.glob.glob", return_value=["/tmp/agent-repl-v2-core-1.json"]),
@@ -148,9 +189,8 @@ class TestV2Discovery(unittest.TestCase):
             mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
             mock.patch.object(V2Client, "health", return_value={"status": "ok"}),
         ):
-            client = V2Client.discover()
+            client = V2Client.discover(allow_stale=True)
         self.assertEqual(client.base_url, "http://127.0.0.1:23456")
-        self.assertEqual(client.token, "tok")
 
     def test_discover_raises_when_no_workspace_matches(self):
         info = json.dumps({
@@ -158,6 +198,7 @@ class TestV2Discovery(unittest.TestCase):
             "port": 23456,
             "token": "tok",
             "workspace_root": "/other",
+            "code_hash": "current",
         })
         with (
             mock.patch("agent_repl.v2.client.glob.glob", return_value=["/tmp/agent-repl-v2-core-1.json"]),
@@ -165,6 +206,7 @@ class TestV2Discovery(unittest.TestCase):
             mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace"),
             mock.patch("agent_repl.v2.client.Path.read_text", return_value=info),
             mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
+            mock.patch("agent_repl.v2.client._current_install_hash", return_value="current"),
         ):
             with self.assertRaisesRegex(RuntimeError, "No running agent-repl v2 core daemon matched '/workspace'"):
                 V2Client.discover()
@@ -175,12 +217,14 @@ class TestV2Discovery(unittest.TestCase):
             "port": 23456,
             "token": "tok-parent",
             "workspace_root": "/workspace",
+            "code_hash": "current",
         })
         info_child = json.dumps({
             "pid": 456,
             "port": 34567,
             "token": "tok-child",
             "workspace_root": "/workspace/subproject",
+            "code_hash": "current",
         })
         read_map = {
             "/tmp/agent-repl-v2-core-parent.json": info_parent,
@@ -199,6 +243,7 @@ class TestV2Discovery(unittest.TestCase):
             mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace/subproject"),
             mock.patch("agent_repl.v2.client.Path.read_text", autospec=True, side_effect=lambda self: read_map[str(self)]),
             mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
+            mock.patch("agent_repl.v2.client._current_install_hash", return_value="current"),
             mock.patch.object(V2Client, "health", return_value={"status": "ok"}),
         ):
             client = V2Client.discover()
@@ -236,7 +281,7 @@ class TestV2Discovery(unittest.TestCase):
 
     def test_start_restarts_stale_daemon_when_installed_code_is_newer(self):
         stale_client = mock.MagicMock(spec=V2Client)
-        stale_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 1.0, "code_hash": "stale"}
+        stale_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 1.0, "code_hash": "stale", "pid": 999}
         fresh_client = mock.MagicMock(spec=V2Client)
         fresh_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 20.0, "code_hash": "fresh"}
 
@@ -252,6 +297,8 @@ class TestV2Discovery(unittest.TestCase):
         stale_client.shutdown.assert_called_once()
         mock_popen.assert_called_once()
         self.assertFalse(result["already_running"])
+        self.assertTrue(result["stale_restart"])
+        self.assertEqual(result["stale_pid"], 999)
         self.assertEqual(result["workspace_root"], "/workspace")
 
 
@@ -2142,7 +2189,7 @@ class TestCommands(unittest.TestCase):
         try:
             with (
                 mock.patch("agent_repl.cli._client"),
-                mock.patch("agent_repl.cli._v2_client", return_value=client),
+                mock.patch("agent_repl.cli._v2_client_raw", return_value=client),
             ):
                 code = main(["v2", "status"])
         finally:
@@ -2158,7 +2205,7 @@ class TestCommands(unittest.TestCase):
         try:
             with (
                 mock.patch("agent_repl.cli._client"),
-                mock.patch("agent_repl.cli._v2_client", return_value=client),
+                mock.patch("agent_repl.cli._v2_client_raw", return_value=client),
             ):
                 code = main(["v2", "stop"])
         finally:

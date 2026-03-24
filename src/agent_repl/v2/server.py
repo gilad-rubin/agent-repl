@@ -1522,6 +1522,21 @@ def serve_forever(
         "started_at": state.started_at,
     }))
 
+    startup_hash = _current_package_hash()
+
+    def _staleness_watchdog() -> None:
+        while True:
+            time.sleep(60)
+            try:
+                if _current_package_hash() != startup_hash:
+                    server.shutdown()
+                    return
+            except Exception:
+                continue
+
+    watchdog = threading.Thread(target=_staleness_watchdog, daemon=True)
+    watchdog.start()
+
     try:
         server.serve_forever(poll_interval=0.2)
     finally:
