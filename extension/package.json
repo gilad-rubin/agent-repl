@@ -61,8 +61,9 @@
   "scripts": {
     "compile": "tsc -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
+    "test:artifact": "npm run package && node scripts/check-v2-auto-attach-package.js",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package --allow-missing-repository",
+    "package": "npx vsce package --allow-missing-repository",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {

@@ -98,6 +98,7 @@ uv add --dev agent-repl --path /path/to/agent-repl
 ```
 
 The VS Code extension must also be installed. Build it with `cd extension && npm run compile && npx vsce package`, then install the `.vsix`.
+For the packaged v2 auto-attach smoke check, run `cd extension && npm run test:artifact`.
 Recompiling the repo alone does not update an already-installed extension under `~/.vscode/extensions/`; reinstall the `.vsix` after rebuilding, or run the repo in an Extension Development Host.
 
 ## Documentation
