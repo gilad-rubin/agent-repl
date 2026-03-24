@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import sys
 import unittest
 from io import StringIO
+from pathlib import Path
 from unittest import mock
 
 import requests
@@ -12,6 +14,7 @@ import requests
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
 from agent_repl.v2.client import V2Client
+from agent_repl.v2.server import CoreState
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +151,69 @@ class TestV2Discovery(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "No running agent-repl v2 core daemon matched '/workspace'"):
                 V2Client.discover()
+
+
+class TestV2CoreState(unittest.TestCase):
+    """Direct tests for v2 core document/file sync behavior."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.workspace_root = Path(self.tmpdir.name)
+        self.runtime_dir = self.workspace_root / "runtime"
+        self.runtime_dir.mkdir()
+        self.doc_path = self.workspace_root / "notebooks" / "demo.ipynb"
+        self.doc_path.parent.mkdir()
+        self.doc_path.write_text('{"cells": []}\n')
+        self.state = CoreState(
+            workspace_root=str(self.workspace_root),
+            runtime_dir=str(self.runtime_dir),
+            token="tok",
+            pid=1234,
+            started_at=1.0,
+        )
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_open_document_captures_bound_file_snapshot(self):
+        body, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document = body["document"]
+        self.assertEqual(document["relative_path"], "notebooks/demo.ipynb")
+        self.assertEqual(document["file_format"], "ipynb")
+        self.assertEqual(document["sync_state"], "in-sync")
+        self.assertTrue(document["bound_snapshot"]["exists"])
+        self.assertEqual(document["bound_snapshot"]["sha256"], document["observed_snapshot"]["sha256"])
+
+    def test_refresh_document_reports_external_change_until_rebound(self):
+        body, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = body["document"]["document_id"]
+
+        self.doc_path.write_text('{"cells": [{"cell_type": "markdown"}]}\n')
+        refresh_body, refresh_status = self.state.refresh_document(document_id)
+        self.assertEqual(refresh_status, 200)
+        refreshed = refresh_body["document"]
+        self.assertEqual(refreshed["sync_state"], "external-change")
+        self.assertNotEqual(refreshed["bound_snapshot"]["sha256"], refreshed["observed_snapshot"]["sha256"])
+
+        rebind_body, rebind_status = self.state.rebind_document(document_id)
+        self.assertEqual(rebind_status, 200)
+        rebound = rebind_body["document"]
+        self.assertEqual(rebound["sync_state"], "in-sync")
+        self.assertEqual(rebound["bound_snapshot"]["sha256"], rebound["observed_snapshot"]["sha256"])
+
+    def test_refresh_document_reports_missing_file(self):
+        body, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = body["document"]["document_id"]
+
+        self.doc_path.unlink()
+        refresh_body, refresh_status = self.state.refresh_document(document_id)
+        self.assertEqual(refresh_status, 200)
+        refreshed = refresh_body["document"]
+        self.assertEqual(refreshed["sync_state"], "missing")
+        self.assertFalse(refreshed["observed_snapshot"]["exists"])
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +406,18 @@ class TestV2Endpoints(unittest.TestCase):
         self.assertIn("/api/documents/open", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "notebooks/demo.ipynb"})
 
+    def test_refresh_document_calls_post(self):
+        self.client.refresh_document("doc-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/documents/refresh", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"document_id": "doc-1"})
+
+    def test_rebind_document_calls_post(self):
+        self.client.rebind_document("doc-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/documents/rebind", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"document_id": "doc-1"})
+
     def test_list_runtimes_calls_get(self):
         self.client.list_runtimes()
         url = self.mock_get.call_args[0][0]
@@ -487,6 +565,16 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.v2_command, "document-open")
         self.assertEqual(args.path, "notebooks/demo.ipynb")
 
+    def test_v2_document_refresh(self):
+        args = build_parser().parse_args(["v2", "document-refresh", "--document-id", "doc-1"])
+        self.assertEqual(args.v2_command, "document-refresh")
+        self.assertEqual(args.document_id, "doc-1")
+
+    def test_v2_document_rebind(self):
+        args = build_parser().parse_args(["v2", "document-rebind", "--document-id", "doc-1"])
+        self.assertEqual(args.v2_command, "document-rebind")
+        self.assertEqual(args.document_id, "doc-1")
+
     def test_v2_runtime_start(self):
         args = build_parser().parse_args(["v2", "runtime-start", "--mode", "shared"])
         self.assertEqual(args.v2_command, "runtime-start")
@@ -553,6 +641,8 @@ class TestCommands(unittest.TestCase):
         client.end_session.return_value = {"status": "ok", "ended": True}
         client.list_documents.return_value = {"status": "ok", "documents": []}
         client.open_document.return_value = {"status": "ok", "document": {"document_id": "doc-1"}}
+        client.refresh_document.return_value = {"status": "ok", "document": {"document_id": "doc-1", "sync_state": "external-change"}}
+        client.rebind_document.return_value = {"status": "ok", "document": {"document_id": "doc-1", "sync_state": "in-sync"}}
         client.list_runtimes.return_value = {"status": "ok", "runtimes": []}
         client.start_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1"}}
         client.stop_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1", "status": "stopped"}}
@@ -798,6 +888,32 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         client.open_document.assert_called_once_with("notebooks/demo.ipynb")
+
+    def test_v2_document_refresh(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "document-refresh", "--document-id", "doc-1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.refresh_document.assert_called_once_with("doc-1")
+
+    def test_v2_document_rebind(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "document-rebind", "--document-id", "doc-1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.rebind_document.assert_called_once_with("doc-1")
 
     def test_v2_runtimes(self):
         client = self._mock_v2_client()

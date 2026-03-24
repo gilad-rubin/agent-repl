@@ -261,6 +261,16 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.v2_command == "document-refresh":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).refresh_document(args.document_id)
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "document-rebind":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).rebind_document(args.document_id)
+        _out(result, args.pretty)
+        return 0
+
     if args.v2_command == "runtimes":
         result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_runtimes()
         _out(result, args.pretty)
@@ -478,6 +488,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     vp = v2sub.add_parser("document-open", help="Register a canonical v2 document for this workspace")
     vp.add_argument("path")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("document-refresh", help="Refresh the observed file state for a registered v2 document")
+    vp.add_argument("--document-id", required=True)
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("document-rebind", help="Explicitly accept the current file snapshot as the canonical bound state")
+    vp.add_argument("--document-id", required=True)
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 

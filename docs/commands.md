@@ -356,7 +356,7 @@ No arguments. Prints "Extension host restarting..." on success.
 Experimental workspace-scoped core daemon commands for the v2 architecture work.
 
 ```
-agent-repl v2 {start|status|stop|sessions|session-start|session-end|documents|document-open|runtimes|runtime-start|runtime-stop|runs|run-start|run-finish} [--workspace-root PATH] [--pretty]
+agent-repl v2 {start|status|stop|sessions|session-start|session-end|documents|document-open|document-refresh|document-rebind|runtimes|runtime-start|runtime-stop|runs|run-start|run-finish} [--workspace-root PATH] [--pretty]
 ```
 
 ### v2 start
@@ -421,10 +421,26 @@ agent-repl v2 documents
 
 ### v2 document-open
 
-Register a canonical v2 document inside the workspace-scoped core authority.
+Register a canonical v2 document inside the workspace-scoped core authority. The first open captures the currently observed file snapshot as the bound compatibility baseline. Opening an already-registered path refreshes the observed snapshot without silently rebinding canonical state.
 
 ```bash
 agent-repl v2 document-open notebooks/demo.ipynb
+```
+
+### v2 document-refresh
+
+Refresh the observed file snapshot for a registered document and report whether the file is still in sync with the bound baseline.
+
+```bash
+agent-repl v2 document-refresh --document-id <document-id>
+```
+
+### v2 document-rebind
+
+Explicitly accept the currently observed file snapshot as the new bound baseline for a registered document.
+
+```bash
+agent-repl v2 document-rebind --document-id <document-id>
 ```
 
 ### v2 runtimes
@@ -482,7 +498,9 @@ Current behavior:
 
 - the daemon is workspace-scoped
 - it runs independently of VS Code
-- it now exposes experimental session, document, runtime, and run registration APIs
+- it now exposes experimental session, document, runtime, run, and file-sync registration APIs
+- documents now carry explicit file compatibility state with `bound_snapshot`, `observed_snapshot`, and `sync_state`
+- external file changes stay visible as `external-change` until you explicitly `document-rebind`
 - runtime and run state are explicit, but real notebook editing/execution are not yet routed through this path
 - this is still early v2 core scaffolding, not the finished workflow
 

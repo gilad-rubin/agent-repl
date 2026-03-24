@@ -161,6 +161,12 @@ class V2Client:
     def open_document(self, path: str) -> dict[str, Any]:
         return self._post("/api/documents/open", {"path": path})
 
+    def refresh_document(self, document_id: str) -> dict[str, Any]:
+        return self._post("/api/documents/refresh", {"document_id": document_id})
+
+    def rebind_document(self, document_id: str) -> dict[str, Any]:
+        return self._post("/api/documents/rebind", {"document_id": document_id})
+
     def list_runtimes(self) -> dict[str, Any]:
         return self._get("/api/runtimes")
 

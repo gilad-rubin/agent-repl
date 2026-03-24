@@ -1,6 +1,7 @@
 """Minimal workspace-scoped HTTP daemon for the experimental v2 core."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -41,6 +42,11 @@ class SessionRecord:
 class DocumentRecord:
     document_id: str
     path: str
+    relative_path: str
+    file_format: str
+    sync_state: str
+    bound_snapshot: dict[str, Any] | None
+    observed_snapshot: dict[str, Any] | None
     created_at: float
     updated_at: float
 
@@ -48,6 +54,12 @@ class DocumentRecord:
         return {
             "document_id": self.document_id,
             "path": self.path,
+            "relative_path": self.relative_path,
+            "binding_kind": "file",
+            "file_format": self.file_format,
+            "sync_state": self.sync_state,
+            "bound_snapshot": self.bound_snapshot,
+            "observed_snapshot": self.observed_snapshot,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -141,6 +153,7 @@ class CoreState:
             "session-ready",
             "runtime-ready",
             "run-ledger",
+            "file-sync",
         ]
         return payload
 
@@ -209,8 +222,11 @@ class CoreState:
             return {"error": f"Path is outside workspace: {path}"}, HTTPStatus.BAD_REQUEST
 
         now = time.time()
+        observed_snapshot = _snapshot_file(real_path)
         for record in self.document_records.values():
             if record.path == real_path:
+                record.observed_snapshot = observed_snapshot
+                record.sync_state = _compute_sync_state(record.bound_snapshot, observed_snapshot)
                 record.updated_at = now
                 return {
                     "status": "ok",
@@ -222,6 +238,11 @@ class CoreState:
         record = DocumentRecord(
             document_id=str(uuid.uuid4()),
             path=real_path,
+            relative_path=os.path.relpath(real_path, os.path.realpath(self.workspace_root)),
+            file_format=_file_format(real_path),
+            sync_state=_compute_sync_state(observed_snapshot, observed_snapshot),
+            bound_snapshot=observed_snapshot,
+            observed_snapshot=observed_snapshot,
             created_at=now,
             updated_at=now,
         )
@@ -230,6 +251,34 @@ class CoreState:
         return {
             "status": "ok",
             "created": True,
+            "document": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
+    def refresh_document(self, document_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        record = self.document_records.get(document_id)
+        if record is None:
+            return {"error": f"Unknown document_id: {document_id}"}, HTTPStatus.NOT_FOUND
+        record.observed_snapshot = _snapshot_file(record.path)
+        record.sync_state = _compute_sync_state(record.bound_snapshot, record.observed_snapshot)
+        record.updated_at = time.time()
+        return {
+            "status": "ok",
+            "document": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
+    def rebind_document(self, document_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        record = self.document_records.get(document_id)
+        if record is None:
+            return {"error": f"Unknown document_id: {document_id}"}, HTTPStatus.NOT_FOUND
+        observed_snapshot = _snapshot_file(record.path)
+        record.bound_snapshot = observed_snapshot
+        record.observed_snapshot = observed_snapshot
+        record.sync_state = _compute_sync_state(record.bound_snapshot, record.observed_snapshot)
+        record.updated_at = time.time()
+        return {
+            "status": "ok",
             "document": record.payload(),
             "workspace_root": self.workspace_root,
         }, HTTPStatus.OK
@@ -473,6 +522,22 @@ def _handler_factory(state: CoreState):
                 body, status = state.open_document(path)
                 self._json(status, body)
                 return
+            if self.path == "/api/documents/refresh":
+                document_id = payload.get("document_id")
+                if not isinstance(document_id, str) or not document_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
+                    return
+                body, status = state.refresh_document(document_id)
+                self._json(status, body)
+                return
+            if self.path == "/api/documents/rebind":
+                document_id = payload.get("document_id")
+                if not isinstance(document_id, str) or not document_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
+                    return
+                body, status = state.rebind_document(document_id)
+                self._json(status, body)
+                return
             if self.path == "/api/runtimes/start":
                 runtime_id = payload.get("runtime_id")
                 mode = payload.get("mode")
@@ -582,3 +647,47 @@ def _path_within(candidate: str, root: str) -> bool:
         return common == os.path.realpath(root)
     except ValueError:
         return False
+
+
+def _file_format(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix == ".ipynb":
+        return "ipynb"
+    if suffix:
+        return suffix.lstrip(".")
+    return "unknown"
+
+
+def _snapshot_file(path: str) -> dict[str, Any]:
+    observed_at = time.time()
+    if not os.path.exists(path):
+        return {
+            "exists": False,
+            "size_bytes": None,
+            "mtime": None,
+            "sha256": None,
+            "observed_at": observed_at,
+        }
+
+    stat = os.stat(path)
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return {
+        "exists": True,
+        "size_bytes": stat.st_size,
+        "mtime": stat.st_mtime,
+        "sha256": digest,
+        "observed_at": observed_at,
+    }
+
+
+def _compute_sync_state(bound_snapshot: dict[str, Any] | None, observed_snapshot: dict[str, Any] | None) -> str:
+    if not observed_snapshot or not observed_snapshot.get("exists"):
+        return "missing"
+    if not bound_snapshot or not bound_snapshot.get("exists"):
+        return "external-change"
+    if (
+        bound_snapshot.get("sha256") == observed_snapshot.get("sha256")
+        and bound_snapshot.get("size_bytes") == observed_snapshot.get("size_bytes")
+    ):
+        return "in-sync"
+    return "external-change"
