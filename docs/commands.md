@@ -356,7 +356,7 @@ No arguments. Prints "Extension host restarting..." on success.
 Experimental workspace-scoped core daemon commands for the v2 architecture work.
 
 ```
-agent-repl v2 {start|status|stop|sessions|session-start|session-end|documents|document-open|document-refresh|document-rebind|runtimes|runtime-start|runtime-stop|runs|run-start|run-finish} [--workspace-root PATH] [--pretty]
+agent-repl v2 {start|status|stop|sessions|session-start|session-touch|session-detach|session-end|documents|document-open|document-refresh|document-rebind|runtimes|runtime-start|runtime-stop|runs|run-start|run-finish} [--workspace-root PATH] [--pretty]
 ```
 
 ### v2 start
@@ -401,6 +401,25 @@ Start or resume a v2 session for the workspace.
 ```bash
 agent-repl v2 session-start --actor agent --client-type cli --label "worker"
 agent-repl v2 session-start --actor human --client-type vscode
+agent-repl v2 session-start --actor agent --client-type cli --capability ops --capability automation
+```
+
+Reusing the same `--session-id` resumes the same attachment record and increments its resume count.
+
+### v2 session-touch
+
+Refresh liveness for an attached v2 session without redefining its identity.
+
+```bash
+agent-repl v2 session-touch --session-id <session-id>
+```
+
+### v2 session-detach
+
+Detach a v2 session without deleting its continuity record. Use this when a client surface goes away but the system should remember its attachment history for safe reconnect.
+
+```bash
+agent-repl v2 session-detach --session-id <session-id>
 ```
 
 ### v2 session-end

@@ -215,6 +215,31 @@ class TestV2CoreState(unittest.TestCase):
         self.assertEqual(refreshed["sync_state"], "missing")
         self.assertFalse(refreshed["observed_snapshot"]["exists"])
 
+    def test_session_can_detach_touch_and_resume(self):
+        created = self.state.start_session("agent", "cli", "worker", "sess-1")
+        self.assertEqual(created["session"]["status"], "attached")
+        self.assertEqual(created["session"]["resume_count"], 0)
+        self.assertEqual(created["session"]["capabilities"], ["projection", "ops", "automation"])
+
+        detached_body, detached_status = self.state.detach_session("sess-1")
+        self.assertEqual(detached_status, 200)
+        self.assertEqual(detached_body["session"]["status"], "detached")
+
+        touched_body, touched_status = self.state.touch_session("sess-1")
+        self.assertEqual(touched_status, 200)
+        self.assertEqual(touched_body["session"]["status"], "attached")
+
+        resumed = self.state.start_session("agent", "cli", "worker", "sess-1", ["projection", "ops"])
+        self.assertFalse(resumed["created"])
+        self.assertEqual(resumed["session"]["resume_count"], 1)
+        self.assertEqual(resumed["session"]["capabilities"], ["projection", "ops"])
+
+    def test_list_sessions_marks_stale_attachments(self):
+        self.state.start_session("human", "vscode", "editor", "sess-1")
+        self.state.session_records["sess-1"].last_seen_at -= 120
+        payload = self.state.list_sessions_payload()
+        self.assertEqual(payload["sessions"][0]["status"], "stale")
+
 
 # ---------------------------------------------------------------------------
 # BridgeClient endpoint calls
@@ -389,6 +414,18 @@ class TestV2Endpoints(unittest.TestCase):
         self.assertEqual(payload["label"], "worker")
         self.assertIn("session_id", payload)
 
+    def test_touch_session_calls_post(self):
+        self.client.touch_session("sess-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/sessions/touch", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"session_id": "sess-1"})
+
+    def test_detach_session_calls_post(self):
+        self.client.detach_session("sess-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/sessions/detach", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"session_id": "sess-1"})
+
     def test_end_session_calls_post(self):
         self.client.end_session("sess-1")
         url = self.mock_post.call_args[0][0]
@@ -560,6 +597,16 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.actor, "agent")
         self.assertEqual(args.client_type, "cli")
 
+    def test_v2_session_touch(self):
+        args = build_parser().parse_args(["v2", "session-touch", "--session-id", "sess-1"])
+        self.assertEqual(args.v2_command, "session-touch")
+        self.assertEqual(args.session_id, "sess-1")
+
+    def test_v2_session_detach(self):
+        args = build_parser().parse_args(["v2", "session-detach", "--session-id", "sess-1"])
+        self.assertEqual(args.v2_command, "session-detach")
+        self.assertEqual(args.session_id, "sess-1")
+
     def test_v2_document_open(self):
         args = build_parser().parse_args(["v2", "document-open", "notebooks/demo.ipynb"])
         self.assertEqual(args.v2_command, "document-open")
@@ -638,6 +685,8 @@ class TestCommands(unittest.TestCase):
         client.shutdown.return_value = {"status": "ok", "stopping": True}
         client.list_sessions.return_value = {"status": "ok", "sessions": []}
         client.start_session.return_value = {"status": "ok", "session": {"session_id": "sess-1"}}
+        client.touch_session.return_value = {"status": "ok", "session": {"session_id": "sess-1", "status": "attached"}}
+        client.detach_session.return_value = {"status": "ok", "session": {"session_id": "sess-1", "status": "detached"}}
         client.end_session.return_value = {"status": "ok", "ended": True}
         client.list_documents.return_value = {"status": "ok", "documents": []}
         client.open_document.return_value = {"status": "ok", "document": {"document_id": "doc-1"}}
@@ -847,8 +896,35 @@ class TestCommands(unittest.TestCase):
             actor="agent",
             client="cli",
             label="worker",
+            capabilities=None,
             session_id=None,
         )
+
+    def test_v2_session_touch(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "session-touch", "--session-id", "sess-1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.touch_session.assert_called_once_with("sess-1")
+
+    def test_v2_session_detach(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "session-detach", "--session-id", "sess-1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.detach_session.assert_called_once_with("sess-1")
 
     def test_v2_session_end(self):
         client = self._mock_v2_client()

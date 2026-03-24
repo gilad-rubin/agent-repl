@@ -16,6 +16,7 @@ from typing import Any
 
 
 V2_VERSION = "0.1.0"
+SESSION_STALE_AFTER_SECONDS = 60.0
 
 
 @dataclass
@@ -24,6 +25,9 @@ class SessionRecord:
     actor: str
     client: str
     label: str | None
+    status: str
+    capabilities: list[str]
+    resume_count: int
     created_at: float
     last_seen_at: float
 
@@ -33,6 +37,9 @@ class SessionRecord:
             "actor": self.actor,
             "client": self.client,
             "label": self.label,
+            "status": self.status,
+            "capabilities": list(self.capabilities),
+            "resume_count": self.resume_count,
             "created_at": self.created_at,
             "last_seen_at": self.last_seen_at,
         }
@@ -142,6 +149,7 @@ class CoreState:
         }
 
     def status_payload(self) -> dict[str, Any]:
+        self._refresh_session_liveness()
         self.documents = len(self.document_records)
         self.sessions = len(self.session_records)
         self.runs = sum(1 for record in self.run_records.values() if record.status in {"queued", "running"})
@@ -151,6 +159,7 @@ class CoreState:
             "workspace-scope",
             "core-authority",
             "session-ready",
+            "projection-clients",
             "runtime-ready",
             "run-ledger",
             "file-sync",
@@ -158,6 +167,7 @@ class CoreState:
         return payload
 
     def list_sessions_payload(self) -> dict[str, Any]:
+        self._refresh_session_liveness()
         self.sessions = len(self.session_records)
         return {
             "status": "ok",
@@ -166,8 +176,16 @@ class CoreState:
             "workspace_root": self.workspace_root,
         }
 
-    def start_session(self, actor: str, client: str, label: str | None, session_id: str) -> dict[str, Any]:
+    def start_session(
+        self,
+        actor: str,
+        client: str,
+        label: str | None,
+        session_id: str,
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
         now = time.time()
+        resolved_capabilities = capabilities or _default_session_capabilities(client)
         existing = self.session_records.get(session_id)
         if existing is None:
             record = SessionRecord(
@@ -175,6 +193,9 @@ class CoreState:
                 actor=actor,
                 client=client,
                 label=label,
+                status="attached",
+                capabilities=resolved_capabilities,
+                resume_count=0,
                 created_at=now,
                 last_seen_at=now,
             )
@@ -184,6 +205,9 @@ class CoreState:
             existing.actor = actor
             existing.client = client
             existing.label = label
+            existing.status = "attached"
+            existing.capabilities = resolved_capabilities
+            existing.resume_count += 1
             existing.last_seen_at = now
             record = existing
             created = False
@@ -194,6 +218,36 @@ class CoreState:
             "session": record.payload(),
             "workspace_root": self.workspace_root,
         }
+
+    def _refresh_session_liveness(self) -> None:
+        now = time.time()
+        for record in self.session_records.values():
+            if record.status == "attached" and (now - record.last_seen_at) > SESSION_STALE_AFTER_SECONDS:
+                record.status = "stale"
+
+    def touch_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        record = self.session_records.get(session_id)
+        if record is None:
+            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
+        record.status = "attached"
+        record.last_seen_at = time.time()
+        return {
+            "status": "ok",
+            "session": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
+    def detach_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        record = self.session_records.get(session_id)
+        if record is None:
+            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
+        record.status = "detached"
+        record.last_seen_at = time.time()
+        return {
+            "status": "ok",
+            "session": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
 
     def end_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
         record = self.session_records.pop(session_id, None)
@@ -495,6 +549,7 @@ def _handler_factory(state: CoreState):
                 client = payload.get("client")
                 session_id = payload.get("session_id")
                 label = payload.get("label")
+                capabilities = payload.get("capabilities")
                 if not isinstance(actor, str) or not actor:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing actor"})
                     return
@@ -504,7 +559,28 @@ def _handler_factory(state: CoreState):
                 if not isinstance(session_id, str) or not session_id:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
                     return
-                self._json(HTTPStatus.OK, state.start_session(actor, client, label, session_id))
+                resolved_capabilities = (
+                    [item for item in capabilities if isinstance(item, str) and item]
+                    if isinstance(capabilities, list)
+                    else None
+                )
+                self._json(HTTPStatus.OK, state.start_session(actor, client, label, session_id, resolved_capabilities))
+                return
+            if self.path == "/api/sessions/touch":
+                session_id = payload.get("session_id")
+                if not isinstance(session_id, str) or not session_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
+                    return
+                body, status = state.touch_session(session_id)
+                self._json(status, body)
+                return
+            if self.path == "/api/sessions/detach":
+                session_id = payload.get("session_id")
+                if not isinstance(session_id, str) or not session_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
+                    return
+                body, status = state.detach_session(session_id)
+                self._json(status, body)
                 return
             if self.path == "/api/sessions/end":
                 session_id = payload.get("session_id")
@@ -691,3 +767,14 @@ def _compute_sync_state(bound_snapshot: dict[str, Any] | None, observed_snapshot
     ):
         return "in-sync"
     return "external-change"
+
+
+def _default_session_capabilities(client: str) -> list[str]:
+    normalized = client.lower()
+    if normalized == "vscode":
+        return ["projection", "editor", "presence"]
+    if normalized == "cli":
+        return ["projection", "ops", "automation"]
+    if normalized == "browser":
+        return ["projection", "presence"]
+    return ["projection"]

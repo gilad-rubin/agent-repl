@@ -40,6 +40,8 @@ agent-repl v2 status
 agent-repl v2 stop
 agent-repl v2 session-start --actor agent --client-type cli --label "worker"
 agent-repl v2 sessions
+agent-repl v2 session-touch --session-id <session-id>
+agent-repl v2 session-detach --session-id <session-id>
 agent-repl v2 document-open analysis.ipynb
 agent-repl v2 documents
 agent-repl v2 document-refresh --document-id <document-id>
@@ -58,7 +60,7 @@ agent-repl v2 run-finish --run-id <id> --status-value completed
 - prefer `--cell-id` over `--index`; IDs survive reordering while indexes do not
 - source input is shared across commands: `-s`, `--source-file`, or stdin
 - `run-all` and `restart-run-all` trigger notebook execution and return immediately; follow them with `status` until the kernel is idle before assuming the notebook is ready
-- `v2` commands are experimental workspace-core commands for the new architecture direction; they now cover daemon lifecycle plus session/document/runtime/run registration and explicit file-sync boundaries, but they do not replace the bridge workflow yet
+- `v2` commands are experimental workspace-core commands for the new architecture direction; they now cover daemon lifecycle plus resumable session/document/runtime/run registration and explicit file-sync boundaries, but they do not replace the bridge workflow yet
 
 ## Notebook Creation
 

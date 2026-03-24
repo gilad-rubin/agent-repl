@@ -221,6 +221,20 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.v2_command == "attach":
+        result = V2Client.attach(
+            workspace_root,
+            actor=args.actor,
+            client=args.client_type,
+            label=getattr(args, "label", None),
+            capabilities=getattr(args, "capability", None),
+            session_id=getattr(args, "session_id", None),
+            timeout=getattr(args, "timeout", DEFAULT_START_TIMEOUT),
+            runtime_dir=runtime_dir,
+        )
+        _out(result, args.pretty)
+        return 0
+
     if args.v2_command == "status":
         result = _v2_client(workspace_root, runtime_dir=runtime_dir).status()
         _out(result, args.pretty)
@@ -241,8 +255,19 @@ def cmd_v2(args: argparse.Namespace) -> int:
             actor=args.actor,
             client=args.client_type,
             label=getattr(args, "label", None),
+            capabilities=getattr(args, "capability", None),
             session_id=getattr(args, "session_id", None),
         )
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "session-touch":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).touch_session(args.session_id)
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "session-detach":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).detach_session(args.session_id)
         _out(result, args.pretty)
         return 0
 
@@ -457,6 +482,16 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--timeout", type=float, default=DEFAULT_START_TIMEOUT, help="Seconds to wait for the daemon to become reachable")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
+    vp = v2sub.add_parser("attach", help="Ensure the v2 daemon is running and attach or resume a client session")
+    vp.add_argument("--workspace-root", help="Workspace root to bind the daemon to (default: cwd)")
+    vp.add_argument("--actor", required=True, choices=["human", "agent", "system"])
+    vp.add_argument("--client-type", required=True, choices=["cli", "vscode", "browser", "worker"])
+    vp.add_argument("--label")
+    vp.add_argument("--capability", action="append", dest="capability")
+    vp.add_argument("--session-id")
+    vp.add_argument("--timeout", type=float, default=DEFAULT_START_TIMEOUT, help="Seconds to wait for the daemon to become reachable")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
     vp = v2sub.add_parser("status", help="Show v2 core daemon status for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
@@ -474,7 +509,18 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--actor", required=True, choices=["human", "agent", "system"])
     vp.add_argument("--client-type", required=True, choices=["cli", "vscode", "browser", "worker"])
     vp.add_argument("--label")
+    vp.add_argument("--capability", action="append", dest="capability")
     vp.add_argument("--session-id")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("session-touch", help="Refresh liveness for an attached v2 session")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--session-id", required=True)
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("session-detach", help="Detach a v2 session without deleting its continuity record")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--session-id", required=True)
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = v2sub.add_parser("session-end", help="End a v2 session for this workspace")

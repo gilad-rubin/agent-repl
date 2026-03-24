@@ -84,6 +84,36 @@ class V2Client:
         raise RuntimeError("Timed out waiting for agent-repl v2 core daemon to start")
 
     @classmethod
+    def attach(
+        cls,
+        workspace_root: str,
+        *,
+        actor: str,
+        client: str,
+        label: str | None = None,
+        capabilities: list[str] | None = None,
+        session_id: str | None = None,
+        timeout: float = DEFAULT_START_TIMEOUT,
+        runtime_dir: str | None = None,
+    ) -> dict[str, Any]:
+        daemon = cls.start(workspace_root, timeout=timeout, runtime_dir=runtime_dir)
+        attached_client = cls.discover(workspace_root, runtime_dir=runtime_dir)
+        session_result = attached_client.start_session(
+            actor=actor,
+            client=client,
+            label=label,
+            capabilities=capabilities,
+            session_id=session_id,
+        )
+        return {
+            "status": "ok",
+            "attached": True,
+            "workspace_root": daemon["workspace_root"],
+            "daemon": daemon,
+            "session": session_result["session"],
+        }
+
+    @classmethod
     def discover(
         cls,
         workspace_hint: str | None = None,
@@ -141,6 +171,7 @@ class V2Client:
         actor: str,
         client: str,
         label: str | None = None,
+        capabilities: list[str] | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -150,7 +181,15 @@ class V2Client:
         }
         if label:
             body["label"] = label
+        if capabilities:
+            body["capabilities"] = capabilities
         return self._post("/api/sessions/start", body)
+
+    def touch_session(self, session_id: str) -> dict[str, Any]:
+        return self._post("/api/sessions/touch", {"session_id": session_id})
+
+    def detach_session(self, session_id: str) -> dict[str, Any]:
+        return self._post("/api/sessions/detach", {"session_id": session_id})
 
     def end_session(self, session_id: str) -> dict[str, Any]:
         return self._post("/api/sessions/end", {"session_id": session_id})
