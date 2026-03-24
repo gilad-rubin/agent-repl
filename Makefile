@@ -29,12 +29,12 @@ verify-install:
 		exit 1; \
 	fi
 	@echo ""
-	@echo "checking v2 command availability..."
-	@if ! agent-repl v2 --help >/dev/null; then \
-		echo "installed CLI is missing v2; run 'make install-dev'"; \
+	@echo "checking public command surface..."
+	@if agent-repl --help | grep -q "v2"; then \
+		echo "installed CLI is exposing internal commands; run 'make install-dev'"; \
 		exit 1; \
 	fi
-	@echo "installed CLI exposes v2"
+	@echo "installed CLI exposes the public agent-repl workflow"
 
 # VS Code extension (.vsix)
 package-ext:
