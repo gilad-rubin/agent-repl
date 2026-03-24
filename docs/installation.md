@@ -104,7 +104,7 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 
 **"Installed extension is still an older build"**
 - Run `make install-ext`
-- Then run `agent-repl reload --pretty` from the target workspace and confirm `extension_root` points at the new installed version
+- Then run `agent-repl reload --pretty` from the target workspace and confirm both `extension_root` and `routes_module` point at the new installed version
 
 **"v2 auto-attach cannot find agent-repl"**
 - Set `agent-repl.cliPath` if the extension host cannot resolve the CLI from PATH

@@ -5,15 +5,17 @@ Create a notebook, execute code, edit cells, and use the prompt loop — all fro
 ## Prerequisites
 
 1. **VS Code or Cursor** with the agent-repl extension installed and running
-2. **Python 3.10+** with the CLI installed (`uv tool install /path/to/agent-repl --reinstall`)
+2. **Python 3.10+** with the CLI installed (`uv tool install /path/to/agent-repl --reinstall` or `make install-dev`)
 
-The extension auto-starts when you open a notebook. Verify the bridge is running:
+The extension auto-starts when you open a notebook. Verify the CLI and bridge state first:
 
 ```bash
-agent-repl cat --help
+agent-repl --version
+agent-repl v2 --help
+agent-repl reload --pretty
 ```
 
-If you get "No running agent-repl bridge found", open a `.ipynb` file in VS Code first.
+If `agent-repl v2 --help` fails, reinstall the CLI. If `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, reinstall the extension with `make install-ext`, then reload or reopen that VS Code window.
 
 ## Create a Notebook
 
@@ -37,11 +39,7 @@ Use `ix` (insert-execute) to add a cell and run it:
 agent-repl ix demo.ipynb -s 'import math; print(math.pi)'
 ```
 
-```json
-{"cell_id": "a1b2c3", "status": "started"}
-```
-
-The cell appears in VS Code with its output. `ix` returns immediately — execution continues in the background.
+The cell appears in VS Code with its output. `ix` waits for completion by default; use `--no-wait` when you intentionally want fire-and-forget behavior.
 
 By default, agent-triggered execution uses `agent-repl.executionMode = "no-yank"`, which prefers the background Jupyter execution path on an already-open notebook with a live kernel. That keeps the running cell and outputs visible without intentionally stealing focus. If you want the original VS Code notebook execution behavior instead, set `agent-repl.executionMode` to `native`.
 
@@ -87,6 +85,8 @@ Use `--no-outputs` for sources only:
 agent-repl cat demo.ipynb --no-outputs
 ```
 
+If the notebook was still closed when you first read it, `cat` may have emitted fallback IDs like `index-1`. Once the notebook is live/open, re-run `cat --no-outputs` and switch to the real UUIDs before using `--cell-id`.
+
 ## Edit Cells
 
 Replace a cell's source:
@@ -103,6 +103,7 @@ agent-repl edit demo.ipynb insert --at-index 0 --cell-type code -s 'import math'
 ```
 
 Other edit operations: `delete`, `move`, `clear-outputs`.
+After editing code, re-run that cell and confirm that its outputs now match the new source.
 
 ## Check Status
 

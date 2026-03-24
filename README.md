@@ -44,7 +44,7 @@ Creating a brand-new notebook still goes through Jupyter kernel attachment, so t
 
 - **Live kernel access** — Execute code, read outputs, inspect state against a running Jupyter kernel from the CLI
 - **Notebook-as-conversation** — Humans create prompt cells in VS Code, agents discover and respond via CLI
-- **Fire-and-forget execution** — `ix` returns immediately with a `cell_id`; execution continues in the background
+- **Optional fire-and-forget execution** — `ix` waits by default; use `--no-wait` when you intentionally want an immediate return
 - **Smart output filtering** — Rich media (HTML, images, widgets) stripped for agents; notebook file keeps everything for humans
 - **Stable cell IDs** — UUID-based cell identity survives moves, deletes, and reordering
 - **Hot-reload** — Update extension routes without restarting the bridge

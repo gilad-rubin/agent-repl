@@ -1451,5 +1451,29 @@ class TestVersionSurface(unittest.TestCase):
         self.assertEqual(pyproject["project"]["version"], extension_package["version"])
 
 
+class TestDocsSurface(unittest.TestCase):
+    def test_repo_skill_covers_v2_validation_traps(self):
+        root = Path(__file__).resolve().parents[1]
+        skill = (root / "SKILL.md").read_text()
+        self.assertIn("agent-repl v2 --help", skill)
+        self.assertIn("index-1", skill)
+        self.assertIn("starter cells are created, not auto-executed", skill)
+        self.assertIn("use the top-level bridge commands", skill)
+
+    def test_getting_started_matches_ix_wait_behavior(self):
+        root = Path(__file__).resolve().parents[1]
+        guide = (root / "docs" / "getting-started.md").read_text()
+        self.assertIn("ix` waits for completion by default", guide)
+        self.assertNotIn("ix` returns immediately", guide)
+
+    def test_command_reference_warns_about_closed_notebook_fallback_ids(self):
+        root = Path(__file__).resolve().parents[1]
+        commands = (root / "docs" / "commands.md").read_text()
+        self.assertIn("index-1", commands)
+        self.assertIn("Use `--no-wait` only when you intentionally want fire-and-forget behavior.", commands)
+        self.assertIn("agent-repl reload --pretty", commands)
+        self.assertIn("Use top-level bridge commands such as `new`, `cat`, `status`, `ix`, `edit`, `exec`, and `select-kernel`", commands)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,19 @@ description: Work against a live Jupyter notebook via the VS Code bridge. Use th
 
 CLI for AI agents to work with a live Jupyter notebook through the VS Code/Cursor bridge. Agents use the CLI; humans see the notebook update live in the editor. Both share the same kernel.
 
-Everything prints JSON to stdout. Prefer `uv run agent-repl ...` inside this repo, or `agent-repl ...` if the tool is already installed.
+Everything prints JSON to stdout.
+
+Before validating v2 behavior from another workspace, check the install state first:
+
+```bash
+agent-repl --version
+agent-repl v2 --help
+agent-repl reload --pretty
+```
+
+- if `agent-repl --version` or `agent-repl v2 --help` fails, reinstall the CLI with `make install-dev` or `uv tool install /path/to/agent-repl --reinstall`
+- if `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, reinstall the extension with `make install-ext`, then reload or reopen that VS Code window
+- when you intentionally want to test repo source before reinstalling, prefer `uv run --project /Users/giladrubin/python_workspace/agent-repl agent-repl ...`
 
 ## Core Loop
 
@@ -21,9 +33,57 @@ agent-repl cat demo.ipynb
 ```
 
 - `status` tells you whether the notebook is open, whether the kernel is busy, and which cells are running or queued
-- `cat --no-outputs` gives you stable cell IDs and source without dragging large outputs into context
+- `cat --no-outputs` gives you stable live cell IDs and source without dragging large outputs into context
 - `ix` is the default way to add new executable work because it inserts a visible cell and runs it
 - `cat` after execution is the fastest way to verify outputs and capture new `cell_id` values
+- if `status` says the notebook is closed or not open yet, `cat` may return fallback IDs like `index-1`; once the notebook becomes live, re-run `cat --no-outputs` before using `--cell-id`
+
+## Validation Loop (v2)
+
+For the prompt "test out the new agent-repl v2 capabilities", use this order:
+
+```bash
+agent-repl --version
+agent-repl v2 --help
+agent-repl reload --pretty
+agent-repl v2 start
+agent-repl v2 session-start --actor agent --client-type cli --label "validation"
+agent-repl v2 runtime-start --mode shared --label primary --environment .venv
+```
+
+Then validate a brand-new notebook:
+
+```bash
+agent-repl new tmp/validation.ipynb --cells-json '[{"type":"markdown","source":"# Validation"},{"type":"code","source":"x = 2\\nprint(x)"}]'
+agent-repl status tmp/validation.ipynb
+agent-repl cat tmp/validation.ipynb --no-outputs
+agent-repl v2 document-open tmp/validation.ipynb
+agent-repl exec tmp/validation.ipynb --cell-id <seed-cell-id>
+agent-repl edit tmp/validation.ipynb replace-source --cell-id <seed-cell-id> -s 'x = 7\nx ** 2'
+agent-repl exec tmp/validation.ipynb --cell-id <seed-cell-id>
+agent-repl cat tmp/validation.ipynb
+```
+
+Then validate an existing notebook:
+
+```bash
+agent-repl status notebooks/demo.ipynb
+agent-repl cat notebooks/demo.ipynb --no-outputs
+agent-repl select-kernel notebooks/demo.ipynb
+agent-repl status notebooks/demo.ipynb
+agent-repl cat notebooks/demo.ipynb --no-outputs
+agent-repl exec notebooks/demo.ipynb --cell-id <live-uuid>
+agent-repl edit notebooks/demo.ipynb replace-source --cell-id <live-uuid> -s 'updated code'
+agent-repl exec notebooks/demo.ipynb --cell-id <live-uuid>
+agent-repl ix notebooks/demo.ipynb -s 'x + 1'
+agent-repl cat notebooks/demo.ipynb
+```
+
+Important validation expectations:
+
+- `new --cells-json` creates starter cells but does not execute them; if a later cell depends on a seed variable, run the seed cell first
+- after editing code, re-run the edited cell and verify that the outputs now match the new source
+- if you opened an existing notebook from a closed state, ignore fallback `index-*` IDs after it becomes live; re-`cat` and use the live UUIDs instead
 
 ## Command Contracts
 
@@ -64,7 +124,7 @@ agent-repl v2 run-finish --run-id <id> --status-value completed
 - prefer `--cell-id` over `--index`; IDs survive reordering while indexes do not
 - source input is shared across commands: `-s`, `--source-file`, or stdin
 - `run-all` and `restart-run-all` trigger notebook execution and return immediately; follow them with `status` until the kernel is idle before assuming the notebook is ready
-- `v2` commands are experimental workspace-core commands for the new architecture direction; they now cover daemon lifecycle plus attach/resume session flows, branch/document/runtime/run registration, explicit file-sync boundaries, and workspace-owned continuity across daemon restarts; the VS Code extension can now auto-attach as a projection client when the bridge starts, and you can force deterministic launcher resolution with the `agent-repl.cliPath` extension setting, but the bridge workflow still remains the primary notebook-control surface
+- `v2` commands are experimental workspace-core commands for daemon/session/document/runtime/run continuity; use the top-level bridge commands (`new`, `cat`, `status`, `ix`, `edit`, `exec`, `select-kernel`) for actual notebook mutation and execution
 
 ## Notebook Creation
 
@@ -87,6 +147,7 @@ When `new` returns:
 - `kernel_status: "selected"`: kernel attached successfully
 - `kernel_status: "needs_selection"`: no preferred kernel was available; use `kernels` and `select-kernel`
 - `kernel_status: "selection_failed"`: the notebook was created, but kernel attachment needs manual recovery
+- starter cells are created, not auto-executed; execute the seed code explicitly before depending on its variables
 
 ## Kernel Selection
 
@@ -132,7 +193,7 @@ agent-repl respond demo.ipynb --to <cell_id> -s 'df.dropna(inplace=True)'
 Use the JSON response from `new` directly:
 
 - if it already selected a kernel, continue with `ix`
-- if it returned `available_kernel_names`, use `select-kernel` for the workspace default or `kernels` to inspect the exact IDs
+- if it returned kernel choices such as `available_kernels`, use `select-kernel` for the workspace default or `kernels` to inspect the exact IDs
 - if the notebook is open in the editor and auto-select still failed, retry `select-kernel` before falling back to manual UI clicks
 
 Creating a brand-new notebook may briefly steal focus while Jupyter starts. Once the kernel is attached, `ix` and `exec` can usually stay on the no-yank path.
@@ -165,6 +226,8 @@ If timeout occurs:
 
 **Cell IDs changed after reload or edits** — Re-read with `cat` before using `--cell-id`.
 
+**Closed notebook `cat` returned `index-*` IDs** — Those fallback IDs are only safe while the notebook stays on the disk-only path. Once the notebook becomes live/open, re-run `cat --no-outputs` and switch to the real UUIDs before `exec` or `edit`.
+
 **404 on execute/edit** — Usually means the cell ID is wrong, not that the route is missing.
 
 **`exec -c` left a surprise probe cell behind** — That is expected behavior: `exec -c` inserts a real notebook cell. Prefer `exec --cell-id` to rerun existing code, or delete the probe cell after debugging.
@@ -180,13 +243,13 @@ If timeout occurs:
 uv tool install /path/to/agent-repl --reinstall
 ```
 
+From this repo checkout, `make install-dev` and `make verify-install` are the fastest path.
+
 **Repo source changed, but VS Code still runs old behavior** — `agent-repl reload` hot-reloads the installed extension, not your repo checkout. After changing `extension/src/*`, package and reinstall the extension or use an Extension Development Host:
 
 ```bash
-cd extension
-npx vsce package
-code --install-extension agent-repl-<version>.vsix --force
-uv run agent-repl reload
+make install-ext
+agent-repl reload --pretty
 ```
 
 **`cat` returns `cells: []` but the `.ipynb` file has real cells on disk** — Treat that as bridge drift or a bad in-memory notebook state first. Verify the file on disk, then run `agent-repl reload --pretty` and confirm `extension_root` / `routes_module` point at the build you intended to test before changing path-resolution code.

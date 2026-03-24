@@ -24,6 +24,7 @@ agent-repl cat demo.ipynb
 
 Each cell in the response includes: `index`, `cell_id`, `cell_type`, `source`, and optionally `outputs` and `execution_count`. Cells with prompt metadata include an `agent_repl` object with `type` and `status`.
 Paths outside the active workspace are rejected.
+If the notebook is still closed and only readable from disk, `cat` may emit fallback IDs like `index-1`. Once the notebook becomes live/open in VS Code, re-run `cat --no-outputs` and switch to the live UUIDs before `exec` or `edit`.
 
 ---
 
@@ -77,7 +78,7 @@ Completed `exec` responses include:
 
 ## ix
 
-Insert a new cell and execute it. Returns immediately with the `cell_id` — execution continues asynchronously in VS Code.
+Insert a new cell and execute it.
 
 ```
 agent-repl ix PATH (-s SOURCE | --source-file FILE | stdin) [--pretty]
@@ -101,6 +102,7 @@ echo 'print("hello")' | agent-repl ix demo.ipynb
 ```
 
 The cell is appended to the end of the notebook by default.
+`ix` waits up to 30 seconds for completion by default. Use `--no-wait` only when you intentionally want fire-and-forget behavior.
 
 `ix` respects the `agent-repl.executionMode` setting:
 
@@ -248,6 +250,7 @@ agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"import pan
 ```
 
 The notebook is created and opened in VS Code with a Python kernel.
+Starter cells created by `new --cells-json` are not auto-executed. If later validation steps depend on seed variables from those cells, execute the seed cell explicitly first.
 
 When a workspace `.venv` is present, `new` prefers it automatically and the response includes `kernel_status: "selected"` plus a message naming the selected kernel. If no workspace `.venv` is available, the response includes `kernel_status: "needs_selection"`, `available_kernels`, and `select_kernel_command` so an agent or human can pick one immediately.
 
@@ -340,20 +343,21 @@ agent-repl respond demo.ipynb --to abc123 -s 'df.dropna(inplace=True); print(df.
 Hot-reload the extension's route handlers without restarting the bridge server. Useful during extension development.
 
 ```
-agent-repl reload
+agent-repl reload [--pretty]
 ```
 
 ```bash
-agent-repl reload
+agent-repl reload --pretty
 ```
 
-No arguments. Prints "Extension host restarting..." on success.
+Use `--pretty` when you need to verify the active `extension_root` and `routes_module` after reinstalling the extension.
 
 ---
 
 ## v2
 
 Experimental workspace-scoped core daemon commands for the v2 architecture work.
+Use top-level bridge commands such as `new`, `cat`, `status`, `ix`, `edit`, `exec`, and `select-kernel` for real notebook mutation and execution. Use `v2` commands for daemon/session/document/runtime/run continuity checks around that workflow.
 
 ```
 agent-repl v2 {start|attach|status|stop|sessions|session-start|session-touch|session-detach|session-end|documents|document-open|document-refresh|document-rebind|branches|branch-start|branch-finish|runtimes|runtime-start|runtime-stop|runs|run-start|run-finish} [--workspace-root PATH] [--pretty]
@@ -564,6 +568,7 @@ Current behavior:
 - external file changes stay visible as `external-change` until you explicitly `document-rebind`
 - runtime and run state are explicit, but real notebook editing/execution are not yet routed through this path
 - this is still early v2 core scaffolding, not the finished workflow
+- for validation runs, check `agent-repl --version`, `agent-repl v2 --help`, and `agent-repl reload --pretty` first so you do not confuse stale installs with product bugs
 
 ---
 
