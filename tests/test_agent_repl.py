@@ -14,7 +14,7 @@ import requests
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
 from agent_repl.v2.client import DEFAULT_START_TIMEOUT, V2Client
-from agent_repl.v2.server import CoreState
+from agent_repl.v2.server import CoreState, _load_or_create_state
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +380,44 @@ class TestV2CoreState(unittest.TestCase):
         )
         self.assertEqual(bad_branch_status, 400)
         self.assertIn("Unknown branch target_ref", bad_branch_body["error"])
+
+    def test_load_or_create_state_restores_persisted_records_with_recovery_normalization(self):
+        session = self.state.start_session("agent", "cli", "worker", "sess-1")
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        branch_body, branch_status = self.state.start_branch(
+            branch_id="branch-1",
+            document_id=opened["document"]["document_id"],
+            owner_session_id=session["session"]["session_id"],
+            parent_branch_id=None,
+            title="Experiment",
+            purpose="Persist me",
+        )
+        self.assertEqual(branch_status, 200)
+        self.state.start_runtime(runtime_id="rt-1", mode="shared", label="primary", environment=None)
+        run_body, run_status = self.state.start_run(
+            run_id="run-1",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=opened["document"]["document_id"],
+            kind="execute",
+        )
+        self.assertEqual(run_status, 200)
+
+        restored = _load_or_create_state(
+            workspace_root=str(self.workspace_root),
+            runtime_dir=str(self.runtime_dir),
+            token="tok-2",
+            pid=9999,
+            started_at=2.0,
+        )
+        self.assertIn("sess-1", restored.session_records)
+        self.assertEqual(restored.session_records["sess-1"].status, "detached")
+        self.assertIn(opened["document"]["document_id"], restored.document_records)
+        self.assertIn(branch_body["branch"]["branch_id"], restored.branch_records)
+        self.assertEqual(restored.runtime_records["rt-1"].status, "recovery-needed")
+        self.assertEqual(restored.run_records[run_body["run"]["run_id"]].status, "interrupted")
+        self.assertTrue(Path(restored.state_file).exists())
 
 
 # ---------------------------------------------------------------------------

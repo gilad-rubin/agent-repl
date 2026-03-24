@@ -46,7 +46,7 @@ Creating a brand-new notebook still goes through Jupyter kernel attachment, so t
 - **Smart output filtering** — Rich media (HTML, images, widgets) stripped for agents; notebook file keeps everything for humans
 - **Stable cell IDs** — UUID-based cell identity survives moves, deletes, and reordering
 - **Hot-reload** — Update extension routes without restarting the bridge
-- **Experimental v2 core daemon** — Start a workspace-scoped core authority process with attach/resume session flows, collaboration branches, document, runtime, run, and file-sync registration independent of VS Code
+- **Experimental v2 core daemon** — Start a workspace-scoped core authority process with attach/resume session flows, collaboration branches, document, runtime, run, and file-sync registration independent of VS Code, with workspace-owned state persistence across daemon restarts
 - **Explicit file sync boundaries** — Registered v2 documents track bound file snapshots, detect external changes, and require explicit rebinding instead of silently accepting disk drift
 
 ## The Prompt Loop

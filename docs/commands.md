@@ -362,6 +362,7 @@ agent-repl v2 {start|attach|status|stop|sessions|session-start|session-touch|ses
 ### v2 start
 
 Start the experimental v2 core daemon for the current workspace and return its status payload.
+The daemon now restores workspace-owned v2 state from `.agent-repl/v2-core-state.json` when present.
 
 ```bash
 agent-repl v2 start
@@ -380,6 +381,7 @@ agent-repl v2 attach --actor human --client-type vscode --session-id <session-id
 ### v2 status
 
 Inspect the experimental v2 core daemon bound to a workspace.
+The status payload includes the workspace-owned `state_file` path used for persisted continuity.
 
 ```bash
 agent-repl v2 status

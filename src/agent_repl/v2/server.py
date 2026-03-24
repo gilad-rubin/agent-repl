@@ -17,6 +17,8 @@ from typing import Any
 
 V2_VERSION = "0.1.0"
 SESSION_STALE_AFTER_SECONDS = 60.0
+STATE_DIRNAME = ".agent-repl"
+STATE_FILENAME = "v2-core-state.json"
 
 
 @dataclass
@@ -151,6 +153,7 @@ class CoreState:
     token: str
     pid: int
     started_at: float
+    state_file: str | None = None
     version: str = V2_VERSION
     documents: int = 0
     sessions: int = 0
@@ -162,6 +165,15 @@ class CoreState:
     runtime_records: dict[str, RuntimeRecord] = field(default_factory=dict)
     run_records: dict[str, RunRecord] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.workspace_root = os.path.realpath(self.workspace_root)
+        self.runtime_dir = os.path.realpath(self.runtime_dir)
+        if self.state_file is None:
+            self.state_file = _state_file_path(self.workspace_root)
+        else:
+            self.state_file = os.path.realpath(self.state_file)
+        self._recompute_counts()
+
     def health_payload(self) -> dict[str, Any]:
         return {
             "status": "ok",
@@ -169,6 +181,7 @@ class CoreState:
             "workspace_root": self.workspace_root,
             "pid": self.pid,
             "started_at": self.started_at,
+            "state_file": self.state_file,
             "version": self.version,
             "documents": self.documents,
             "sessions": self.sessions,
@@ -177,9 +190,7 @@ class CoreState:
 
     def status_payload(self) -> dict[str, Any]:
         self._refresh_session_liveness()
-        self.documents = len(self.document_records)
-        self.sessions = len(self.session_records)
-        self.runs = sum(1 for record in self.run_records.values() if record.status in {"queued", "running"})
+        self._recompute_counts()
         payload = self.health_payload()
         payload["runtime_dir"] = self.runtime_dir
         payload["capabilities"] = [
@@ -196,7 +207,7 @@ class CoreState:
 
     def list_sessions_payload(self) -> dict[str, Any]:
         self._refresh_session_liveness()
-        self.sessions = len(self.session_records)
+        self._recompute_counts()
         return {
             "status": "ok",
             "sessions": [record.payload() for record in self.session_records.values()],
@@ -240,6 +251,7 @@ class CoreState:
             record = existing
             created = False
         self.sessions = len(self.session_records)
+        self.persist()
         return {
             "status": "ok",
             "created": created,
@@ -249,9 +261,36 @@ class CoreState:
 
     def _refresh_session_liveness(self) -> None:
         now = time.time()
+        changed = False
         for record in self.session_records.values():
             if record.status == "attached" and (now - record.last_seen_at) > SESSION_STALE_AFTER_SECONDS:
                 record.status = "stale"
+                changed = True
+        if changed:
+            self.persist()
+
+    def _recompute_counts(self) -> None:
+        self.documents = len(self.document_records)
+        self.sessions = len(self.session_records)
+        self.runs = sum(1 for record in self.run_records.values() if record.status in {"queued", "running"})
+
+    def persist(self) -> None:
+        if self.state_file is None:
+            return
+        Path(self.state_file).parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": self.version,
+            "workspace_root": self.workspace_root,
+            "saved_at": time.time(),
+            "sessions": [record.payload() for record in self.session_records.values()],
+            "documents": [record.payload() for record in self.document_records.values()],
+            "branches": [record.payload() for record in self.branch_records.values()],
+            "runtimes": [record.payload() for record in self.runtime_records.values()],
+            "runs": [record.payload() for record in self.run_records.values()],
+        }
+        tmp_path = f"{self.state_file}.tmp"
+        Path(tmp_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
+        os.replace(tmp_path, self.state_file)
 
     def touch_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
         record = self.session_records.get(session_id)
@@ -259,6 +298,7 @@ class CoreState:
             return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
         record.status = "attached"
         record.last_seen_at = time.time()
+        self.persist()
         return {
             "status": "ok",
             "session": record.payload(),
@@ -271,6 +311,7 @@ class CoreState:
             return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
         record.status = "detached"
         record.last_seen_at = time.time()
+        self.persist()
         return {
             "status": "ok",
             "session": record.payload(),
@@ -282,6 +323,7 @@ class CoreState:
         self.sessions = len(self.session_records)
         if record is None:
             return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
+        self.persist()
         return {
             "status": "ok",
             "ended": True,
@@ -290,7 +332,7 @@ class CoreState:
         }, HTTPStatus.OK
 
     def list_documents_payload(self) -> dict[str, Any]:
-        self.documents = len(self.document_records)
+        self._recompute_counts()
         return {
             "status": "ok",
             "documents": [record.payload() for record in self.document_records.values()],
@@ -310,6 +352,7 @@ class CoreState:
                 record.observed_snapshot = observed_snapshot
                 record.sync_state = _compute_sync_state(record.bound_snapshot, observed_snapshot)
                 record.updated_at = now
+                self.persist()
                 return {
                     "status": "ok",
                     "created": False,
@@ -329,7 +372,7 @@ class CoreState:
             updated_at=now,
         )
         self.document_records[record.document_id] = record
-        self.documents = len(self.document_records)
+        self.persist()
         return {
             "status": "ok",
             "created": True,
@@ -344,6 +387,7 @@ class CoreState:
         record.observed_snapshot = _snapshot_file(record.path)
         record.sync_state = _compute_sync_state(record.bound_snapshot, record.observed_snapshot)
         record.updated_at = time.time()
+        self.persist()
         return {
             "status": "ok",
             "document": record.payload(),
@@ -359,6 +403,7 @@ class CoreState:
         record.observed_snapshot = observed_snapshot
         record.sync_state = _compute_sync_state(record.bound_snapshot, record.observed_snapshot)
         record.updated_at = time.time()
+        self.persist()
         return {
             "status": "ok",
             "document": record.payload(),
@@ -404,6 +449,7 @@ class CoreState:
             updated_at=now,
         )
         self.branch_records[branch_id] = record
+        self.persist()
         return {
             "status": "ok",
             "branch": record.payload(),
@@ -418,6 +464,7 @@ class CoreState:
             return {"error": f"Unknown branch_id: {branch_id}"}, HTTPStatus.NOT_FOUND
         record.status = status
         record.updated_at = time.time()
+        self.persist()
         return {
             "status": "ok",
             "branch": record.payload(),
@@ -462,6 +509,7 @@ class CoreState:
             existing.updated_at = now
             record = existing
             created = False
+        self.persist()
         return {
             "status": "ok",
             "created": created,
@@ -475,6 +523,7 @@ class CoreState:
             return {"error": f"Unknown runtime_id: {runtime_id}"}, HTTPStatus.NOT_FOUND
         record.status = "stopped"
         record.updated_at = time.time()
+        self.persist()
         return {
             "status": "ok",
             "runtime": record.payload(),
@@ -482,7 +531,7 @@ class CoreState:
         }, HTTPStatus.OK
 
     def list_runs_payload(self) -> dict[str, Any]:
-        self.runs = sum(1 for record in self.run_records.values() if record.status in {"queued", "running"})
+        self._recompute_counts()
         return {
             "status": "ok",
             "runs": [record.payload() for record in self.run_records.values()],
@@ -523,7 +572,8 @@ class CoreState:
         self.run_records[run_id] = record
         runtime.status = "busy"
         runtime.updated_at = now
-        self.runs = sum(1 for item in self.run_records.values() if item.status in {"queued", "running"})
+        self._recompute_counts()
+        self.persist()
         return {
             "status": "ok",
             "run": record.payload(),
@@ -548,7 +598,8 @@ class CoreState:
             )
             runtime.status = "busy" if active_runtime_runs else "ready"
             runtime.updated_at = now
-        self.runs = sum(1 for item in self.run_records.values() if item.status in {"queued", "running"})
+        self._recompute_counts()
+        self.persist()
         return {
             "status": "ok",
             "run": record.payload(),
@@ -566,7 +617,7 @@ def serve_forever(
     workspace_root = os.path.realpath(workspace_root)
     runtime_dir = os.path.realpath(runtime_dir)
     token = token or secrets.token_hex(24)
-    state = CoreState(
+    state = _load_or_create_state(
         workspace_root=workspace_root,
         runtime_dir=runtime_dir,
         token=token,
@@ -912,3 +963,104 @@ def _default_session_capabilities(client: str) -> list[str]:
     if normalized == "browser":
         return ["projection", "presence"]
     return ["projection"]
+
+
+def _state_file_path(workspace_root: str) -> str:
+    return os.path.realpath(os.path.join(workspace_root, STATE_DIRNAME, STATE_FILENAME))
+
+
+def _load_or_create_state(
+    *,
+    workspace_root: str,
+    runtime_dir: str,
+    token: str,
+    pid: int,
+    started_at: float,
+) -> CoreState:
+    state_file = _state_file_path(workspace_root)
+    if not os.path.exists(state_file):
+        return CoreState(
+            workspace_root=workspace_root,
+            runtime_dir=runtime_dir,
+            token=token,
+            pid=pid,
+            started_at=started_at,
+            state_file=state_file,
+        )
+
+    try:
+        payload = json.loads(Path(state_file).read_text())
+    except Exception:
+        return CoreState(
+            workspace_root=workspace_root,
+            runtime_dir=runtime_dir,
+            token=token,
+            pid=pid,
+            started_at=started_at,
+            state_file=state_file,
+        )
+
+    state = CoreState(
+        workspace_root=workspace_root,
+        runtime_dir=runtime_dir,
+        token=token,
+        pid=pid,
+        started_at=started_at,
+        state_file=state_file,
+        version=str(payload.get("version") or V2_VERSION),
+        session_records={
+            record["session_id"]: SessionRecord(**record)
+            for record in payload.get("sessions", [])
+            if isinstance(record, dict) and isinstance(record.get("session_id"), str)
+        },
+        document_records={
+            record["document_id"]: DocumentRecord(
+                document_id=record["document_id"],
+                path=record["path"],
+                relative_path=record.get("relative_path") or os.path.relpath(record["path"], workspace_root),
+                file_format=record.get("file_format") or _file_format(record["path"]),
+                sync_state=record.get("sync_state") or "unknown",
+                bound_snapshot=record.get("bound_snapshot"),
+                observed_snapshot=record.get("observed_snapshot"),
+                created_at=record["created_at"],
+                updated_at=record["updated_at"],
+            )
+            for record in payload.get("documents", [])
+            if isinstance(record, dict) and isinstance(record.get("document_id"), str)
+        },
+        branch_records={
+            record["branch_id"]: BranchRecord(**record)
+            for record in payload.get("branches", [])
+            if isinstance(record, dict) and isinstance(record.get("branch_id"), str)
+        },
+        runtime_records={
+            record["runtime_id"]: RuntimeRecord(**record)
+            for record in payload.get("runtimes", [])
+            if isinstance(record, dict) and isinstance(record.get("runtime_id"), str)
+        },
+        run_records={
+            record["run_id"]: RunRecord(**record)
+            for record in payload.get("runs", [])
+            if isinstance(record, dict) and isinstance(record.get("run_id"), str)
+        },
+    )
+    _normalize_restored_state(state)
+    state.persist()
+    return state
+
+
+def _normalize_restored_state(state: CoreState) -> None:
+    now = time.time()
+    for session in state.session_records.values():
+        if session.status in {"attached", "stale"}:
+            session.status = "detached"
+            session.last_seen_at = now
+    for runtime in state.runtime_records.values():
+        if runtime.status in {"ready", "busy"}:
+            runtime.status = "recovery-needed"
+            runtime.updated_at = now
+    for run in state.run_records.values():
+        if run.status in {"queued", "running"}:
+            run.status = "interrupted"
+            run.updated_at = now
+    state._recompute_counts()
