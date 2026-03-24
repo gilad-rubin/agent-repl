@@ -231,6 +231,36 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.v2_command == "sessions":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_sessions()
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "session-start":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).start_session(
+            actor=args.actor,
+            client=args.client_type,
+            label=getattr(args, "label", None),
+            session_id=getattr(args, "session_id", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "session-end":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).end_session(args.session_id)
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "documents":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_documents()
+        _out(result, args.pretty)
+        return 0
+
+    if args.v2_command == "document-open":
+        result = _v2_client(workspace_root, runtime_dir=runtime_dir).open_document(args.path)
+        _out(result, args.pretty)
+        return 0
+
     if args.v2_command == "serve":
         serve_forever(workspace_root, runtime_dir=args.runtime_dir)
         return 0
@@ -379,6 +409,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     vp = v2sub.add_parser("stop", help="Stop the v2 core daemon for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to stop (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("sessions", help="List active v2 sessions for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("session-start", help="Start or resume a v2 session for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--actor", required=True, choices=["human", "agent", "system"])
+    vp.add_argument("--client-type", required=True, choices=["cli", "vscode", "browser", "worker"])
+    vp.add_argument("--label")
+    vp.add_argument("--session-id")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("session-end", help="End a v2 session for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--session-id", required=True)
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("documents", help="List v2 documents registered in this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = v2sub.add_parser("document-open", help="Register a canonical v2 document for this workspace")
+    vp.add_argument("path")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = v2sub.add_parser("serve", help=argparse.SUPPRESS)

@@ -46,7 +46,7 @@ Creating a brand-new notebook still goes through Jupyter kernel attachment, so t
 - **Smart output filtering** — Rich media (HTML, images, widgets) stripped for agents; notebook file keeps everything for humans
 - **Stable cell IDs** — UUID-based cell identity survives moves, deletes, and reordering
 - **Hot-reload** — Update extension routes without restarting the bridge
-- **Experimental v2 core daemon** — Start a workspace-scoped core authority process independent of VS Code
+- **Experimental v2 core daemon** — Start a workspace-scoped core authority process with session and document registration independent of VS Code
 
 ## The Prompt Loop
 
@@ -80,7 +80,7 @@ The `respond` command atomically: marks the prompt in-progress → inserts a res
 | `prompts` | List prompt cells |
 | `respond` | Answer a prompt cell |
 | `reload` | Hot-reload extension routes |
-| `v2` | Experimental core daemon commands: `start`, `status`, `stop` |
+| `v2` | Experimental core daemon commands: `start`, `status`, `stop`, session ops, and document ops |
 
 All commands output JSON. Pass `--pretty` for formatted output.
 

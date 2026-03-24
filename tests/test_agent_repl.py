@@ -308,6 +308,38 @@ class TestV2Endpoints(unittest.TestCase):
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/shutdown", url)
 
+    def test_list_sessions_calls_get(self):
+        self.client.list_sessions()
+        url = self.mock_get.call_args[0][0]
+        self.assertIn("/api/sessions", url)
+
+    def test_start_session_calls_post(self):
+        self.client.start_session(actor="agent", client="cli", label="worker")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/sessions/start", url)
+        payload = self.mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["actor"], "agent")
+        self.assertEqual(payload["client"], "cli")
+        self.assertEqual(payload["label"], "worker")
+        self.assertIn("session_id", payload)
+
+    def test_end_session_calls_post(self):
+        self.client.end_session("sess-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/sessions/end", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"session_id": "sess-1"})
+
+    def test_list_documents_calls_get(self):
+        self.client.list_documents()
+        url = self.mock_get.call_args[0][0]
+        self.assertIn("/api/documents", url)
+
+    def test_open_document_calls_post(self):
+        self.client.open_document("notebooks/demo.ipynb")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/documents/open", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "notebooks/demo.ipynb"})
+
 
 # ---------------------------------------------------------------------------
 # CLI parser
@@ -401,6 +433,17 @@ class TestParser(unittest.TestCase):
         args = build_parser().parse_args(["v2", "stop"])
         self.assertEqual(args.v2_command, "stop")
 
+    def test_v2_session_start(self):
+        args = build_parser().parse_args(["v2", "session-start", "--actor", "agent", "--client-type", "cli"])
+        self.assertEqual(args.v2_command, "session-start")
+        self.assertEqual(args.actor, "agent")
+        self.assertEqual(args.client_type, "cli")
+
+    def test_v2_document_open(self):
+        args = build_parser().parse_args(["v2", "document-open", "notebooks/demo.ipynb"])
+        self.assertEqual(args.v2_command, "document-open")
+        self.assertEqual(args.path, "notebooks/demo.ipynb")
+
 
 # ---------------------------------------------------------------------------
 # CLI command handlers
@@ -451,6 +494,11 @@ class TestCommands(unittest.TestCase):
         client = mock.MagicMock(spec=V2Client)
         client.status.return_value = {"status": "ok", "mode": "v2"}
         client.shutdown.return_value = {"status": "ok", "stopping": True}
+        client.list_sessions.return_value = {"status": "ok", "sessions": []}
+        client.start_session.return_value = {"status": "ok", "session": {"session_id": "sess-1"}}
+        client.end_session.return_value = {"status": "ok", "ended": True}
+        client.list_documents.return_value = {"status": "ok", "documents": []}
+        client.open_document.return_value = {"status": "ok", "document": {"document_id": "doc-1"}}
         for k, v in overrides.items():
             setattr(client, k, mock.Mock(return_value=v))
         return client
@@ -620,6 +668,76 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         client.shutdown.assert_called_once()
+
+    def test_v2_sessions(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "sessions"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.list_sessions.assert_called_once()
+
+    def test_v2_session_start(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "session-start", "--actor", "agent", "--client-type", "cli", "--label", "worker"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.start_session.assert_called_once_with(
+            actor="agent",
+            client="cli",
+            label="worker",
+            session_id=None,
+        )
+
+    def test_v2_session_end(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "session-end", "--session-id", "sess-1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.end_session.assert_called_once_with("sess-1")
+
+    def test_v2_documents(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "documents"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.list_documents.assert_called_once()
+
+    def test_v2_document_open(self):
+        client = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+                code = main(["v2", "document-open", "notebooks/demo.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.open_document.assert_called_once_with("notebooks/demo.ipynb")
 
 
 if __name__ == "__main__":

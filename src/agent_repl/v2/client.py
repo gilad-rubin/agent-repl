@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +131,35 @@ class V2Client:
 
     def shutdown(self) -> dict[str, Any]:
         return self._post("/api/shutdown", {})
+
+    def list_sessions(self) -> dict[str, Any]:
+        return self._get("/api/sessions")
+
+    def start_session(
+        self,
+        *,
+        actor: str,
+        client: str,
+        label: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "actor": actor,
+            "client": client,
+            "session_id": session_id or str(uuid.uuid4()),
+        }
+        if label:
+            body["label"] = label
+        return self._post("/api/sessions/start", body)
+
+    def end_session(self, session_id: str) -> dict[str, Any]:
+        return self._post("/api/sessions/end", {"session_id": session_id})
+
+    def list_documents(self) -> dict[str, Any]:
+        return self._get("/api/documents")
+
+    def open_document(self, path: str) -> dict[str, Any]:
+        return self._post("/api/documents/open", {"path": path})
 
     def _get(self, endpoint: str) -> dict[str, Any]:
         response = self._session.get(f"{self.base_url}{endpoint}", timeout=10)

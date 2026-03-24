@@ -6,7 +6,8 @@ import os
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +15,42 @@ from typing import Any
 
 
 V2_VERSION = "0.1.0"
+
+
+@dataclass
+class SessionRecord:
+    session_id: str
+    actor: str
+    client: str
+    label: str | None
+    created_at: float
+    last_seen_at: float
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "actor": self.actor,
+            "client": self.client,
+            "label": self.label,
+            "created_at": self.created_at,
+            "last_seen_at": self.last_seen_at,
+        }
+
+
+@dataclass
+class DocumentRecord:
+    document_id: str
+    path: str
+    created_at: float
+    updated_at: float
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "document_id": self.document_id,
+            "path": self.path,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
 
 
 @dataclass
@@ -28,6 +65,8 @@ class CoreState:
     sessions: int = 0
     runs: int = 0
     runtime_file: str | None = None
+    session_records: dict[str, SessionRecord] = field(default_factory=dict)
+    document_records: dict[str, DocumentRecord] = field(default_factory=dict)
 
     def health_payload(self) -> dict[str, Any]:
         return {
@@ -43,6 +82,8 @@ class CoreState:
         }
 
     def status_payload(self) -> dict[str, Any]:
+        self.documents = len(self.document_records)
+        self.sessions = len(self.session_records)
         payload = self.health_payload()
         payload["runtime_dir"] = self.runtime_dir
         payload["capabilities"] = [
@@ -52,6 +93,96 @@ class CoreState:
             "runtime-ready",
         ]
         return payload
+
+    def list_sessions_payload(self) -> dict[str, Any]:
+        self.sessions = len(self.session_records)
+        return {
+            "status": "ok",
+            "sessions": [record.payload() for record in self.session_records.values()],
+            "count": self.sessions,
+            "workspace_root": self.workspace_root,
+        }
+
+    def start_session(self, actor: str, client: str, label: str | None, session_id: str) -> dict[str, Any]:
+        now = time.time()
+        existing = self.session_records.get(session_id)
+        if existing is None:
+            record = SessionRecord(
+                session_id=session_id,
+                actor=actor,
+                client=client,
+                label=label,
+                created_at=now,
+                last_seen_at=now,
+            )
+            self.session_records[session_id] = record
+            created = True
+        else:
+            existing.actor = actor
+            existing.client = client
+            existing.label = label
+            existing.last_seen_at = now
+            record = existing
+            created = False
+        self.sessions = len(self.session_records)
+        return {
+            "status": "ok",
+            "created": created,
+            "session": record.payload(),
+            "workspace_root": self.workspace_root,
+        }
+
+    def end_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        record = self.session_records.pop(session_id, None)
+        self.sessions = len(self.session_records)
+        if record is None:
+            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
+        return {
+            "status": "ok",
+            "ended": True,
+            "session_id": session_id,
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
+
+    def list_documents_payload(self) -> dict[str, Any]:
+        self.documents = len(self.document_records)
+        return {
+            "status": "ok",
+            "documents": [record.payload() for record in self.document_records.values()],
+            "count": self.documents,
+            "workspace_root": self.workspace_root,
+        }
+
+    def open_document(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path = os.path.realpath(os.path.join(self.workspace_root, path) if not os.path.isabs(path) else path)
+        if not _path_within(real_path, self.workspace_root):
+            return {"error": f"Path is outside workspace: {path}"}, HTTPStatus.BAD_REQUEST
+
+        now = time.time()
+        for record in self.document_records.values():
+            if record.path == real_path:
+                record.updated_at = now
+                return {
+                    "status": "ok",
+                    "created": False,
+                    "document": record.payload(),
+                    "workspace_root": self.workspace_root,
+                }, HTTPStatus.OK
+
+        record = DocumentRecord(
+            document_id=str(uuid.uuid4()),
+            path=real_path,
+            created_at=now,
+            updated_at=now,
+        )
+        self.document_records[record.document_id] = record
+        self.documents = len(self.document_records)
+        return {
+            "status": "ok",
+            "created": True,
+            "document": record.payload(),
+            "workspace_root": self.workspace_root,
+        }, HTTPStatus.OK
 
 
 def serve_forever(
@@ -112,6 +243,12 @@ def _handler_factory(state: CoreState):
             if self.path == "/api/status":
                 self._json(HTTPStatus.OK, state.status_payload())
                 return
+            if self.path == "/api/sessions":
+                self._json(HTTPStatus.OK, state.list_sessions_payload())
+                return
+            if self.path == "/api/documents":
+                self._json(HTTPStatus.OK, state.list_documents_payload())
+                return
 
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -120,9 +257,43 @@ def _handler_factory(state: CoreState):
                 self._json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
                 return
 
+            payload = self._body()
+
             if self.path == "/api/shutdown":
                 self._json(HTTPStatus.OK, {"status": "ok", "stopping": True, "pid": state.pid})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            if self.path == "/api/sessions/start":
+                actor = payload.get("actor")
+                client = payload.get("client")
+                session_id = payload.get("session_id")
+                label = payload.get("label")
+                if not isinstance(actor, str) or not actor:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing actor"})
+                    return
+                if not isinstance(client, str) or not client:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing client"})
+                    return
+                if not isinstance(session_id, str) or not session_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
+                    return
+                self._json(HTTPStatus.OK, state.start_session(actor, client, label, session_id))
+                return
+            if self.path == "/api/sessions/end":
+                session_id = payload.get("session_id")
+                if not isinstance(session_id, str) or not session_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
+                    return
+                body, status = state.end_session(session_id)
+                self._json(status, body)
+                return
+            if self.path == "/api/documents/open":
+                path = payload.get("path")
+                if not isinstance(path, str) or not path:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                    return
+                body, status = state.open_document(path)
+                self._json(status, body)
                 return
 
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -139,9 +310,29 @@ def _handler_factory(state: CoreState):
             self.end_headers()
             self.wfile.write(body)
 
+        def _body(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0:
+                return {}
+            raw = self.rfile.read(length)
+            if not raw:
+                return {}
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                return {}
+            return data if isinstance(data, dict) else {}
+
     return Handler
 
 
 def _authorized(header: str | None, token: str) -> bool:
     return header == f"token {token}"
 
+
+def _path_within(candidate: str, root: str) -> bool:
+    try:
+        common = os.path.commonpath([os.path.realpath(candidate), os.path.realpath(root)])
+        return common == os.path.realpath(root)
+    except ValueError:
+        return False

@@ -356,7 +356,7 @@ No arguments. Prints "Extension host restarting..." on success.
 Experimental workspace-scoped core daemon commands for the v2 architecture work.
 
 ```
-agent-repl v2 {start|status|stop} [--workspace-root PATH] [--pretty]
+agent-repl v2 {start|status|stop|sessions|session-start|session-end|documents|document-open} [--workspace-root PATH] [--pretty]
 ```
 
 ### v2 start
@@ -386,12 +386,53 @@ agent-repl v2 stop
 agent-repl v2 stop --workspace-root /path/to/workspace
 ```
 
+### v2 sessions
+
+List active v2 sessions registered in the workspace-scoped core daemon.
+
+```bash
+agent-repl v2 sessions
+```
+
+### v2 session-start
+
+Start or resume a v2 session for the workspace.
+
+```bash
+agent-repl v2 session-start --actor agent --client-type cli --label "worker"
+agent-repl v2 session-start --actor human --client-type vscode
+```
+
+### v2 session-end
+
+End a previously registered v2 session.
+
+```bash
+agent-repl v2 session-end --session-id <session-id>
+```
+
+### v2 documents
+
+List canonical documents currently registered in the workspace-scoped v2 core.
+
+```bash
+agent-repl v2 documents
+```
+
+### v2 document-open
+
+Register a canonical v2 document inside the workspace-scoped core authority.
+
+```bash
+agent-repl v2 document-open notebooks/demo.ipynb
+```
+
 Current behavior:
 
 - the daemon is workspace-scoped
 - it runs independently of VS Code
-- it currently exposes core authority health/status scaffolding only
-- this is the first executable v2 slice, not the finished v2 workflow
+- it now exposes experimental session and document registration APIs
+- it still does not own notebook editing or execution; this is early v2 core scaffolding, not the finished workflow
 
 ---
 
