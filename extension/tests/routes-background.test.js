@@ -177,6 +177,7 @@ test('create route keeps notebook in the background when quiet kernel attach suc
             cells: [{ type: 'code', source: 'x = 1' }],
         });
         assert.equal(result.status, 'ok');
+        assert.equal(result.ready, true);
         assert.equal(result.kernel_status, 'selected');
         assert.equal(ensureCalls, 0);
         assert.equal(showCalls, 0);
@@ -189,6 +190,107 @@ test('create route keeps notebook in the background when quiet kernel attach suc
         fs.existsSync = originalExistsSync;
         fs.readdirSync = originalReaddirSync;
         fs.readFileSync = originalReadFileSync;
+    }
+});
+
+test('create route fails clearly when no workspace venv kernel exists and none is specified', async () => {
+    const originalEnv = process.env.JUPYTER_PATH;
+    const originalExistsSync = fs.existsSync;
+    const originalReaddirSync = fs.readdirSync;
+
+    const fakeRoot = path.join('/tmp', 'agent-repl-test-missing-kernel');
+    const kernelsDir = path.join(fakeRoot, 'kernels');
+    const uri = { fsPath: '/workspace/tmp/demo.ipynb', toString: () => 'file:///workspace/tmp/demo.ipynb' };
+    const doc = { uri, notebookType: 'jupyter-notebook', cellCount: 0 };
+    let showCalls = 0;
+
+    process.env.JUPYTER_PATH = fakeRoot;
+    fs.existsSync = (target) => target === kernelsDir ? true : false;
+    fs.readdirSync = (target) => {
+        if (target !== kernelsDir) {
+            throw new Error(`Unexpected dir: ${target}`);
+        }
+        return [];
+    };
+
+    const routesModule = loadRoutesModule({
+        vscode: {
+            Uri: { file: (value) => ({ fsPath: value, toString: () => `file://${value}` }) },
+            workspace: {
+                workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
+                notebookDocuments: [],
+                fs: {
+                    writeFile: async () => {},
+                },
+                openNotebookDocument: async () => doc,
+            },
+            window: {
+                showNotebookDocument: async () => {
+                    showCalls += 1;
+                    return {};
+                },
+                activeNotebookEditor: undefined,
+                activeTextEditor: undefined,
+                visibleNotebookEditors: [],
+            },
+            commands: {
+                executeCommand: async () => {
+                    throw new Error('interactive kernel picker should not run');
+                },
+            },
+            extensions: {
+                getExtension: () => undefined,
+            },
+        },
+        resolver: {
+            resolveNotebook: () => doc,
+            resolveNotebookUri: () => uri,
+            resolveOrOpenNotebook: async () => doc,
+            findOpenNotebook: () => undefined,
+            findEditor: () => {
+                throw new Error('not needed');
+            },
+            ensureNotebookEditor: async () => {
+                throw new Error('should not ensure editor when kernel is missing');
+            },
+            captureEditorFocus: () => ({ kind: 'none' }),
+            restoreEditorFocus: async () => {},
+        },
+        queue: {
+            executeCell: async () => ({ status: 'ok' }),
+            getExecution: () => ({ status: 'ok' }),
+            getStatus: async () => ({ kernel_state: 'idle' }),
+            insertAndExecute: async () => ({ status: 'ok' }),
+            resetExecutionState: () => {},
+            resetJupyterApiCache: () => {},
+            getJupyterApi: async () => undefined,
+            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
+            startNotebookExecutionAll: async () => [],
+        },
+    });
+
+    try {
+        const routes = routesModule.buildRoutes(20);
+        await assert.rejects(
+            () => routes['POST /api/notebook/create']({
+                path: 'tmp/demo.ipynb',
+                cwd: '/workspace',
+            }),
+            (error) => {
+                assert.equal(error.statusCode, 400);
+                assert.match(error.message, /No workspace \.venv kernel/i);
+                return true;
+            },
+        );
+        assert.equal(showCalls, 0);
+    } finally {
+        if (originalEnv === undefined) {
+            delete process.env.JUPYTER_PATH;
+        } else {
+            process.env.JUPYTER_PATH = originalEnv;
+        }
+        fs.existsSync = originalExistsSync;
+        fs.readdirSync = originalReaddirSync;
     }
 });
 

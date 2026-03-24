@@ -241,6 +241,24 @@ export function kernelSelectionGuidance(relPath: string, discovery: KernelDiscov
     };
 }
 
+function createKernelRequiredError(
+    relPath: string,
+    discovery: KernelDiscovery,
+    reason: 'missing' | 'failed',
+    diagnostics: AttachDiagnostic[] = [],
+): Error {
+    const guidance = kernelSelectionGuidance(relPath, discovery, reason);
+    const detail = diagnostics.length
+        ? ` Diagnostics: ${formatDiagnostics(diagnostics)}`
+        : '';
+    const message = reason === 'missing'
+        ? `agent-repl new requires a ready kernel. No workspace .venv kernel was detected for '${relPath}'. Re-run with --kernel <kernel-id>.${detail}`
+        : `agent-repl new could not attach the requested or preferred kernel for '${relPath}'. Re-run with --kernel <kernel-id>.${detail}`;
+    const error = new Error(`${message} ${guidance.next_step}`.trim()) as Error & { statusCode?: number };
+    error.statusCode = 400;
+    return error;
+}
+
 function rawCellSource(source: unknown): string {
     if (Array.isArray(source)) {
         return source.map(part => `${part ?? ''}`).join('');
@@ -976,18 +994,23 @@ export function buildRoutes(maxQueue: number): Routes {
                 await restoreEditorFocus(focus);
             }
 
-            const response: Record<string, unknown> = { status: 'ok', path: relPath, kernel_status: kernelStatus };
+            if (kernelStatus === 'needs_selection') {
+                throw createKernelRequiredError(relPath, discovery, 'missing');
+            }
+            if (kernelStatus === 'selection_failed') {
+                throw createKernelRequiredError(relPath, discovery, 'failed', kernelDiagnostics);
+            }
+
+            const response: Record<string, unknown> = {
+                status: 'ok',
+                path: relPath,
+                kernel_status: kernelStatus,
+                ready: kernelStatus === 'selected',
+            };
 
             if (kernelStatus === 'selected' && selectedKernel) {
                 response.kernel = selectedKernel;
                 response.message = `Selected kernel: ${selectedKernel.label}`;
-            } else if (kernelStatus === 'needs_selection') {
-                Object.assign(response, kernelSelectionGuidance(relPath, discovery, 'missing'));
-            } else if (kernelStatus === 'selection_failed') {
-                Object.assign(response, kernelSelectionGuidance(relPath, discovery, 'failed'));
-                if (kernelDiagnostics.length) {
-                    response.diagnostics = kernelDiagnostics;
-                }
             }
 
             return response;

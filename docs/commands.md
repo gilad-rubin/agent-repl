@@ -252,7 +252,7 @@ agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"import pan
 The notebook is created and opened in VS Code with a Python kernel.
 Starter cells created by `new --cells-json` are not auto-executed. If later validation steps depend on seed variables from those cells, execute the seed cell explicitly first.
 
-When a workspace `.venv` is present, `new` prefers it automatically and the response includes `kernel_status: "selected"` plus a message naming the selected kernel. If no workspace `.venv` is available, the response includes `kernel_status: "needs_selection"`, `available_kernels`, and `select_kernel_command` so an agent or human can pick one immediately.
+When a workspace `.venv` is present, `new` prefers it automatically and the response includes `kernel_status: "selected"` plus a message naming the selected kernel. The response also marks the notebook `ready: true`. If no workspace `.venv` is available, `new` fails clearly and asks for an explicit `--kernel` rather than leaving the notebook in a half-ready state.
 
 ---
 

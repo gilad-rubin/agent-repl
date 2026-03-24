@@ -22,20 +22,26 @@ agent-repl reload --pretty
 
 ## Core Loop
 
-Use this order unless the user asks for something narrower:
+Prefer the minimal happy path:
 
 ```bash
-agent-repl status demo.ipynb
-agent-repl cat demo.ipynb --no-outputs
-agent-repl ix demo.ipynb --source-file /tmp/cell.py
-agent-repl cat demo.ipynb
+agent-repl new tmp/validation.ipynb
+agent-repl ix tmp/validation.ipynb --source-file /tmp/cell.py
 ```
 
-- `status` tells you whether the notebook is open, whether the kernel is busy, and which cells are running or queued
-- `cat --no-outputs` gives you stable live cell IDs and source without dragging large outputs into context
-- `ix` is the default way to add new executable work because it inserts a visible cell and runs it
-- `cat` after execution is the fastest way to verify outputs and capture new `cell_id` values
-- if `status` says the notebook is closed or not open yet, `cat` may return fallback IDs like `index-1`; once the notebook becomes live, re-run `cat --no-outputs` before using `--cell-id`
+For existing notebooks:
+
+```bash
+agent-repl edit demo.ipynb replace-source --cell-id <id> -s 'updated code'
+agent-repl ix demo.ipynb -s 'x + 1'
+```
+
+- `new` should create the notebook and silently prepare the runtime/kernel
+- if a workspace `.venv` exists, it should be the default kernel choice
+- `ix` is the default execution primitive because it inserts a visible code cell, runs it, and returns the result directly
+- `status` and `cat` are diagnostics, not required ritual for the happy path
+- use `cat --no-outputs` when you specifically need live `cell_id` values or full notebook structure
+- if `cat` returns fallback IDs like `index-1` for a closed notebook, re-run `cat --no-outputs` after the notebook becomes live before using `--cell-id`
 
 ## Validation Loop
 
@@ -49,33 +55,26 @@ agent-repl reload --pretty
 Then validate a brand-new notebook:
 
 ```bash
-agent-repl new tmp/validation.ipynb --cells-json '[{"type":"markdown","source":"# Validation"},{"type":"code","source":"x = 2\\nprint(x)"}]'
-agent-repl status tmp/validation.ipynb
-agent-repl cat tmp/validation.ipynb --no-outputs
-agent-repl exec tmp/validation.ipynb --cell-id <seed-cell-id>
-agent-repl edit tmp/validation.ipynb replace-source --cell-id <seed-cell-id> -s 'x = 7\nx ** 2'
-agent-repl exec tmp/validation.ipynb --cell-id <seed-cell-id>
-agent-repl cat tmp/validation.ipynb
+agent-repl new tmp/validation.ipynb
+agent-repl ix tmp/validation.ipynb -s 'x = 2\nx * 3'
+agent-repl edit tmp/validation.ipynb replace-source --cell-id <id> -s 'x = 7\nx ** 2'
+agent-repl exec tmp/validation.ipynb --cell-id <id>
 ```
 
 Then validate an existing notebook:
 
 ```bash
-agent-repl status notebooks/demo.ipynb
 agent-repl cat notebooks/demo.ipynb --no-outputs
-agent-repl select-kernel notebooks/demo.ipynb
-agent-repl status notebooks/demo.ipynb
-agent-repl cat notebooks/demo.ipynb --no-outputs
-agent-repl exec notebooks/demo.ipynb --cell-id <live-uuid>
 agent-repl edit notebooks/demo.ipynb replace-source --cell-id <live-uuid> -s 'updated code'
 agent-repl exec notebooks/demo.ipynb --cell-id <live-uuid>
 agent-repl ix notebooks/demo.ipynb -s 'x + 1'
-agent-repl cat notebooks/demo.ipynb
 ```
 
 Important validation expectations:
 
-- `new --cells-json` creates starter cells but does not execute them; if a later cell depends on a seed variable, run the seed cell first
+- `new` should succeed only when the notebook is ready for immediate `ix`, `edit`, or `exec`
+- if no workspace `.venv` exists and no explicit kernel is provided, `new` should fail clearly instead of prompting through UI
+- `ix` should return the result directly in the common case
 - after editing code, re-run the edited cell and verify that the outputs now match the new source
 - if you opened an existing notebook from a closed state, ignore fallback `index-*` IDs after it becomes live; re-`cat` and use the live UUIDs instead
 

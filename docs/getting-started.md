@@ -23,10 +23,10 @@ agent-repl new demo.ipynb
 ```
 
 ```json
-{"status":"ok","path":"demo.ipynb","kernel_status":"selected","message":"Selected workspace .venv kernel: subtext (.venv)"}
+{"status":"ok","path":"demo.ipynb","kernel_status":"selected","ready":true,"message":"Selected workspace .venv kernel: subtext (.venv)"}
 ```
 
-The notebook appears in VS Code immediately with a selected kernel when a workspace `.venv` can be matched. If no `.venv` exists, create returns `"kernel_status": "needs_selection"`, lists the discovered kernels, and includes the exact `agent-repl select-kernel demo.ipynb` command to run next.
+The notebook appears in VS Code immediately with a selected kernel when a workspace `.venv` can be matched. If no `.venv` exists, `agent-repl new` fails clearly and asks for an explicit `--kernel` instead of leaving the notebook only partially prepared.
 
 Create and kernel attach should stay in the background. If VS Code reveals the notebook, prompts for manual intervention, or asks the user to restart the kernel, treat that as a bug and capture the returned JSON plus the active `execution_mode`.
 

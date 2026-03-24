@@ -38,7 +38,7 @@ The `ix` command (insert-execute) adds a cell to the notebook and runs it. The c
 
 Agent-triggered execution defaults to `no-yank`, which prefers the background Jupyter path so the notebook can keep updating without stealing editor focus. If you want the original VS Code behavior, set `agent-repl.executionMode` to `native`.
 
-Creating a brand-new notebook and attaching a kernel should stay in the background. `agent-repl new` and `agent-repl select-kernel` prefer the workspace `.venv` automatically when it exists, and the JSON response says which kernel was selected. Use `agent-repl select-kernel ... --interactive` only when you explicitly want the VS Code kernel picker. If create or kernel attach reveals a notebook, prompts the user, or asks for a kernel restart, treat that as a product bug.
+Creating a brand-new notebook and attaching a kernel should stay in the background. `agent-repl new` and `agent-repl select-kernel` prefer the workspace `.venv` automatically when it exists, and the JSON response says which kernel was selected. If no workspace `.venv` exists, `agent-repl new` should fail clearly unless you pass `--kernel` explicitly. Use `agent-repl select-kernel ... --interactive` only when you explicitly want the VS Code kernel picker. If create or kernel attach reveals a notebook, prompts the user, or asks for a kernel restart, treat that as a product bug.
 
 ## Key Features
 
