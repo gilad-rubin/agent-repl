@@ -201,6 +201,13 @@ class TestBridgeEndpoints(unittest.TestCase):
             },
         )
 
+    def test_select_kernel_includes_interactive(self):
+        self.client.select_kernel("nb.ipynb", interactive=True)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "cwd": "/workspace", "interactive": True},
+        )
+
     def test_prompt_status_calls_post(self):
         self.client.prompt_status("nb.ipynb", "cell-1", "answered")
         url = self.mock_post.call_args[0][0]
@@ -302,6 +309,10 @@ class TestParser(unittest.TestCase):
         args = build_parser().parse_args(["reload"])
         self.assertEqual(args.command, "reload")
 
+    def test_select_kernel_interactive(self):
+        args = build_parser().parse_args(["select-kernel", "nb.ipynb", "--interactive"])
+        self.assertTrue(args.interactive)
+
 
 # ---------------------------------------------------------------------------
 # CLI command handlers
@@ -340,6 +351,7 @@ class TestCommands(unittest.TestCase):
         client.restart_kernel.return_value = {"status": "ok"}
         client.restart_and_run_all.return_value = {"status": "ok"}
         client.create.return_value = {"status": "ok"}
+        client.select_kernel.return_value = {"status": "ok"}
         client.edit.return_value = {"results": []}
         client.prompt_status.return_value = {"status": "ok"}
         client.reload.return_value = {"status": "ok"}
@@ -437,6 +449,28 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["extension_root"], "/tmp/agent-repl")
         client.reload.assert_called_once()
+
+    def test_select_kernel_defaults_to_preferred_route_behavior(self):
+        client = self._mock_client()
+        code, _ = self._run(["select-kernel", "nb.ipynb"], client)
+        self.assertEqual(code, 0)
+        client.select_kernel.assert_called_once_with(
+            "nb.ipynb",
+            kernel_id=None,
+            extension="ms-toolsai.jupyter",
+            interactive=False,
+        )
+
+    def test_select_kernel_interactive_flag(self):
+        client = self._mock_client()
+        code, _ = self._run(["select-kernel", "nb.ipynb", "--interactive"], client)
+        self.assertEqual(code, 0)
+        client.select_kernel.assert_called_once_with(
+            "nb.ipynb",
+            kernel_id=None,
+            extension="ms-toolsai.jupyter",
+            interactive=True,
+        )
 
     def test_pretty_flag(self):
         client = self._mock_client()

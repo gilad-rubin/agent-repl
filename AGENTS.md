@@ -44,6 +44,28 @@ API changes require updating both sides together:
 - `POST /api/reload` clears `require.cache` for all modules under `out/` except `extension.js` and `server.js`
 - Changes to `extension.ts` or `server.ts` require full window reload; everything else can hot-reload
 - Recompiling does NOT update an installed extension under `~/.vscode/extensions/` — reinstall the `.vsix` or use Extension Development Host
+- If CLI behavior disagrees with the repo source, suspect installed-extension drift before debugging notebook state. `agent-repl reload --pretty` reports the live `extension_root` and `routes_module`; verify those paths point at the build you meant to test.
+
+</important>
+
+<important if="writing catch blocks or fallback logic in extension/src/">
+
+## Error Handling: No Silent Swallowing
+
+Never write `catch { continue; }` or `catch { return undefined; }` without capturing diagnostics. When an operation fails silently, the CLI gets a useless `selection_failed` / error status with no way to debug.
+
+**Required pattern** — collect diagnostics and surface them in the response:
+```typescript
+const diagnostics: AttachDiagnostic[] = [];
+try {
+    await riskyOperation();
+} catch (err: any) {
+    diagnostics.push({ method: 'operationName', detail: err?.message ?? String(err) });
+    continue; // or return, but the error is captured
+}
+```
+
+When a fallback chain fails (multiple methods tried in sequence), return ALL diagnostics so the caller can see which steps were attempted and why each failed.
 
 </important>
 
@@ -79,5 +101,6 @@ Both sides must be updated:
 - Stale files from dead processes are the most common failure mode
 - `agent-repl reload` returns `extension_root` and `routes_module` paths — use to verify which build is loaded
 - Extension symlink lives at `~/.cursor/extensions/agent-repl.agent-repl-<version>` (or `~/.vscode/extensions/`)
+- If `agent-repl cat` shows `cells: []` for a notebook that has cells on disk, treat that as a bridge/runtime issue first, not notebook JSON corruption. Compare the on-disk file, run `agent-repl reload --pretty`, and confirm the installed extension is not stale before changing notebook-resolution logic.
 
 </important>

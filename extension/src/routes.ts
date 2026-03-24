@@ -27,6 +27,11 @@ type KernelDiscovery = {
     kernels: KernelRecord[];
 };
 
+interface AttachDiagnostic {
+    method: string;
+    detail: string;
+}
+
 function normalizePath(p: string): string {
     try {
         const resolved = fs.realpathSync(p);
@@ -195,8 +200,22 @@ export function discoverKernels(workspaceDir?: string | null): KernelDiscovery {
     };
 }
 
-function kernelSelectionGuidance(relPath: string, discovery: KernelDiscovery, reason: 'missing' | 'failed') {
+function buildSelectKernelCommand(relPath: string, kernelId?: string | null): string {
     const command = `agent-repl select-kernel ${shellQuote(relPath)}`;
+    return kernelId ? `${command} --kernel-id ${shellQuote(kernelId)}` : command;
+}
+
+function buildInteractiveSelectKernelCommand(relPath: string): string {
+    return `agent-repl select-kernel ${shellQuote(relPath)} --interactive`;
+}
+
+export function kernelSelectionGuidance(relPath: string, discovery: KernelDiscovery, reason: 'missing' | 'failed') {
+    const command = `agent-repl select-kernel ${shellQuote(relPath)}`;
+    const interactiveCommand = buildInteractiveSelectKernelCommand(relPath);
+    const preferredCommand = discovery.preferred_kernel
+        ? buildSelectKernelCommand(relPath, discovery.preferred_kernel.id)
+        : command;
+    const kernelNames = discovery.kernels.map(kernel => kernel.label);
     const intro = reason === 'failed'
         ? 'agent-repl could not attach a kernel automatically. Select one to continue.'
         : 'No workspace .venv was detected. Select a kernel to continue.';
@@ -204,9 +223,21 @@ function kernelSelectionGuidance(relPath: string, discovery: KernelDiscovery, re
     return {
         message: intro,
         selection_required: true,
-        available_kernels: discovery.kernels,
+        available_kernel_names: kernelNames,
+        available_kernel_count: kernelNames.length,
+        list_kernels_command: 'agent-repl kernels',
         select_kernel_command: command,
-        next_step: `Run ${command} and choose one of the available kernels in VS Code.`,
+        open_picker_command: interactiveCommand,
+        recommended_kernel_id: discovery.preferred_kernel?.id ?? null,
+        recommended_kernel_name: discovery.preferred_kernel?.label ?? null,
+        recommended_kernel_command: preferredCommand,
+        next_step: reason === 'failed'
+            ? discovery.preferred_kernel
+                ? `Run ${command} to retry with the workspace-preferred kernel. If you need the VS Code kernel picker, run ${interactiveCommand}.`
+                : `Run ${interactiveCommand} to open the VS Code kernel picker.`
+            : discovery.preferred_kernel
+                ? `Run ${command} to use the workspace-preferred kernel, or run ${interactiveCommand} to open the VS Code kernel picker.`
+                : `Run ${interactiveCommand} to open the VS Code kernel picker and choose one of the available kernels.`,
     };
 }
 
@@ -304,24 +335,60 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
     return result;
 }
 
-function kernelRequestCandidates(kernel: KernelRecord): Array<{ id?: string; path?: string }> {
-    const candidates: Array<{ id?: string; path?: string }> = [];
-    const seen = new Set<string>();
-    const push = (id?: string | null, pythonPath?: string | null) => {
-        const payload: { id?: string; path?: string } = {};
-        if (id) { payload.id = id.toLowerCase(); }
-        if (pythonPath) { payload.path = pythonPath; }
-        const key = JSON.stringify(payload);
-        if ((payload.id || payload.path) && !seen.has(key)) {
-            seen.add(key);
-            candidates.push(payload);
-        }
-    };
+async function getPythonExtensionApi(): Promise<any | undefined> {
+    const pythonExt = vscode.extensions.getExtension('ms-python.python');
+    if (!pythonExt) { return undefined; }
 
-    push(kernel.kernelspec_name ?? kernel.id, kernel.python);
-    push(kernel.id, kernel.python);
-    push(kernel.kernelspec_name, undefined);
-    return candidates;
+    try {
+        return pythonExt.isActive ? pythonExt.exports : await pythonExt.activate();
+    } catch {
+        return undefined;
+    }
+}
+
+function pythonEnvironmentExecutablePath(env: any): string | undefined {
+    return env?.executable?.uri?.fsPath ?? env?.path;
+}
+
+async function resolvePythonEnvironment(
+    pythonPath: string,
+    diagnostics: AttachDiagnostic[]
+): Promise<any | undefined> {
+    const pythonApi = await getPythonExtensionApi();
+    if (!pythonApi?.environments) {
+        diagnostics.push({
+            method: 'python.resolveEnvironment',
+            detail: 'Python extension API unavailable, so agent-repl could not resolve the interpreter into a Jupyter-selectable environment',
+        });
+        return undefined;
+    }
+
+    const environments = Array.isArray(pythonApi.environments.known)
+        ? pythonApi.environments.known
+        : [];
+    const match = environments.find((env: any) =>
+        samePath(pythonEnvironmentExecutablePath(env), pythonPath) ||
+        samePath(env?.id, pythonPath)
+    );
+
+    try {
+        const resolved = await pythonApi.environments.resolveEnvironment(match ?? pythonPath);
+        if (resolved) {
+            return resolved;
+        }
+        diagnostics.push({
+            method: 'python.resolveEnvironment',
+            detail: `resolveEnvironment(${JSON.stringify(match?.id ?? pythonPath)}) returned no environment`,
+        });
+    } catch (err: any) {
+        const msg = err?.message ?? String(err);
+        diagnostics.push({
+            method: 'python.resolveEnvironment',
+            detail: `resolveEnvironment(${JSON.stringify(match?.id ?? pythonPath)}) threw: ${msg}`,
+        });
+    }
+
+    return undefined;
 }
 
 function attachedKernelMatches(kernel: any, requested?: KernelRecord): boolean {
@@ -341,6 +408,13 @@ function attachedKernelMatches(kernel: any, requested?: KernelRecord): boolean {
     );
 }
 
+function selectedPythonEnvironmentMatches(environment: any, requested?: KernelRecord): boolean {
+    if (!environment) { return false; }
+    if (!requested) { return true; }
+
+    return samePath(pythonEnvironmentExecutablePath(environment), requested.python);
+}
+
 async function currentAttachedKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
     const api = await getJupyterApi();
     const getKernel = api?.kernels?.getKernel;
@@ -348,12 +422,26 @@ async function currentAttachedKernel(doc: vscode.NotebookDocument): Promise<any 
 
     try {
         return await getKernel(doc.uri);
-    } catch {
+    } catch (err) {
+        console.warn('[agent-repl] currentAttachedKernel error:', err);
         return undefined;
     }
 }
 
-async function waitForKernelAttachment(
+async function currentSelectedPythonEnvironment(doc: vscode.NotebookDocument): Promise<any | undefined> {
+    const api = await getJupyterApi();
+    const getPythonEnvironment = api?.getPythonEnvironment;
+    if (typeof getPythonEnvironment !== 'function') { return undefined; }
+
+    try {
+        return await getPythonEnvironment(doc.uri);
+    } catch (err) {
+        console.warn('[agent-repl] currentSelectedPythonEnvironment error:', err);
+        return undefined;
+    }
+}
+
+async function waitForKernelSelection(
     doc: vscode.NotebookDocument,
     requested?: KernelRecord,
     timeoutMs: number = 4000
@@ -364,6 +452,12 @@ async function waitForKernelAttachment(
         if (attachedKernelMatches(kernel, requested)) {
             return kernel;
         }
+
+        const environment = await currentSelectedPythonEnvironment(doc);
+        if (selectedPythonEnvironmentMatches(environment, requested)) {
+            return environment;
+        }
+
         await new Promise(resolve => setTimeout(resolve, 150));
     }
     return undefined;
@@ -371,24 +465,42 @@ async function waitForKernelAttachment(
 
 async function attachKernelQuietly(
     doc: vscode.NotebookDocument,
-    kernel: KernelRecord
+    kernel: KernelRecord,
+    diagnostics: AttachDiagnostic[]
 ): Promise<boolean> {
     const api = await getJupyterApi();
-    if (typeof api?.openNotebook !== 'function') { return false; }
-
-    for (const request of kernelRequestCandidates(kernel)) {
-        try {
-            await api.openNotebook(doc.uri, request);
-        } catch {
-            continue;
-        }
-
-        if (await waitForKernelAttachment(doc, kernel)) {
-            return true;
-        }
+    if (typeof api?.openNotebook !== 'function') {
+        diagnostics.push({ method: 'jupyter.openNotebook', detail: 'api.openNotebook is not a function (Jupyter extension API unavailable or not yet activated)' });
+        return false;
     }
 
-    return false;
+    if (!kernel.python) {
+        diagnostics.push({
+            method: 'jupyter.openNotebook',
+            detail: `Kernel "${kernel.id}" does not expose a Python executable path, so agent-repl could not resolve it to a Python environment for programmatic selection`,
+        });
+        return false;
+    }
+
+    const environment = await resolvePythonEnvironment(kernel.python, diagnostics);
+    if (!environment) {
+        return false;
+    }
+
+    const request = {
+        id: environment?.id ?? null,
+        path: pythonEnvironmentExecutablePath(environment) ?? kernel.python,
+    };
+
+    try {
+        await api.openNotebook(doc.uri, environment);
+    } catch (err: any) {
+        const msg = err?.message ?? String(err);
+        diagnostics.push({ method: 'jupyter.openNotebook', detail: `openNotebook(${JSON.stringify(request)}) threw: ${msg}` });
+        return false;
+    }
+
+    return true;
 }
 
 async function selectKernelViaCommand(
@@ -396,25 +508,35 @@ async function selectKernelViaCommand(
     notebookEditor: vscode.NotebookEditor,
     kernelIds: Array<string | null | undefined>,
     requested: KernelRecord | undefined,
-    extensionId: string
+    extensionId: string,
+    diagnostics: AttachDiagnostic[]
 ): Promise<boolean> {
     for (const id of uniqueStrings(kernelIds)) {
         try {
             await vscode.commands.executeCommand('notebook.selectKernel', {
                 id,
                 extension: extensionId,
+                editor: notebookEditor,
                 notebookEditor,
             });
-        } catch {
+        } catch (err: any) {
+            const msg = err?.message ?? String(err);
+            diagnostics.push({ method: 'notebook.selectKernel', detail: `selectKernel(id=${id}, ext=${extensionId}) threw: ${msg}` });
             continue;
         }
 
-        if (await waitForKernelAttachment(doc, requested, 2000)) {
+        if (await waitForKernelSelection(doc, requested, 2000)) {
             return true;
         }
+        diagnostics.push({ method: 'notebook.selectKernel', detail: `selectKernel(id=${id}, ext=${extensionId}) succeeded but the selected kernel was not observable within 2s` });
     }
 
     return false;
+}
+
+interface AttachResult {
+    method?: 'already-selected' | 'jupyter.openNotebook' | 'notebook.selectKernel';
+    diagnostics: AttachDiagnostic[];
 }
 
 async function attachKernelWithFallback(
@@ -422,9 +544,11 @@ async function attachKernelWithFallback(
     kernel: KernelRecord,
     extensionId: string,
     extraKernelIds: Array<string | null | undefined> = []
-): Promise<'already-selected' | 'jupyter.openNotebook' | 'notebook.selectKernel' | undefined> {
-    if (await waitForKernelAttachment(doc, kernel, 300)) {
-        return 'already-selected';
+): Promise<AttachResult> {
+    const diagnostics: AttachDiagnostic[] = [];
+
+    if (await waitForKernelSelection(doc, kernel, 300)) {
+        return { method: 'already-selected', diagnostics };
     }
 
     const focus = captureEditorFocus();
@@ -434,8 +558,8 @@ async function attachKernelWithFallback(
             preview: false,
         });
 
-        if (await attachKernelQuietly(doc, kernel)) {
-            return 'jupyter.openNotebook';
+        if (await attachKernelQuietly(doc, kernel, diagnostics)) {
+            return { method: 'jupyter.openNotebook', diagnostics };
         }
 
         if (await selectKernelViaCommand(
@@ -444,20 +568,22 @@ async function attachKernelWithFallback(
             [...extraKernelIds, kernel.id, kernel.kernelspec_name],
             kernel,
             extensionId,
+            diagnostics,
         )) {
-            return 'notebook.selectKernel';
+            return { method: 'notebook.selectKernel', diagnostics };
         }
     } finally {
         await restoreEditorFocus(focus);
     }
 
-    return undefined;
+    return { diagnostics };
 }
 
 async function selectKernelById(
     doc: vscode.NotebookDocument,
     kernelId: string,
-    extensionId: string
+    extensionId: string,
+    diagnostics: AttachDiagnostic[] = []
 ): Promise<boolean> {
     const focus = captureEditorFocus();
     try {
@@ -465,7 +591,7 @@ async function selectKernelById(
             preserveFocus: true,
             preview: false,
         });
-        return await selectKernelViaCommand(doc, editor, [kernelId], undefined, extensionId);
+        return await selectKernelViaCommand(doc, editor, [kernelId], undefined, extensionId, diagnostics);
     } finally {
         await restoreEditorFocus(focus);
     }
@@ -710,8 +836,8 @@ export function buildRoutes(maxQueue: number): Routes {
         },
 
         'POST /api/notebook/select-kernel': async (body) => {
-            const { path: relPath, cwd, kernel_id, extension: kernelExt } = body as {
-                path: string; cwd?: string; kernel_id?: string; extension?: string;
+            const { path: relPath, cwd, kernel_id, extension: kernelExt, interactive } = body as {
+                path: string; cwd?: string; kernel_id?: string; extension?: string; interactive?: boolean;
             };
             const doc = await resolveOrOpenNotebook(relPath, cwd);
             const discovery = discoverKernels(resolveWorkspaceDir(cwd));
@@ -720,20 +846,22 @@ export function buildRoutes(maxQueue: number): Routes {
             if (kernel_id) {
                 const requested = findKernelRecord(discovery, kernel_id);
                 if (requested) {
-                    const method = await attachKernelWithFallback(doc, requested, extensionId, [kernel_id]);
-                    if (method) {
-                        return { status: 'ok', path: relPath, kernel_id, method };
+                    const result = await attachKernelWithFallback(doc, requested, extensionId, [kernel_id]);
+                    if (result.method) {
+                        return { status: 'ok', path: relPath, kernel_id, method: result.method };
                     }
 
                     return {
                         status: 'selection_failed',
                         path: relPath,
                         kernel_id,
+                        diagnostics: result.diagnostics,
                         ...kernelSelectionGuidance(relPath, discovery, 'failed'),
                     };
                 }
 
-                if (await selectKernelById(doc, kernel_id, extensionId)) {
+                const fallbackDiagnostics: AttachDiagnostic[] = [];
+                if (await selectKernelById(doc, kernel_id, extensionId, fallbackDiagnostics)) {
                     return { status: 'ok', path: relPath, kernel_id, method: 'notebook.selectKernel' };
                 }
 
@@ -741,6 +869,30 @@ export function buildRoutes(maxQueue: number): Routes {
                     status: 'selection_failed',
                     path: relPath,
                     kernel_id,
+                    diagnostics: fallbackDiagnostics.length
+                        ? fallbackDiagnostics
+                        : [{ method: 'notebook.selectKernel', detail: `kernel_id "${kernel_id}" not found in discovery and selectKernel command failed` }],
+                    ...kernelSelectionGuidance(relPath, discovery, 'failed'),
+                };
+            }
+
+            if (!interactive && discovery.preferred_kernel) {
+                const result = await attachKernelWithFallback(doc, discovery.preferred_kernel, extensionId);
+                if (result.method) {
+                    return {
+                        status: 'ok',
+                        path: relPath,
+                        kernel_id: discovery.preferred_kernel.id,
+                        method: result.method,
+                        defaulted_to_preferred: true,
+                    };
+                }
+
+                return {
+                    status: 'selection_failed',
+                    path: relPath,
+                    kernel_id: discovery.preferred_kernel.id,
+                    diagnostics: result.diagnostics,
                     ...kernelSelectionGuidance(relPath, discovery, 'failed'),
                 };
             }
@@ -798,24 +950,28 @@ export function buildRoutes(maxQueue: number): Routes {
 
             let kernelStatus: string;
             let selectedKernel: KernelRecord | null = null;
+            let kernelDiagnostics: AttachDiagnostic[] = [];
             try {
                 if (kernel_id) {
                     const requested = findKernelRecord(discovery, kernel_id);
                     if (requested) {
-                        const method = await attachKernelWithFallback(doc, requested, 'ms-toolsai.jupyter', [kernel_id]);
-                        if (method) {
+                        const result = await attachKernelWithFallback(doc, requested, 'ms-toolsai.jupyter', [kernel_id]);
+                        kernelDiagnostics = result.diagnostics;
+                        if (result.method) {
                             selectedKernel = requested;
                             kernelStatus = 'selected';
                         } else {
                             kernelStatus = 'selection_failed';
                         }
-                    } else if (await selectKernelById(doc, kernel_id, 'ms-toolsai.jupyter')) {
+                    } else if (await selectKernelById(doc, kernel_id, 'ms-toolsai.jupyter', kernelDiagnostics)) {
                         kernelStatus = 'selected';
                     } else {
                         kernelStatus = 'selection_failed';
                     }
                 } else if (hasPreferredKernel && discovery.preferred_kernel) {
-                    if (await attachKernelWithFallback(doc, discovery.preferred_kernel, 'ms-toolsai.jupyter')) {
+                    const result = await attachKernelWithFallback(doc, discovery.preferred_kernel, 'ms-toolsai.jupyter');
+                    kernelDiagnostics = result.diagnostics;
+                    if (result.method) {
                         selectedKernel = discovery.preferred_kernel;
                         kernelStatus = 'selected';
                     } else {
@@ -842,6 +998,9 @@ export function buildRoutes(maxQueue: number): Routes {
                 Object.assign(response, kernelSelectionGuidance(relPath, discovery, 'missing'));
             } else if (kernelStatus === 'selection_failed') {
                 Object.assign(response, kernelSelectionGuidance(relPath, discovery, 'failed'));
+                if (kernelDiagnostics.length) {
+                    response.diagnostics = kernelDiagnostics;
+                }
             }
 
             return response;

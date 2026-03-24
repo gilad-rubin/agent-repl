@@ -166,7 +166,13 @@ def cmd_kernels(args: argparse.Namespace) -> int:
 def cmd_select_kernel(args: argparse.Namespace) -> int:
     kernel_id = getattr(args, "kernel_id", None)
     extension = getattr(args, "extension", None)
-    result = _client(args.path).select_kernel(args.path, kernel_id=kernel_id, extension=extension)
+    interactive = getattr(args, "interactive", False)
+    result = _client(args.path).select_kernel(
+        args.path,
+        kernel_id=kernel_id,
+        extension=extension,
+        interactive=interactive,
+    )
     _out(result, args.pretty)
     return 0
 
@@ -307,6 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("select-kernel", help="Select kernel for a notebook")
     p.add_argument("path")
     p.add_argument("--kernel-id", help="Kernel ID to select programmatically")
+    p.add_argument("--interactive", action="store_true", help="Open the VS Code kernel picker instead of defaulting to the workspace .venv")
     p.add_argument("--extension", default="ms-toolsai.jupyter", help="Extension ID")
 
     # prompts

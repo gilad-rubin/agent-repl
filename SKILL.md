@@ -73,11 +73,12 @@ When `new` returns:
 
 ```bash
 agent-repl kernels
-agent-repl select-kernel analysis.ipynb --kernel-id <id>
+agent-repl select-kernel analysis.ipynb
 ```
 
-- use the exact `id` returned by `agent-repl kernels`
-- `select-kernel` can attach programmatically or fall back to VS Code's controller-selection path
+- `select-kernel` now defaults to the workspace `.venv` when it exists
+- use `agent-repl select-kernel analysis.ipynb --interactive` to open the VS Code kernel picker explicitly
+- use the exact `id` returned by `agent-repl kernels` when you need a non-default kernel
 - creating a notebook or selecting a kernel may briefly reveal the notebook tab while Jupyter initializes
 
 ## Timeouts and Busy Kernels
@@ -110,7 +111,7 @@ agent-repl respond demo.ipynb --to <cell_id> -s 'df.dropna(inplace=True)'
 Use the JSON response from `new` directly:
 
 - if it already selected a kernel, continue with `ix`
-- if it returned `available_kernels`, pick one of those exact IDs
+- if it returned `available_kernel_names`, use `select-kernel` for the workspace default or `kernels` to inspect the exact IDs
 - if the notebook is open in the editor and auto-select still failed, retry `select-kernel` before falling back to manual UI clicks
 
 Creating a brand-new notebook may briefly steal focus while Jupyter starts. Once the kernel is attached, `ix` and `exec` can usually stay on the no-yank path.
@@ -149,7 +150,7 @@ If timeout occurs:
 
 **Notebook is outside the workspace** — The bridge only serves notebooks in its own workspace. Open the correct VS Code window first.
 
-**Kernel selection acted strangely** — Use `kernels`, then retry `select-kernel` with the exact returned `id`.
+**Kernel selection acted strangely** — Retry `select-kernel` first. If you need to inspect exact IDs, use `kernels`. If you need the VS Code picker, use `select-kernel --interactive`.
 
 **`run-all` or `restart-run-all` returned but the notebook is still busy** — Those commands return after triggering execution, not after completion. Use `status` to watch the active run.
 
@@ -166,6 +167,8 @@ npx vsce package
 code --install-extension agent-repl-<version>.vsix --force
 uv run agent-repl reload
 ```
+
+**`cat` returns `cells: []` but the `.ipynb` file has real cells on disk** — Treat that as bridge drift or a bad in-memory notebook state first. Verify the file on disk, then run `agent-repl reload --pretty` and confirm `extension_root` / `routes_module` point at the build you intended to test before changing path-resolution code.
 
 **Hot-reload scope** — `agent-repl reload` updates `routes` and the execution queue. Changes to `extension.ts` or `server.ts` still need a full VS Code window reload.
 

@@ -271,24 +271,28 @@ Returns `kernels` (array of kernel records with `id`, `label`, `type`, `python` 
 
 ## select-kernel
 
-Select a kernel for a notebook. With `--kernel-id`, selects programmatically using one of the identifiers returned by `agent-repl kernels`. Without it, opens VS Code's interactive kernel picker.
+Select a kernel for a notebook. With `--kernel-id`, selects programmatically using one of the identifiers returned by `agent-repl kernels`. Without it, `agent-repl` first tries the workspace `.venv` automatically when one exists. Use `--interactive` to open VS Code's kernel picker explicitly.
 
 ```
-agent-repl select-kernel PATH [--kernel-id ID] [--extension EXT] [--pretty]
+agent-repl select-kernel PATH [--kernel-id ID] [--interactive] [--extension EXT] [--pretty]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `PATH` | | Notebook path |
 | `--kernel-id` | | Kernel ID to select programmatically |
+| `--interactive` | `false` | Open the VS Code kernel picker instead of defaulting to the workspace `.venv` |
 | `--extension` | `ms-toolsai.jupyter` | Extension providing the kernel controller |
 
 ```bash
 # Programmatic selection using a kernel identifier from `agent-repl kernels`
 agent-repl select-kernel demo.ipynb --kernel-id /path/to/.venv/bin/python
 
-# Interactive picker
+# Default to the workspace `.venv` when it exists
 agent-repl select-kernel demo.ipynb
+
+# Interactive picker
+agent-repl select-kernel demo.ipynb --interactive
 ```
 
 If programmatic selection cannot be completed quietly, the command returns `status: "selection_failed"` with guidance instead of silently dropping into the interactive picker.

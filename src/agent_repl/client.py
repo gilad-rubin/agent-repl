@@ -158,13 +158,19 @@ class BridgeClient:
         return self._get("/api/notebook/kernels", params={"cwd": os.getcwd()})
 
     def select_kernel(
-        self, path: str, kernel_id: str | None = None, extension: str | None = None
+        self,
+        path: str,
+        kernel_id: str | None = None,
+        extension: str | None = None,
+        interactive: bool = False,
     ) -> dict[str, Any]:
         body = self._path_body(path)
         if kernel_id is not None:
             body["kernel_id"] = kernel_id
         if extension is not None:
             body["extension"] = extension
+        if interactive:
+            body["interactive"] = True
         return self._post("/api/notebook/select-kernel", body)
 
     def prompt(self, path: str, instruction: str) -> dict[str, Any]:

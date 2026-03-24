@@ -43,6 +43,7 @@ function loadRoutesModule() {
 const {
     discoverKernels,
     findKernelRecord,
+    kernelSelectionGuidance,
 } = loadRoutesModule();
 
 test('discoverKernels reuses the matching kernelspec as the preferred workspace kernel', () => {
@@ -134,4 +135,63 @@ test('findKernelRecord prefers exact ids before same-path matches', () => {
         findKernelRecord(discovery, 'subtext-venv')?.type,
         'kernelspec',
     );
+});
+
+test('kernelSelectionGuidance uses progressive disclosure and an actionable retry command', () => {
+    const discovery = {
+        workspace: '/workspace',
+        workspace_venv_python: '/workspace/.venv/bin/python',
+        preferred_kernel: {
+            id: 'subtext-venv',
+            label: 'subtext (.venv)',
+            type: 'kernelspec',
+            python: '/workspace/.venv/bin/python',
+            kernelspec_name: 'subtext-venv',
+            kernelspec_display_name: 'subtext (.venv)',
+            source: '/kernels/subtext-venv',
+            recommended: true,
+        },
+        kernels: [
+            {
+                id: 'subtext-venv',
+                label: 'subtext (.venv)',
+                type: 'kernelspec',
+                python: '/workspace/.venv/bin/python',
+                kernelspec_name: 'subtext-venv',
+                kernelspec_display_name: 'subtext (.venv)',
+                source: '/kernels/subtext-venv',
+                recommended: true,
+            },
+            {
+                id: 'python3',
+                label: 'Python 3 (ipykernel)',
+                type: 'kernelspec',
+                python: 'python',
+                kernelspec_name: 'python3',
+                kernelspec_display_name: 'Python 3 (ipykernel)',
+                source: '/kernels/python3',
+                recommended: false,
+            },
+        ],
+    };
+
+    const guidance = kernelSelectionGuidance('notebooks/demo.ipynb', discovery, 'failed');
+    assert.deepEqual(guidance.available_kernel_names, ['subtext (.venv)', 'Python 3 (ipykernel)']);
+    assert.equal(guidance.available_kernel_count, 2);
+    assert.equal(guidance.list_kernels_command, 'agent-repl kernels');
+    assert.equal(
+        guidance.open_picker_command,
+        "agent-repl select-kernel 'notebooks/demo.ipynb' --interactive",
+    );
+    assert.equal(
+        guidance.recommended_kernel_command,
+        "agent-repl select-kernel 'notebooks/demo.ipynb' --kernel-id 'subtext-venv'",
+    );
+    assert.equal(
+        guidance.select_kernel_command,
+        "agent-repl select-kernel 'notebooks/demo.ipynb'",
+    );
+    assert.match(guidance.next_step, /workspace-preferred kernel/);
+    assert.match(guidance.next_step, /--interactive/);
+    assert.ok(!('available_kernels' in guidance));
 });
