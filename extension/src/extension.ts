@@ -7,19 +7,19 @@ import { PromptStatusBarProvider } from './prompts/statusBar';
 import { insertPromptCell } from './prompts/commands';
 import { ActivityPanelProvider } from './activity/panel';
 import { initExecutionMonitor } from './execution/queue';
-import { HeadlessNotebookProjection, V2AutoAttach } from './v2';
+import { HeadlessNotebookProjection, SessionAutoAttach } from './session';
 
 let server: BridgeServer | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext | undefined;
 let executionMonitorDisposable: vscode.Disposable | undefined;
-let v2AutoAttach: V2AutoAttach | undefined;
+let sessionAutoAttach: SessionAutoAttach | undefined;
 let headlessProjection: HeadlessNotebookProjection | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     extensionContext = context;
     const config = vscode.workspace.getConfiguration('agent-repl');
-    v2AutoAttach = new V2AutoAttach(context);
+    sessionAutoAttach = new SessionAutoAttach(context);
     headlessProjection = new HeadlessNotebookProjection(context, context.extension.id);
 
     // Status bar
@@ -29,7 +29,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     statusBarItem.tooltip = 'Agent REPL: stopped';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
-    context.subscriptions.push(v2AutoAttach);
+    context.subscriptions.push(sessionAutoAttach);
     context.subscriptions.push(headlessProjection);
 
     // Execution monitor (watches cell executionSummary for completion detection)
@@ -68,7 +68,7 @@ async function startBridge(
 ): Promise<void> {
     if (server) {
         try {
-            await v2AutoAttach?.attachIfEnabled(config);
+            await sessionAutoAttach?.attachIfEnabled(config);
         } catch (err: any) {
             console.warn('[agent-repl] session auto-attach retry failed:', err?.message ?? String(err));
         }
@@ -130,7 +130,7 @@ async function startBridge(
         );
 
         try {
-            await v2AutoAttach?.attachIfEnabled(config);
+            await sessionAutoAttach?.attachIfEnabled(config);
         } catch (err: any) {
             console.warn('[agent-repl] session auto-attach failed:', err?.message ?? String(err));
         }
@@ -147,7 +147,7 @@ const extraDisposables: vscode.Disposable[] = [];
 function context_subscriptions_push(d: vscode.Disposable): void { extraDisposables.push(d); }
 
 function stopBridge(): void {
-    void v2AutoAttach?.detachIfAttached();
+    void sessionAutoAttach?.detachIfAttached();
     headlessProjection?.dispose();
     headlessProjection = undefined;
     server?.dispose();

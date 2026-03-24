@@ -1,4 +1,4 @@
-"""Client and discovery helpers for the experimental v2 core daemon."""
+"""Client and discovery helpers for the core daemon."""
 from __future__ import annotations
 
 import functools
@@ -18,12 +18,12 @@ import requests
 from agent_repl.client import _bridge_error_message
 
 
-RUNTIME_FILE_PREFIX = "agent-repl-v2-core-"
+RUNTIME_FILE_PREFIX = "agent-repl-core-"
 DEFAULT_START_TIMEOUT = 5.0
 
 
-class V2Client:
-    """HTTP client for the experimental v2 core daemon."""
+class CoreClient:
+    """HTTP client for the core daemon."""
 
     def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip("/")
@@ -73,13 +73,13 @@ class V2Client:
 
         Path(runtime_dir).mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
-        env["AGENT_REPL_V2_RUNTIME_DIR"] = runtime_dir
+        env["AGENT_REPL_RUNTIME_DIR"] = runtime_dir
         subprocess.Popen(
             [
                 sys.executable,
                 "-m",
                 "agent_repl",
-                "v2",
+                "core",
                 "serve",
                 "--workspace-root",
                 workspace_root,
@@ -109,9 +109,9 @@ class V2Client:
             raise RuntimeError(
                 f"Stale daemon (PID {stale_pid}, code changed) was stopped but "
                 f"replacement failed to start within {timeout}s. "
-                f"Try: kill {stale_pid} && agent-repl v2 start"
+                f"Try: kill {stale_pid} && agent-repl core start"
             )
-        raise RuntimeError("Timed out waiting for agent-repl v2 core daemon to start")
+        raise RuntimeError("Timed out waiting for agent-repl core daemon to start")
 
     @classmethod
     def attach(
@@ -150,7 +150,7 @@ class V2Client:
         *,
         runtime_dir: str | None = None,
         allow_stale: bool = False,
-    ) -> "V2Client":
+    ) -> "CoreClient":
         runtime = os.path.realpath(runtime_dir or _runtime_dir())
         pattern = os.path.join(runtime, f"{RUNTIME_FILE_PREFIX}*.json")
         files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
@@ -158,7 +158,7 @@ class V2Client:
         cwd = os.path.realpath(os.getcwd())
         workspace_target = _resolve_workspace_hint(workspace_hint, cwd)
         current_hash = _current_install_hash() if not allow_stale else None
-        candidates: list[tuple[int, float, V2Client]] = []
+        candidates: list[tuple[int, float, CoreClient]] = []
 
         for fpath in files:
             try:
@@ -192,7 +192,7 @@ class V2Client:
             return candidates[0][2]
 
         raise RuntimeError(
-            f"No running agent-repl v2 core daemon matched '{workspace_target}'"
+            f"No running agent-repl core daemon matched '{workspace_target}'"
         )
 
     def health(self) -> dict[str, Any]:
@@ -475,7 +475,7 @@ class V2Client:
 
 
 def _runtime_dir() -> str:
-    override = os.environ.get("AGENT_REPL_V2_RUNTIME_DIR")
+    override = os.environ.get("AGENT_REPL_RUNTIME_DIR")
     if override:
         return os.path.realpath(override)
     if sys.platform == "darwin":

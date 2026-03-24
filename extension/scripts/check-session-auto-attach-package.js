@@ -30,7 +30,7 @@ function main() {
     const vsixPath = process.argv[2] ? path.resolve(process.argv[2]) : newestVsix(extensionRoot);
     const listing = unzip(['-Z1', vsixPath], extensionRoot);
     assert.match(listing, /extension\/out\/extension\.js/);
-    assert.match(listing, /extension\/out\/v2\.js/);
+    assert.match(listing, /extension\/out\/session\.js/);
     assert.match(listing, /extension\/package\.json/);
 
     const manifestText = unzip(['-p', vsixPath, 'extension/package.json'], extensionRoot);
@@ -38,7 +38,7 @@ function main() {
     const properties = manifest?.contributes?.configuration?.properties ?? {};
     assert.ok(properties['agent-repl.sessionAutoAttach'], 'expected packaged manifest to include agent-repl.sessionAutoAttach');
     assert.ok(properties['agent-repl.cliCommand'], 'expected packaged manifest to include agent-repl.cliCommand');
-    assert.equal(properties['agent-repl.v2AutoAttach'], undefined, 'did not expect packaged manifest to expose agent-repl.v2AutoAttach');
+    assert.equal(properties['agent-repl.sessionAutoAttach'], undefined, 'did not expect packaged manifest to expose agent-repl.sessionAutoAttach');
     assert.equal(properties['agent-repl.cliPath'], undefined, 'did not expect packaged manifest to expose agent-repl.cliPath');
 
     process.stdout.write(`Verified packaged auto-attach artifact: ${vsixPath}\n`);

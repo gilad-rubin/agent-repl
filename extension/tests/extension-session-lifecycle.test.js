@@ -50,7 +50,7 @@ function loadExtensionModule() {
         dispose() {}
     }
 
-    class FakeV2AutoAttach {
+    class FakeSessionAutoAttach {
         constructor(context) {
             this.context = context;
         }
@@ -145,8 +145,8 @@ function loadExtensionModule() {
         if (request === './execution/queue') {
             return { initExecutionMonitor: () => ({ dispose() {} }) };
         }
-        if (request === './v2') {
-            return { V2AutoAttach: FakeV2AutoAttach, HeadlessNotebookProjection: FakeHeadlessNotebookProjection };
+        if (request === './session') {
+            return { SessionAutoAttach: FakeSessionAutoAttach, HeadlessNotebookProjection: FakeHeadlessNotebookProjection };
         }
         return originalLoad.call(this, request, parent, isMain);
     };

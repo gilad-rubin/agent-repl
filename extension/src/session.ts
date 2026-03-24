@@ -54,10 +54,10 @@ function configuredCliPath(config: vscode.WorkspaceConfiguration): string | unde
 }
 
 function autoAttachEnabled(config: vscode.WorkspaceConfiguration): boolean {
-    return config.get<boolean>('sessionAutoAttach', config.get<boolean>('v2AutoAttach', true));
+    return config.get<boolean>('sessionAutoAttach', config.get<boolean>('sessionAutoAttach', true));
 }
 
-export function v2CliPlans(workspaceRoot: string, config: vscode.WorkspaceConfiguration): CliPlan[] {
+export function coreCliPlans(workspaceRoot: string, config: vscode.WorkspaceConfiguration): CliPlan[] {
     const plans: CliPlan[] = [];
     const seen = new Set<string>();
     const push = (command: string, args: string[]) => {
@@ -86,7 +86,7 @@ export function v2CliPlans(workspaceRoot: string, config: vscode.WorkspaceConfig
     return plans;
 }
 
-export class V2AutoAttach implements vscode.Disposable {
+export class SessionAutoAttach implements vscode.Disposable {
     private heartbeat: NodeJS.Timeout | undefined;
     private session: SessionRef | undefined;
 
@@ -106,7 +106,7 @@ export class V2AutoAttach implements vscode.Disposable {
         const result = await this.runCli(
             workspaceRoot,
             [
-                'v2', 'attach',
+                'core', 'attach',
                 '--workspace-root', workspaceRoot,
                 '--actor', 'human',
                 '--client-type', 'vscode',
@@ -136,7 +136,7 @@ export class V2AutoAttach implements vscode.Disposable {
         this.session = undefined;
         try {
             await this.runCli(current.workspaceRoot, [
-                'v2', 'session-detach',
+                'core', 'session-detach',
                 '--workspace-root', current.workspaceRoot,
                 '--session-id', current.sessionId,
             ]);
@@ -169,7 +169,7 @@ export class V2AutoAttach implements vscode.Disposable {
         }
         try {
             await this.runCli(this.session.workspaceRoot, [
-                'v2', 'session-touch',
+                'core', 'session-touch',
                 '--workspace-root', this.session.workspaceRoot,
                 '--session-id', this.session.sessionId,
             ]);
@@ -181,7 +181,7 @@ export class V2AutoAttach implements vscode.Disposable {
     private async runCli(workspaceRoot: string, args: string[]): Promise<any> {
         let lastError: Error | undefined;
         const diagnostics: string[] = [];
-        for (const plan of v2CliPlans(workspaceRoot, vscode.workspace.getConfiguration('agent-repl'))) {
+        for (const plan of coreCliPlans(workspaceRoot, vscode.workspace.getConfiguration('agent-repl'))) {
             try {
                 const result = await execFile(plan.command, [...plan.args, ...args], {
                     cwd: plan.cwd,
@@ -356,7 +356,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         this.attaching.add(key);
         try {
             const state = await runCliJson<NotebookRuntimeState>(workspaceRoot, config, [
-                'v2', 'notebook-runtime',
+                'core', 'notebook-runtime',
                 '--workspace-root', workspaceRoot,
                 notebook.uri.fsPath,
             ]);
@@ -388,7 +388,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         }
         const config = vscode.workspace.getConfiguration('agent-repl');
         const state = await runCliJson<NotebookProjectionState>(workspaceRoot, config, [
-            'v2', 'notebook-projection',
+            'core', 'notebook-projection',
             '--workspace-root', workspaceRoot,
             notebook.uri.fsPath,
         ]);
@@ -424,7 +424,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             execution.start(Date.now());
             try {
                 const result = await runCliJson<VisibleCellExecutionResult>(workspaceRoot, config, [
-                    'v2', 'execute-visible-cell',
+                    'core', 'execute-visible-cell',
                     '--workspace-root', workspaceRoot,
                     notebook.uri.fsPath,
                     '--cell-index', String(cell.index),
@@ -470,7 +470,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         await fs.promises.writeFile(tempFile, JSON.stringify(projection), 'utf8');
         try {
             await runCliJson<ProjectVisibleNotebookResult>(workspaceRoot, config, [
-                'v2', 'project-visible-notebook',
+                'core', 'project-visible-notebook',
                 '--workspace-root', workspaceRoot,
                 notebook.uri.fsPath,
                 '--cells-file', tempFile,
@@ -588,7 +588,7 @@ function hasErrorOutput(outputs: Array<Record<string, any>>): boolean {
 async function runCliJson<T>(workspaceRoot: string, config: vscode.WorkspaceConfiguration, args: string[]): Promise<T> {
     let lastError: Error | undefined;
     const diagnostics: string[] = [];
-    for (const plan of v2CliPlans(workspaceRoot, config)) {
+    for (const plan of coreCliPlans(workspaceRoot, config)) {
         try {
             const result = await execFile(plan.command, [...plan.args, ...args], {
                 cwd: plan.cwd,
@@ -612,5 +612,5 @@ function sessionStorageKey(workspaceRoot: string): string {
 }
 
 function legacySessionStorageKey(workspaceRoot: string): string {
-    return `agent-repl.v2.session:${workspaceRoot}`;
+    return `agent-repl.session:${workspaceRoot}`;
 }

@@ -1,4 +1,4 @@
-"""Minimal workspace-scoped HTTP daemon for the experimental v2 core."""
+"""Minimal workspace-scoped HTTP daemon for the core daemon."""
 from __future__ import annotations
 
 import hashlib
@@ -23,10 +23,10 @@ from jupyter_client.kernelspec import KernelSpec
 from agent_repl.client import BridgeClient
 
 
-V2_VERSION = "0.1.0"
+CORE_VERSION = "0.1.0"
 SESSION_STALE_AFTER_SECONDS = 60.0
 STATE_DIRNAME = ".agent-repl"
-STATE_FILENAME = "v2-core-state.json"
+STATE_FILENAME = "core-state.json"
 
 
 @dataclass
@@ -185,7 +185,7 @@ class CoreState:
     pid: int
     started_at: float
     state_file: str | None = None
-    version: str = V2_VERSION
+    version: str = CORE_VERSION
     documents: int = 0
     sessions: int = 0
     runs: int = 0
@@ -213,7 +213,7 @@ class CoreState:
     def health_payload(self) -> dict[str, Any]:
         return {
             "status": "ok",
-            "mode": "v2",
+            "mode": "core",
             "workspace_root": self.workspace_root,
             "pid": self.pid,
             "started_at": self.started_at,
@@ -1510,7 +1510,7 @@ def serve_forever(
 
     server = ThreadingHTTPServer(("127.0.0.1", port), _handler_factory(state))
     actual_port = server.server_address[1]
-    runtime_file = os.path.join(runtime_dir, f"agent-repl-v2-core-{state.pid}.json")
+    runtime_file = os.path.join(runtime_dir, f"agent-repl-core-{state.pid}.json")
     state.runtime_file = runtime_file
     Path(runtime_file).write_text(json.dumps({
         "pid": state.pid,
@@ -2150,7 +2150,7 @@ def _load_or_create_state(
         pid=pid,
         started_at=started_at,
         state_file=state_file,
-        version=str(payload.get("version") or V2_VERSION),
+        version=str(payload.get("version") or CORE_VERSION),
         session_records={
             record["session_id"]: SessionRecord(**record)
             for record in payload.get("sessions", [])

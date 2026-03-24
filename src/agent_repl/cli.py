@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from agent_repl.client import BridgeClient
-from agent_repl.v2.client import DEFAULT_START_TIMEOUT, V2Client
-from agent_repl.v2.server import serve_forever
+from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
+from agent_repl.core.server import serve_forever
 
 
 def _out(data: Any, pretty: bool = False) -> None:
@@ -31,36 +31,36 @@ def _client(workspace_hint: str | None = None) -> BridgeClient:
     return BridgeClient.discover(workspace_hint=workspace_hint)
 
 
-def _v2_client(workspace_hint: str | None = None, runtime_dir: str | None = None) -> V2Client:
-    """Get a fresh v2 client, ensuring the daemon is up to date."""
+def _core_client(workspace_hint: str | None = None, runtime_dir: str | None = None) -> CoreClient:
+    """Get a fresh core client, ensuring the daemon is up to date."""
     workspace_root = os.path.realpath(workspace_hint or os.getcwd())
-    result = V2Client.start(workspace_root, runtime_dir=runtime_dir)
+    result = CoreClient.start(workspace_root, runtime_dir=runtime_dir)
     if result.get("stale_restart"):
         print(
             f"Restarted stale daemon (PID {result.get('stale_pid')}, code updated)",
             file=sys.stderr,
         )
-    return V2Client.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir)
+    return CoreClient.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir)
 
 
-def _v2_client_raw(workspace_hint: str | None = None, runtime_dir: str | None = None) -> V2Client:
-    """Bare discover without freshness check — only for v2 stop/status diagnostics."""
-    return V2Client.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir, allow_stale=True)
+def _core_client_raw(workspace_hint: str | None = None, runtime_dir: str | None = None) -> CoreClient:
+    """Bare discover without freshness check — only for core stop/status diagnostics."""
+    return CoreClient.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir, allow_stale=True)
 
 
 def _workspace_root() -> str:
     return os.path.realpath(os.getcwd())
 
 
-def _notebook_client(path: str) -> V2Client | BridgeClient:
+def _notebook_client(path: str) -> CoreClient | BridgeClient:
     workspace_root = _workspace_root()
-    result = V2Client.start(workspace_root)
+    result = CoreClient.start(workspace_root)
     if result.get("stale_restart"):
         print(
             f"Restarted stale daemon (PID {result.get('stale_pid')}, code updated)",
             file=sys.stderr,
         )
-    return V2Client.discover(workspace_hint=path)
+    return CoreClient.discover(workspace_hint=path)
 
 
 # ------------------------------------------------------------------
@@ -250,7 +250,7 @@ def cmd_select_kernel(args: argparse.Namespace) -> int:
     kernel_id = getattr(args, "kernel_id", None)
     extension = getattr(args, "extension", None)
     interactive = getattr(args, "interactive", False)
-    # Route through v2 runtime for headless kernel selection
+    # Route through core runtime for headless kernel selection
     if not interactive:
         client = _notebook_client(args.path)
         if hasattr(client, "notebook_select_kernel"):
@@ -296,12 +296,12 @@ def cmd_respond(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_v2(args: argparse.Namespace) -> int:
+def cmd_core(args: argparse.Namespace) -> int:
     workspace_root = os.path.realpath(getattr(args, "workspace_root", None) or os.getcwd())
     runtime_dir = getattr(args, "runtime_dir", None)
 
-    if args.v2_command == "start":
-        result = V2Client.start(
+    if args.core_command == "start":
+        result = CoreClient.start(
             workspace_root,
             timeout=getattr(args, "timeout", DEFAULT_START_TIMEOUT),
             runtime_dir=runtime_dir,
@@ -309,8 +309,8 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "attach":
-        result = V2Client.attach(
+    if args.core_command == "attach":
+        result = CoreClient.attach(
             workspace_root,
             actor=args.actor,
             client=args.client_type,
@@ -323,23 +323,23 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "status":
-        result = _v2_client_raw(workspace_root, runtime_dir=runtime_dir).status()
+    if args.core_command == "status":
+        result = _core_client_raw(workspace_root, runtime_dir=runtime_dir).status()
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "stop":
-        result = _v2_client_raw(workspace_root, runtime_dir=runtime_dir).shutdown()
+    if args.core_command == "stop":
+        result = _core_client_raw(workspace_root, runtime_dir=runtime_dir).shutdown()
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "sessions":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_sessions()
+    if args.core_command == "sessions":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).list_sessions()
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "session-start":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).start_session(
+    if args.core_command == "session-start":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).start_session(
             actor=args.actor,
             client=args.client_type,
             label=getattr(args, "label", None),
@@ -349,61 +349,61 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "session-touch":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).touch_session(args.session_id)
+    if args.core_command == "session-touch":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).touch_session(args.session_id)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "session-detach":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).detach_session(args.session_id)
+    if args.core_command == "session-detach":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).detach_session(args.session_id)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "session-end":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).end_session(args.session_id)
+    if args.core_command == "session-end":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).end_session(args.session_id)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "documents":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_documents()
+    if args.core_command == "documents":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).list_documents()
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "document-open":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).open_document(args.path)
+    if args.core_command == "document-open":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).open_document(args.path)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "document-refresh":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).refresh_document(args.document_id)
+    if args.core_command == "document-refresh":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).refresh_document(args.document_id)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "document-rebind":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).rebind_document(args.document_id)
+    if args.core_command == "document-rebind":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).rebind_document(args.document_id)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "notebook-runtime":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).notebook_runtime(args.path)
+    if args.core_command == "notebook-runtime":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_runtime(args.path)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "notebook-projection":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).notebook_projection(args.path)
+    if args.core_command == "notebook-projection":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_projection(args.path)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "project-visible-notebook":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).notebook_project_visible(
+    if args.core_command == "project-visible-notebook":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_project_visible(
             args.path,
             cells=_read_json_payload(args, field_name="cells"),
         )
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "execute-visible-cell":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).notebook_execute_visible_cell(
+    if args.core_command == "execute-visible-cell":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_execute_visible_cell(
             args.path,
             cell_index=args.cell_index,
             source=_read_source(args),
@@ -411,13 +411,13 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "branches":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_branches()
+    if args.core_command == "branches":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).list_branches()
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "branch-start":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).start_branch(
+    if args.core_command == "branch-start":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).start_branch(
             document_id=args.document_id,
             owner_session_id=getattr(args, "owner_session_id", None),
             parent_branch_id=getattr(args, "parent_branch_id", None),
@@ -428,21 +428,21 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "branch-finish":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).finish_branch(
+    if args.core_command == "branch-finish":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).finish_branch(
             args.branch_id,
             status=args.status_value,
         )
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "runtimes":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_runtimes()
+    if args.core_command == "runtimes":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).list_runtimes()
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "runtime-start":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).start_runtime(
+    if args.core_command == "runtime-start":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).start_runtime(
             mode=args.mode,
             label=getattr(args, "label", None),
             runtime_id=getattr(args, "runtime_id", None),
@@ -451,18 +451,18 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "runtime-stop":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).stop_runtime(args.runtime_id)
+    if args.core_command == "runtime-stop":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).stop_runtime(args.runtime_id)
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "runs":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).list_runs()
+    if args.core_command == "runs":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).list_runs()
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "run-start":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).start_run(
+    if args.core_command == "run-start":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).start_run(
             runtime_id=args.runtime_id,
             target_type=args.target_type,
             target_ref=args.target_ref,
@@ -472,19 +472,19 @@ def cmd_v2(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "run-finish":
-        result = _v2_client(workspace_root, runtime_dir=runtime_dir).finish_run(
+    if args.core_command == "run-finish":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).finish_run(
             args.run_id,
             status=args.status_value,
         )
         _out(result, args.pretty)
         return 0
 
-    if args.v2_command == "serve":
+    if args.core_command == "serve":
         serve_forever(workspace_root, runtime_dir=args.runtime_dir)
         return 0
 
-    raise RuntimeError("Unknown v2 command")
+    raise RuntimeError("Unknown core command")
 
 
 # ------------------------------------------------------------------
@@ -629,16 +629,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-s", "--source")
     p.add_argument("--source-file")
 
-    # v2
-    p = sub.add_parser("v2", help=argparse.SUPPRESS, description="Internal core daemon diagnostics")
-    v2sub = p.add_subparsers(dest="v2_command")
+    # core
+    p = sub.add_parser("core", help=argparse.SUPPRESS, description="Internal core daemon diagnostics")
+    coresub = p.add_subparsers(dest="core_command")
 
-    vp = v2sub.add_parser("start", help="Start the experimental v2 core daemon for this workspace")
+    vp = coresub.add_parser("start", help="Start the core daemon for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to bind the daemon to (default: cwd)")
     vp.add_argument("--timeout", type=float, default=DEFAULT_START_TIMEOUT, help="Seconds to wait for the daemon to become reachable")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("attach", help="Ensure the v2 daemon is running and attach or resume a client session")
+    vp = coresub.add_parser("attach", help="Ensure the core daemon is running and attach or resume a client session")
     vp.add_argument("--workspace-root", help="Workspace root to bind the daemon to (default: cwd)")
     vp.add_argument("--actor", required=True, choices=["human", "agent", "system"])
     vp.add_argument("--client-type", required=True, choices=["cli", "vscode", "browser", "worker"])
@@ -648,19 +648,19 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--timeout", type=float, default=DEFAULT_START_TIMEOUT, help="Seconds to wait for the daemon to become reachable")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("status", help="Show v2 core daemon status for this workspace")
+    vp = coresub.add_parser("status", help="Show core daemon status for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("stop", help="Stop the v2 core daemon for this workspace")
+    vp = coresub.add_parser("stop", help="Stop the core daemon for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to stop (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("sessions", help="List active v2 sessions for this workspace")
+    vp = coresub.add_parser("sessions", help="List active sessions for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("session-start", help="Start or resume a v2 session for this workspace")
+    vp = coresub.add_parser("session-start", help="Start or resume a core session for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--actor", required=True, choices=["human", "agent", "system"])
     vp.add_argument("--client-type", required=True, choices=["cli", "vscode", "browser", "worker"])
@@ -669,58 +669,58 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--session-id")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("session-touch", help="Refresh liveness for an attached v2 session")
+    vp = coresub.add_parser("session-touch", help="Refresh liveness for an attached session")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--session-id", required=True)
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("session-detach", help="Detach a v2 session without deleting its continuity record")
+    vp = coresub.add_parser("session-detach", help="Detach a core session without deleting its continuity record")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--session-id", required=True)
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("session-end", help="End a v2 session for this workspace")
+    vp = coresub.add_parser("session-end", help="End a core session for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--session-id", required=True)
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("documents", help="List v2 documents registered in this workspace")
+    vp = coresub.add_parser("documents", help="List documents registered in this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("document-open", help="Register a canonical v2 document for this workspace")
+    vp = coresub.add_parser("document-open", help="Register a canonical document for this workspace")
     vp.add_argument("path")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("document-refresh", help="Refresh the observed file state for a registered v2 document")
+    vp = coresub.add_parser("document-refresh", help="Refresh the observed file state for a registered document")
     vp.add_argument("--document-id", required=True)
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("document-rebind", help="Explicitly accept the current file snapshot as the canonical bound state")
+    vp = coresub.add_parser("document-rebind", help="Explicitly accept the current file snapshot as the canonical bound state")
     vp.add_argument("--document-id", required=True)
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("notebook-runtime", help="Inspect whether a notebook currently has an active headless runtime")
+    vp = coresub.add_parser("notebook-runtime", help="Inspect whether a notebook currently has an active headless runtime")
     vp.add_argument("path")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("notebook-projection", help="Fetch the runtime-owned snapshot for an actively projected headless notebook")
+    vp = coresub.add_parser("notebook-projection", help="Fetch the runtime-owned snapshot for an actively projected headless notebook")
     vp.add_argument("path")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("project-visible-notebook", help=argparse.SUPPRESS)
+    vp = coresub.add_parser("project-visible-notebook", help=argparse.SUPPRESS)
     vp.add_argument("path")
     vp.add_argument("--cells-json")
     vp.add_argument("--cells-file")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("execute-visible-cell", help="Execute the current visible source for a notebook cell against the bound headless runtime")
+    vp = coresub.add_parser("execute-visible-cell", help="Execute the current visible source for a notebook cell against the bound headless runtime")
     vp.add_argument("path")
     vp.add_argument("--cell-index", type=int, required=True)
     vp.add_argument("-s", "--source")
@@ -728,11 +728,11 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("branches", help="List v2 collaboration branches for this workspace")
+    vp = coresub.add_parser("branches", help="List collaboration branches for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("branch-start", help="Create a v2 collaboration branch for a document")
+    vp = coresub.add_parser("branch-start", help="Create a core collaboration branch for a document")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--document-id", required=True)
     vp.add_argument("--owner-session-id")
@@ -742,17 +742,17 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--branch-id")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("branch-finish", help="Move a collaboration branch to a terminal review outcome")
+    vp = coresub.add_parser("branch-finish", help="Move a collaboration branch to a terminal review outcome")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--branch-id", required=True)
     vp.add_argument("--status-value", required=True, choices=["merged", "rejected", "abandoned"])
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("runtimes", help="List v2 runtimes registered in this workspace")
+    vp = coresub.add_parser("runtimes", help="List runtimes registered in this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("runtime-start", help="Register or resume a v2 runtime in this workspace")
+    vp = coresub.add_parser("runtime-start", help="Register or resume a core runtime in this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--mode", required=True, choices=["interactive", "shared", "headless", "pinned", "ephemeral"])
     vp.add_argument("--label")
@@ -760,16 +760,16 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--runtime-id")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("runtime-stop", help="Mark a v2 runtime as stopped")
+    vp = coresub.add_parser("runtime-stop", help="Mark a core runtime as stopped")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-id", required=True)
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("runs", help="List v2 runs for this workspace")
+    vp = coresub.add_parser("runs", help="List runs for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("run-start", help="Register a running v2 run")
+    vp = coresub.add_parser("run-start", help="Register a running run")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-id", required=True)
     vp.add_argument("--target-type", required=True, choices=["document", "node", "branch"])
@@ -778,13 +778,13 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--run-id")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("run-finish", help="Finish a v2 run with a terminal status")
+    vp = coresub.add_parser("run-finish", help="Finish a core run with a terminal status")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--run-id", required=True)
     vp.add_argument("--status-value", required=True, choices=["completed", "failed", "interrupted"])
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
-    vp = v2sub.add_parser("serve", help=argparse.SUPPRESS)
+    vp = coresub.add_parser("serve", help=argparse.SUPPRESS)
     vp.add_argument("--workspace-root", required=True)
     vp.add_argument("--runtime-dir", required=True)
 
@@ -805,7 +805,7 @@ def build_parser() -> argparse.ArgumentParser:
         "respond",
     ]
     sub.metavar = "{" + ",".join(public_commands) + "}"
-    sub._choices_actions = [action for action in sub._choices_actions if action.dest != "v2"]
+    sub._choices_actions = [action for action in sub._choices_actions if action.dest != "core"]
 
     return parser
 
@@ -844,7 +844,7 @@ def main(argv: list[str] | None = None) -> int:
         "select-kernel": cmd_select_kernel,
         "prompts": cmd_prompts,
         "respond": cmd_respond,
-        "v2": cmd_v2,
+        "core": cmd_core,
     }
 
     handler = handlers.get(args.command)

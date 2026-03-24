@@ -4,8 +4,8 @@ const Module = require('node:module');
 const path = require('node:path');
 const fs = require('node:fs');
 
-function loadV2Module(workspaceFolders = [], options = {}) {
-    const modulePath = path.resolve(__dirname, '../out/v2.js');
+function loadSessionModule(workspaceFolders = [], options = {}) {
+    const modulePath = path.resolve(__dirname, '../out/session.js');
     const originalLoad = Module._load;
     const execCalls = [];
     const commandCalls = [];
@@ -196,13 +196,13 @@ function loadV2Module(workspaceFolders = [], options = {}) {
     }
 }
 
-test('v2CliPlans prefers uv run when a pyproject exists in the workspace root', () => {
+test('coreCliPlans prefers uv run when a pyproject exists in the workspace root', () => {
     const originalExistsSync = fs.existsSync;
     fs.existsSync = (target) => target === '/workspace/pyproject.toml';
 
     try {
-        const { module: { v2CliPlans } } = loadV2Module();
-        const plans = v2CliPlans('/workspace', { get: () => undefined });
+        const { module: { coreCliPlans } } = loadSessionModule();
+        const plans = coreCliPlans('/workspace', { get: () => undefined });
         assert.deepEqual(plans[0], { command: 'uv', args: ['run', 'agent-repl'], cwd: '/workspace' });
         assert.deepEqual(plans[1], { command: 'agent-repl', args: [], cwd: '/workspace' });
     } finally {
@@ -210,7 +210,7 @@ test('v2CliPlans prefers uv run when a pyproject exists in the workspace root', 
     }
 });
 
-test('v2CliPlans prefers configured and workspace-local launchers before PATH fallbacks', () => {
+test('coreCliPlans prefers configured and workspace-local launchers before PATH fallbacks', () => {
     const originalExistsSync = fs.existsSync;
     fs.existsSync = (target) => (
         target === '/workspace/.venv/bin/agent-repl' ||
@@ -218,8 +218,8 @@ test('v2CliPlans prefers configured and workspace-local launchers before PATH fa
     );
 
     try {
-        const { module: { v2CliPlans } } = loadV2Module();
-        const plans = v2CliPlans('/workspace', { get: () => '/custom/agent-repl' });
+        const { module: { coreCliPlans } } = loadSessionModule();
+        const plans = coreCliPlans('/workspace', { get: () => '/custom/agent-repl' });
         assert.deepEqual(plans[0], { command: '/custom/agent-repl', args: [], cwd: '/workspace' });
         assert.deepEqual(plans[1], { command: '/workspace/.venv/bin/agent-repl', args: [], cwd: '/workspace' });
         assert.deepEqual(plans[2], { command: 'uv', args: ['run', 'agent-repl'], cwd: '/workspace' });
@@ -230,7 +230,7 @@ test('v2CliPlans prefers configured and workspace-local launchers before PATH fa
 });
 
 test('primaryWorkspaceRoot returns the first workspace folder path', () => {
-    const { module: { primaryWorkspaceRoot } } = loadV2Module([{ uri: { fsPath: '/workspace' } }]);
+    const { module: { primaryWorkspaceRoot } } = loadSessionModule([{ uri: { fsPath: '/workspace' } }]);
     assert.equal(primaryWorkspaceRoot(), '/workspace');
 });
 
@@ -241,7 +241,7 @@ test('HeadlessNotebookProjection selects the shared runtime controller when a no
         module: { HeadlessNotebookProjection, PROJECTION_CONTROLLER_ID },
         commandCalls,
         affinityCalls,
-    } = loadV2Module(
+    } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
         { execResponses: { 'notebook-runtime': { status: 'ok', path: 'notebooks/demo.ipynb', active: true, mode: 'headless', runtime: { python_path: '/opt/miniconda3/bin/python3' } } } },
     );
@@ -286,7 +286,7 @@ test('HeadlessNotebookProjection syncs agent-created cells and outputs into an a
         module: { HeadlessNotebookProjection },
         docsByPath,
         notebookEdits,
-    } = loadV2Module(
+    } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
         {
             execResponses: {
@@ -362,7 +362,7 @@ test('HeadlessNotebookProjection shows agent execution as running and resolves i
         module: { HeadlessNotebookProjection },
         docsByPath,
         executions,
-    } = loadV2Module(
+    } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
         {
             execResponses: {
@@ -445,7 +445,7 @@ test('HeadlessNotebookProjection executes the visible cell source against the sh
         execCalls,
         executions,
         getController,
-    } = loadV2Module(
+    } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
         {
             execResponses: {

@@ -45,7 +45,7 @@ async function waitForSession(workspaceRoot, runtimeDir, predicate, timeoutMs) {
     while ((Date.now() - started) < timeoutMs) {
         lastPayload = await runJson('uv', [
             'run', 'agent-repl', '--pretty',
-            'v2', 'sessions',
+            'core', 'sessions',
             '--workspace-root', workspaceRoot,
             '--runtime-dir', runtimeDir,
         ], { cwd: REPO_ROOT });
@@ -91,7 +91,7 @@ async function main() {
         throw new Error(`Expected workspace CLI at ${CLI_PATH}`);
     }
 
-    const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'agent-repl-v2-installed-'));
+    const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'agent-repl-core-installed-'));
     const runtimeDir = path.join(tempRoot, 'runtime');
     const workspaceRoot = path.join(tempRoot, 'workspace');
     const userDataDir = path.join(tempRoot, 'user-data');
@@ -121,7 +121,7 @@ async function main() {
 
     await runJson('uv', [
         'run', 'agent-repl', '--pretty',
-        'v2', 'start',
+        'core', 'start',
         '--workspace-root', workspaceRoot,
         '--runtime-dir', runtimeDir,
     ], { cwd: REPO_ROOT });
@@ -193,7 +193,7 @@ async function main() {
         try {
             await runJson('uv', [
                 'run', 'agent-repl', '--pretty',
-                'v2', 'stop',
+                'core', 'stop',
                 '--workspace-root', workspaceRoot,
                 '--runtime-dir', runtimeDir,
             ], { cwd: REPO_ROOT, timeout: 10_000 });

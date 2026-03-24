@@ -41,7 +41,7 @@ API changes require updating both sides together:
 
 - `routes.ts` is still the extension API surface for editor-backed features and compatibility paths
 - `execution/queue.ts` is the most complex module — read fully before modifying
-- The extension now also acts as a projection client for headless runtimes through `v2.ts`
+- The extension now also acts as a projection client for headless runtimes through `session.ts`
 - Execution paths must stay background-safe; if a path steals focus or surfaces UI, treat that as a product bug
 - `executingCells` map tracks running cells via `onDidChangeNotebookDocument`; `reconcileKernelState()` checks real kernel status before declaring busy
 - `POST /api/reload` clears `require.cache` for all modules under `out/` except `extension.js` and `server.js`
@@ -76,7 +76,7 @@ When a multi-method attach or selection attempt fails, return ALL diagnostics so
 
 ## CLI Notes
 
-- `client.py`: extension bridge discovery + HTTP calls. `v2/client.py`: shared runtime client. `cli.py`: public command surface
+- `client.py`: extension bridge discovery + HTTP calls. `core/client.py`: shared runtime client. `cli.py`: public command surface
 - Source input pattern (`-s`, `--source-file`, stdin) is shared across `ix`, `respond`, `edit replace-source`, `edit insert` — keep consistent
 - Cell targeting (`--cell-id` or `-i INDEX`) is shared across cell-specific commands — keep consistent
 
@@ -88,7 +88,7 @@ When a multi-method attach or selection attempt fails, return ALL diagnostics so
 
 Both sides must be updated:
 1. Public CLI parser/handler in `src/agent_repl/cli.py`
-2. Shared-runtime method in `src/agent_repl/v2/client.py` and `src/agent_repl/v2/server.py` when the command is core-backed
+2. Shared-runtime method in `src/agent_repl/core/client.py` and `src/agent_repl/core/server.py` when the command is core-backed
 3. Extension route/client updates in `extension/src/routes.ts` and `src/agent_repl/client.py` when the command is editor-backed
 4. Test in `tests/test_agent_repl.py` and extension tests when relevant
 5. Docs: `README.md`, `docs/commands.md`, `SKILL.md`

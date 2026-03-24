@@ -18,8 +18,8 @@ import requests
 
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
-from agent_repl.v2.client import DEFAULT_START_TIMEOUT, V2Client
-from agent_repl.v2.server import CoreState, _handler_factory, _load_or_create_state
+from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
+from agent_repl.core.server import CoreState, _handler_factory, _load_or_create_state
 
 
 def _python_with_ipykernel() -> str:
@@ -130,8 +130,8 @@ class TestBridgeDiscovery(unittest.TestCase):
                 BridgeClient.discover()
 
 
-class TestV2Discovery(unittest.TestCase):
-    """V2Client.discover() scans runtime dir for workspace daemons."""
+class TestCoreDiscovery(unittest.TestCase):
+    """CoreClient.discover() scans runtime dir for workspace daemons."""
 
     def test_discover_finds_matching_workspace(self):
         info = json.dumps({
@@ -142,15 +142,15 @@ class TestV2Discovery(unittest.TestCase):
             "code_hash": "current",
         })
         with (
-            mock.patch("agent_repl.v2.client.glob.glob", return_value=["/tmp/agent-repl-v2-core-1.json"]),
-            mock.patch("agent_repl.v2.client.os.path.getmtime", return_value=1.0),
-            mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace"),
-            mock.patch("agent_repl.v2.client.Path.read_text", return_value=info),
-            mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.v2.client._current_install_hash", return_value="current"),
-            mock.patch.object(V2Client, "health", return_value={"status": "ok"}),
+            mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
+            mock.patch("agent_repl.core.client.os.path.getmtime", return_value=1.0),
+            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
+            mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
+            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
+            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
+            mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
         ):
-            client = V2Client.discover()
+            client = CoreClient.discover()
         self.assertEqual(client.base_url, "http://127.0.0.1:23456")
         self.assertEqual(client.token, "tok")
 
@@ -163,15 +163,15 @@ class TestV2Discovery(unittest.TestCase):
             "code_hash": "old-hash",
         })
         with (
-            mock.patch("agent_repl.v2.client.glob.glob", return_value=["/tmp/agent-repl-v2-core-1.json"]),
-            mock.patch("agent_repl.v2.client.os.path.getmtime", return_value=1.0),
-            mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace"),
-            mock.patch("agent_repl.v2.client.Path.read_text", return_value=info),
-            mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.v2.client._current_install_hash", return_value="new-hash"),
+            mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
+            mock.patch("agent_repl.core.client.os.path.getmtime", return_value=1.0),
+            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
+            mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
+            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
+            mock.patch("agent_repl.core.client._current_install_hash", return_value="new-hash"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "No running agent-repl v2 core daemon"):
-                V2Client.discover()
+            with self.assertRaisesRegex(RuntimeError, "No running agent-repl core daemon"):
+                CoreClient.discover()
 
     def test_discover_allows_stale_when_requested(self):
         info = json.dumps({
@@ -182,14 +182,14 @@ class TestV2Discovery(unittest.TestCase):
             "code_hash": "old-hash",
         })
         with (
-            mock.patch("agent_repl.v2.client.glob.glob", return_value=["/tmp/agent-repl-v2-core-1.json"]),
-            mock.patch("agent_repl.v2.client.os.path.getmtime", return_value=1.0),
-            mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace"),
-            mock.patch("agent_repl.v2.client.Path.read_text", return_value=info),
-            mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
-            mock.patch.object(V2Client, "health", return_value={"status": "ok"}),
+            mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
+            mock.patch("agent_repl.core.client.os.path.getmtime", return_value=1.0),
+            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
+            mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
+            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
+            mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
         ):
-            client = V2Client.discover(allow_stale=True)
+            client = CoreClient.discover(allow_stale=True)
         self.assertEqual(client.base_url, "http://127.0.0.1:23456")
 
     def test_discover_raises_when_no_workspace_matches(self):
@@ -201,15 +201,15 @@ class TestV2Discovery(unittest.TestCase):
             "code_hash": "current",
         })
         with (
-            mock.patch("agent_repl.v2.client.glob.glob", return_value=["/tmp/agent-repl-v2-core-1.json"]),
-            mock.patch("agent_repl.v2.client.os.path.getmtime", return_value=1.0),
-            mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace"),
-            mock.patch("agent_repl.v2.client.Path.read_text", return_value=info),
-            mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.v2.client._current_install_hash", return_value="current"),
+            mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
+            mock.patch("agent_repl.core.client.os.path.getmtime", return_value=1.0),
+            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
+            mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
+            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
+            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "No running agent-repl v2 core daemon matched '/workspace'"):
-                V2Client.discover()
+            with self.assertRaisesRegex(RuntimeError, "No running agent-repl core daemon matched '/workspace'"):
+                CoreClient.discover()
 
     def test_discover_prefers_most_specific_workspace_match(self):
         info_parent = json.dumps({
@@ -227,41 +227,41 @@ class TestV2Discovery(unittest.TestCase):
             "code_hash": "current",
         })
         read_map = {
-            "/tmp/agent-repl-v2-core-parent.json": info_parent,
-            "/tmp/agent-repl-v2-core-child.json": info_child,
+            "/tmp/agent-repl-core-parent.json": info_parent,
+            "/tmp/agent-repl-core-child.json": info_child,
         }
         mtime_map = {
-            "/tmp/agent-repl-v2-core-parent.json": 20.0,
-            "/tmp/agent-repl-v2-core-child.json": 10.0,
+            "/tmp/agent-repl-core-parent.json": 20.0,
+            "/tmp/agent-repl-core-child.json": 10.0,
         }
         with (
             mock.patch(
-                "agent_repl.v2.client.glob.glob",
-                return_value=["/tmp/agent-repl-v2-core-parent.json", "/tmp/agent-repl-v2-core-child.json"],
+                "agent_repl.core.client.glob.glob",
+                return_value=["/tmp/agent-repl-core-parent.json", "/tmp/agent-repl-core-child.json"],
             ),
-            mock.patch("agent_repl.v2.client.os.path.getmtime", side_effect=lambda path: mtime_map[path]),
-            mock.patch("agent_repl.v2.client.os.getcwd", return_value="/workspace/subproject"),
-            mock.patch("agent_repl.v2.client.Path.read_text", autospec=True, side_effect=lambda self: read_map[str(self)]),
-            mock.patch("agent_repl.v2.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.v2.client._current_install_hash", return_value="current"),
-            mock.patch.object(V2Client, "health", return_value={"status": "ok"}),
+            mock.patch("agent_repl.core.client.os.path.getmtime", side_effect=lambda path: mtime_map[path]),
+            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace/subproject"),
+            mock.patch("agent_repl.core.client.Path.read_text", autospec=True, side_effect=lambda self: read_map[str(self)]),
+            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
+            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
+            mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
         ):
-            client = V2Client.discover()
+            client = CoreClient.discover()
         self.assertEqual(client.base_url, "http://127.0.0.1:34567")
         self.assertEqual(client.token, "tok-child")
 
     def test_attach_starts_or_reuses_daemon_then_session(self):
         with (
-            mock.patch.object(V2Client, "start", return_value={"status": "ok", "workspace_root": "/workspace", "already_running": True}),
-            mock.patch.object(V2Client, "discover") as mock_discover,
+            mock.patch.object(CoreClient, "start", return_value={"status": "ok", "workspace_root": "/workspace", "already_running": True}),
+            mock.patch.object(CoreClient, "discover") as mock_discover,
         ):
-            attached_client = mock.MagicMock(spec=V2Client)
+            attached_client = mock.MagicMock(spec=CoreClient)
             attached_client.start_session.return_value = {
                 "status": "ok",
                 "session": {"session_id": "sess-1", "status": "attached"},
             }
             mock_discover.return_value = attached_client
-            result = V2Client.attach(
+            result = CoreClient.attach(
                 "/workspace",
                 actor="agent",
                 client="cli",
@@ -280,19 +280,19 @@ class TestV2Discovery(unittest.TestCase):
         )
 
     def test_start_restarts_stale_daemon_when_installed_code_is_newer(self):
-        stale_client = mock.MagicMock(spec=V2Client)
+        stale_client = mock.MagicMock(spec=CoreClient)
         stale_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 1.0, "code_hash": "stale", "pid": 999}
-        fresh_client = mock.MagicMock(spec=V2Client)
+        fresh_client = mock.MagicMock(spec=CoreClient)
         fresh_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 20.0, "code_hash": "fresh"}
 
         with (
-            mock.patch.object(V2Client, "discover", side_effect=[stale_client, RuntimeError("gone"), fresh_client]),
-            mock.patch("agent_repl.v2.client._current_install_hash", return_value="fresh"),
-            mock.patch("agent_repl.v2.client.subprocess.Popen") as mock_popen,
-            mock.patch("agent_repl.v2.client.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2]),
-            mock.patch("agent_repl.v2.client.time.sleep"),
+            mock.patch.object(CoreClient, "discover", side_effect=[stale_client, RuntimeError("gone"), fresh_client]),
+            mock.patch("agent_repl.core.client._current_install_hash", return_value="fresh"),
+            mock.patch("agent_repl.core.client.subprocess.Popen") as mock_popen,
+            mock.patch("agent_repl.core.client.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2]),
+            mock.patch("agent_repl.core.client.time.sleep"),
         ):
-            result = V2Client.start("/workspace", timeout=1.0, runtime_dir="/tmp/runtime")
+            result = CoreClient.start("/workspace", timeout=1.0, runtime_dir="/tmp/runtime")
 
         stale_client.shutdown.assert_called_once()
         mock_popen.assert_called_once()
@@ -312,8 +312,8 @@ class TestPackagingMetadata(unittest.TestCase):
         self.assertTrue(any(dep.startswith("nbformat") for dep in dependencies))
 
 
-class TestV2CoreState(unittest.TestCase):
-    """Direct tests for v2 core document/file sync behavior."""
+class TestCoreState(unittest.TestCase):
+    """Direct tests for core document/file sync behavior."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -389,8 +389,8 @@ class TestV2CoreState(unittest.TestCase):
         }
 
         with (
-            mock.patch("agent_repl.v2.server._snapshot_live_document", side_effect=[live_bound, live_changed]),
-            mock.patch("agent_repl.v2.server._snapshot_file", return_value=file_snapshot),
+            mock.patch("agent_repl.core.server._snapshot_live_document", side_effect=[live_bound, live_changed]),
+            mock.patch("agent_repl.core.server._snapshot_file", return_value=file_snapshot),
         ):
             body, status = self.state.open_document("notebooks/demo.ipynb")
             self.assertEqual(status, 200)
@@ -1098,7 +1098,7 @@ class TestV2CoreState(unittest.TestCase):
             self.assertEqual(len(contents_after["cells"]), cell_count_before)
 
     def test_kernel_capable_error_message_includes_install_hint(self):
-        with mock.patch("agent_repl.v2.server.subprocess.run") as mock_run:
+        with mock.patch("agent_repl.core.server.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=1, stderr="No module named 'ipykernel'", stdout="")
             # Clear validation cache
             self.state._validated_kernel_pythons.clear()
@@ -1305,11 +1305,11 @@ class TestBridgeEndpoints(unittest.TestCase):
         self.assertEqual(self.client._session.headers["Authorization"], "token tok")
 
 
-class TestV2Endpoints(unittest.TestCase):
-    """V2Client methods call correct HTTP endpoints."""
+class TestCoreEndpoints(unittest.TestCase):
+    """CoreClient methods call correct HTTP endpoints."""
 
     def setUp(self):
-        self.client = V2Client("http://127.0.0.1:9998", "tok")
+        self.client = CoreClient("http://127.0.0.1:9998", "tok")
         self.mock_get = mock.patch.object(
             self.client._session, "get",
             return_value=mock.Mock(status_code=200, json=lambda: {"ok": True}),
@@ -1637,100 +1637,100 @@ class TestParser(unittest.TestCase):
         args = build_parser().parse_args(["select-kernel", "nb.ipynb", "--interactive"])
         self.assertTrue(args.interactive)
 
-    def test_v2_start(self):
-        args = build_parser().parse_args(["v2", "start"])
-        self.assertEqual(args.command, "v2")
-        self.assertEqual(args.v2_command, "start")
+    def test_core_start(self):
+        args = build_parser().parse_args(["core", "start"])
+        self.assertEqual(args.command, "core")
+        self.assertEqual(args.core_command, "start")
 
-    def test_v2_attach(self):
-        args = build_parser().parse_args(["v2", "attach", "--actor", "agent", "--client-type", "cli"])
-        self.assertEqual(args.v2_command, "attach")
+    def test_core_attach(self):
+        args = build_parser().parse_args(["core", "attach", "--actor", "agent", "--client-type", "cli"])
+        self.assertEqual(args.core_command, "attach")
         self.assertEqual(args.actor, "agent")
         self.assertEqual(args.client_type, "cli")
 
-    def test_v2_status(self):
-        args = build_parser().parse_args(["v2", "status", "--workspace-root", "/workspace"])
-        self.assertEqual(args.v2_command, "status")
+    def test_core_status(self):
+        args = build_parser().parse_args(["core", "status", "--workspace-root", "/workspace"])
+        self.assertEqual(args.core_command, "status")
         self.assertEqual(args.workspace_root, "/workspace")
 
-    def test_v2_stop(self):
-        args = build_parser().parse_args(["v2", "stop"])
-        self.assertEqual(args.v2_command, "stop")
+    def test_core_stop(self):
+        args = build_parser().parse_args(["core", "stop"])
+        self.assertEqual(args.core_command, "stop")
 
-    def test_v2_session_start(self):
-        args = build_parser().parse_args(["v2", "session-start", "--actor", "agent", "--client-type", "cli"])
-        self.assertEqual(args.v2_command, "session-start")
+    def test_core_session_start(self):
+        args = build_parser().parse_args(["core", "session-start", "--actor", "agent", "--client-type", "cli"])
+        self.assertEqual(args.core_command, "session-start")
         self.assertEqual(args.actor, "agent")
         self.assertEqual(args.client_type, "cli")
 
-    def test_v2_session_touch(self):
-        args = build_parser().parse_args(["v2", "session-touch", "--session-id", "sess-1"])
-        self.assertEqual(args.v2_command, "session-touch")
+    def test_core_session_touch(self):
+        args = build_parser().parse_args(["core", "session-touch", "--session-id", "sess-1"])
+        self.assertEqual(args.core_command, "session-touch")
         self.assertEqual(args.session_id, "sess-1")
 
-    def test_v2_session_detach(self):
-        args = build_parser().parse_args(["v2", "session-detach", "--session-id", "sess-1"])
-        self.assertEqual(args.v2_command, "session-detach")
+    def test_core_session_detach(self):
+        args = build_parser().parse_args(["core", "session-detach", "--session-id", "sess-1"])
+        self.assertEqual(args.core_command, "session-detach")
         self.assertEqual(args.session_id, "sess-1")
 
-    def test_v2_document_open(self):
-        args = build_parser().parse_args(["v2", "document-open", "notebooks/demo.ipynb"])
-        self.assertEqual(args.v2_command, "document-open")
+    def test_core_document_open(self):
+        args = build_parser().parse_args(["core", "document-open", "notebooks/demo.ipynb"])
+        self.assertEqual(args.core_command, "document-open")
         self.assertEqual(args.path, "notebooks/demo.ipynb")
 
-    def test_v2_document_refresh(self):
-        args = build_parser().parse_args(["v2", "document-refresh", "--document-id", "doc-1"])
-        self.assertEqual(args.v2_command, "document-refresh")
+    def test_core_document_refresh(self):
+        args = build_parser().parse_args(["core", "document-refresh", "--document-id", "doc-1"])
+        self.assertEqual(args.core_command, "document-refresh")
         self.assertEqual(args.document_id, "doc-1")
 
-    def test_v2_document_rebind(self):
-        args = build_parser().parse_args(["v2", "document-rebind", "--document-id", "doc-1"])
-        self.assertEqual(args.v2_command, "document-rebind")
+    def test_core_document_rebind(self):
+        args = build_parser().parse_args(["core", "document-rebind", "--document-id", "doc-1"])
+        self.assertEqual(args.core_command, "document-rebind")
         self.assertEqual(args.document_id, "doc-1")
 
-    def test_v2_notebook_runtime(self):
-        args = build_parser().parse_args(["v2", "notebook-runtime", "notebooks/demo.ipynb"])
-        self.assertEqual(args.v2_command, "notebook-runtime")
+    def test_core_notebook_runtime(self):
+        args = build_parser().parse_args(["core", "notebook-runtime", "notebooks/demo.ipynb"])
+        self.assertEqual(args.core_command, "notebook-runtime")
         self.assertEqual(args.path, "notebooks/demo.ipynb")
 
-    def test_v2_notebook_projection(self):
-        args = build_parser().parse_args(["v2", "notebook-projection", "notebooks/demo.ipynb"])
-        self.assertEqual(args.v2_command, "notebook-projection")
+    def test_core_notebook_projection(self):
+        args = build_parser().parse_args(["core", "notebook-projection", "notebooks/demo.ipynb"])
+        self.assertEqual(args.core_command, "notebook-projection")
         self.assertEqual(args.path, "notebooks/demo.ipynb")
 
-    def test_v2_project_visible_notebook(self):
+    def test_core_project_visible_notebook(self):
         args = build_parser().parse_args(
-            ["v2", "project-visible-notebook", "notebooks/demo.ipynb", "--cells-file", "/tmp/cells.json"]
+            ["core", "project-visible-notebook", "notebooks/demo.ipynb", "--cells-file", "/tmp/cells.json"]
         )
-        self.assertEqual(args.v2_command, "project-visible-notebook")
+        self.assertEqual(args.core_command, "project-visible-notebook")
         self.assertEqual(args.path, "notebooks/demo.ipynb")
         self.assertEqual(args.cells_file, "/tmp/cells.json")
 
-    def test_v2_execute_visible_cell(self):
-        args = build_parser().parse_args(["v2", "execute-visible-cell", "notebooks/demo.ipynb", "--cell-index", "2", "-s", "x = 1"])
-        self.assertEqual(args.v2_command, "execute-visible-cell")
+    def test_core_execute_visible_cell(self):
+        args = build_parser().parse_args(["core", "execute-visible-cell", "notebooks/demo.ipynb", "--cell-index", "2", "-s", "x = 1"])
+        self.assertEqual(args.core_command, "execute-visible-cell")
         self.assertEqual(args.path, "notebooks/demo.ipynb")
         self.assertEqual(args.cell_index, 2)
         self.assertEqual(args.source, "x = 1")
 
-    def test_v2_branch_start(self):
-        args = build_parser().parse_args(["v2", "branch-start", "--document-id", "doc-1"])
-        self.assertEqual(args.v2_command, "branch-start")
+    def test_core_branch_start(self):
+        args = build_parser().parse_args(["core", "branch-start", "--document-id", "doc-1"])
+        self.assertEqual(args.core_command, "branch-start")
         self.assertEqual(args.document_id, "doc-1")
 
-    def test_v2_branch_finish(self):
-        args = build_parser().parse_args(["v2", "branch-finish", "--branch-id", "branch-1", "--status-value", "merged"])
-        self.assertEqual(args.v2_command, "branch-finish")
+    def test_core_branch_finish(self):
+        args = build_parser().parse_args(["core", "branch-finish", "--branch-id", "branch-1", "--status-value", "merged"])
+        self.assertEqual(args.core_command, "branch-finish")
         self.assertEqual(args.branch_id, "branch-1")
 
-    def test_v2_runtime_start(self):
-        args = build_parser().parse_args(["v2", "runtime-start", "--mode", "shared"])
-        self.assertEqual(args.v2_command, "runtime-start")
+    def test_core_runtime_start(self):
+        args = build_parser().parse_args(["core", "runtime-start", "--mode", "shared"])
+        self.assertEqual(args.core_command, "runtime-start")
         self.assertEqual(args.mode, "shared")
 
-    def test_v2_run_start(self):
-        args = build_parser().parse_args(["v2", "run-start", "--runtime-id", "rt-1", "--target-type", "document", "--target-ref", "doc-1"])
-        self.assertEqual(args.v2_command, "run-start")
+    def test_core_run_start(self):
+        args = build_parser().parse_args(["core", "run-start", "--runtime-id", "rt-1", "--target-type", "document", "--target-ref", "doc-1"])
+        self.assertEqual(args.core_command, "run-start")
         self.assertEqual(args.runtime_id, "rt-1")
         self.assertEqual(args.target_type, "document")
 
@@ -1783,9 +1783,9 @@ class TestCommands(unittest.TestCase):
             setattr(client, k, mock.Mock(return_value=v))
         return client
 
-    def _mock_v2_client(self, **overrides):
-        client = mock.MagicMock(spec=V2Client)
-        client.status.return_value = {"status": "ok", "mode": "v2"}
+    def _mock_core_client(self, **overrides):
+        client = mock.MagicMock(spec=CoreClient)
+        client.status.return_value = {"status": "ok", "mode": "core"}
         client.shutdown.return_value = {"status": "ok", "stopping": True}
         client.list_sessions.return_value = {"status": "ok", "sessions": []}
         client.start_session.return_value = {"status": "ok", "session": {"session_id": "sess-1"}}
@@ -1839,7 +1839,7 @@ class TestCommands(unittest.TestCase):
         bridge = self._mock_client()
         try:
             with (
-                mock.patch("agent_repl.cli.V2Client.start", side_effect=RuntimeError("core bootstrap failed")),
+                mock.patch("agent_repl.cli.CoreClient.start", side_effect=RuntimeError("core bootstrap failed")),
                 mock.patch("agent_repl.cli._client", return_value=bridge),
             ):
                 code = main(["new", "nb.ipynb"])
@@ -1851,7 +1851,7 @@ class TestCommands(unittest.TestCase):
 
     def test_cat_prefers_core_notebook_projection(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client(notebook_contents={
+        core = self._mock_core_client(notebook_contents={
             "path": "nb.ipynb",
             "cells": [{"index": 0, "cell_id": "doc-1", "cell_type": "markdown", "source": "# hi"}],
         })
@@ -1878,7 +1878,7 @@ class TestCommands(unittest.TestCase):
 
     def test_status_prefers_core_notebook_projection(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
@@ -1902,7 +1902,7 @@ class TestCommands(unittest.TestCase):
 
     def test_ix_prefers_core_execution_surface(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
@@ -1938,7 +1938,7 @@ class TestCommands(unittest.TestCase):
 
     def test_exec_prefers_core_execution_surface(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
@@ -1985,7 +1985,7 @@ class TestCommands(unittest.TestCase):
 
     def test_new_prefers_core_notebook_projection(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
@@ -2015,7 +2015,7 @@ class TestCommands(unittest.TestCase):
 
     def test_edit_prefers_core_execution_surface(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
@@ -2036,7 +2036,7 @@ class TestCommands(unittest.TestCase):
 
     def test_run_all_prefers_core_execution_surface(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
@@ -2054,7 +2054,7 @@ class TestCommands(unittest.TestCase):
 
     def test_restart_prefers_core_execution_surface(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
@@ -2072,7 +2072,7 @@ class TestCommands(unittest.TestCase):
 
     def test_restart_run_all_prefers_core_execution_surface(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
@@ -2099,9 +2099,9 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(json.loads(out)["extension_root"], "/tmp/agent-repl")
         client.reload.assert_called_once()
 
-    def test_select_kernel_prefers_v2_route_when_available(self):
+    def test_select_kernel_prefers_core_route_when_available(self):
         bridge = self._mock_client()
-        core = self._mock_v2_client()
+        core = self._mock_core_client()
         core.notebook_select_kernel.return_value = {"status": "ok", "mode": "headless"}
         buf = StringIO()
         old = sys.stdout
@@ -2118,7 +2118,7 @@ class TestCommands(unittest.TestCase):
         core.notebook_select_kernel.assert_called_once_with("nb.ipynb", kernel_id="python3")
         bridge.select_kernel.assert_not_called()
 
-    def test_select_kernel_falls_back_to_bridge_when_no_v2(self):
+    def test_select_kernel_falls_back_to_bridge_when_no_core(self):
         client = self._mock_client()
         code, _ = self._run(["select-kernel", "nb.ipynb"], client)
         self.assertEqual(code, 0)
@@ -2153,22 +2153,22 @@ class TestCommands(unittest.TestCase):
         code, _ = self._run([], client)
         self.assertEqual(code, 1)
 
-    def test_v2_start(self):
+    def test_core_start(self):
         client = self._mock_client()
         with (
             mock.patch("agent_repl.cli._client", return_value=client),
-            mock.patch("agent_repl.cli.V2Client.start", return_value={"status": "ok", "mode": "v2", "already_running": False}),
+            mock.patch("agent_repl.cli.CoreClient.start", return_value={"status": "ok", "mode": "core", "already_running": False}),
         ):
-            code = main(["v2", "start"])
+            code = main(["core", "start"])
         self.assertEqual(code, 0)
 
-    def test_v2_attach(self):
+    def test_core_attach(self):
         client = self._mock_client()
         with (
             mock.patch("agent_repl.cli._client", return_value=client),
-            mock.patch("agent_repl.cli.V2Client.attach", return_value={"status": "ok", "attached": True, "session": {"session_id": "sess-1"}}) as mock_attach,
+            mock.patch("agent_repl.cli.CoreClient.attach", return_value={"status": "ok", "attached": True, "session": {"session_id": "sess-1"}}) as mock_attach,
         ):
-            code = main(["v2", "attach", "--actor", "agent", "--client-type", "cli", "--label", "worker"])
+            code = main(["core", "attach", "--actor", "agent", "--client-type", "cli", "--label", "worker"])
         self.assertEqual(code, 0)
         mock_attach.assert_called_once_with(
             "/Users/giladrubin/python_workspace/agent-repl",
@@ -2181,59 +2181,59 @@ class TestCommands(unittest.TestCase):
             runtime_dir=None,
         )
 
-    def test_v2_status(self):
-        client = self._mock_v2_client()
+    def test_core_status(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
             with (
                 mock.patch("agent_repl.cli._client"),
-                mock.patch("agent_repl.cli._v2_client_raw", return_value=client),
+                mock.patch("agent_repl.cli._core_client_raw", return_value=client),
             ):
-                code = main(["v2", "status"])
+                code = main(["core", "status"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.status.assert_called_once()
 
-    def test_v2_stop(self):
-        client = self._mock_v2_client()
+    def test_core_stop(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
             with (
                 mock.patch("agent_repl.cli._client"),
-                mock.patch("agent_repl.cli._v2_client_raw", return_value=client),
+                mock.patch("agent_repl.cli._core_client_raw", return_value=client),
             ):
-                code = main(["v2", "stop"])
+                code = main(["core", "stop"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.shutdown.assert_called_once()
 
-    def test_v2_sessions(self):
-        client = self._mock_v2_client()
+    def test_core_sessions(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "sessions"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "sessions"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.list_sessions.assert_called_once()
 
-    def test_v2_session_start(self):
-        client = self._mock_v2_client()
+    def test_core_session_start(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "session-start", "--actor", "agent", "--client-type", "cli", "--label", "worker"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "session-start", "--actor", "agent", "--client-type", "cli", "--label", "worker"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
@@ -2245,125 +2245,125 @@ class TestCommands(unittest.TestCase):
             session_id=None,
         )
 
-    def test_v2_session_touch(self):
-        client = self._mock_v2_client()
+    def test_core_session_touch(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "session-touch", "--session-id", "sess-1"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "session-touch", "--session-id", "sess-1"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.touch_session.assert_called_once_with("sess-1")
 
-    def test_v2_session_detach(self):
-        client = self._mock_v2_client()
+    def test_core_session_detach(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "session-detach", "--session-id", "sess-1"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "session-detach", "--session-id", "sess-1"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.detach_session.assert_called_once_with("sess-1")
 
-    def test_v2_session_end(self):
-        client = self._mock_v2_client()
+    def test_core_session_end(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "session-end", "--session-id", "sess-1"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "session-end", "--session-id", "sess-1"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.end_session.assert_called_once_with("sess-1")
 
-    def test_v2_documents(self):
-        client = self._mock_v2_client()
+    def test_core_documents(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "documents"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "documents"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.list_documents.assert_called_once()
 
-    def test_v2_document_open(self):
-        client = self._mock_v2_client()
+    def test_core_document_open(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "document-open", "notebooks/demo.ipynb"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "document-open", "notebooks/demo.ipynb"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.open_document.assert_called_once_with("notebooks/demo.ipynb")
 
-    def test_v2_document_refresh(self):
-        client = self._mock_v2_client()
+    def test_core_document_refresh(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "document-refresh", "--document-id", "doc-1"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "document-refresh", "--document-id", "doc-1"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.refresh_document.assert_called_once_with("doc-1")
 
-    def test_v2_document_rebind(self):
-        client = self._mock_v2_client()
+    def test_core_document_rebind(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "document-rebind", "--document-id", "doc-1"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "document-rebind", "--document-id", "doc-1"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.rebind_document.assert_called_once_with("doc-1")
 
-    def test_v2_notebook_runtime(self):
-        client = self._mock_v2_client()
+    def test_core_notebook_runtime(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "notebook-runtime", "notebooks/demo.ipynb"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "notebook-runtime", "notebooks/demo.ipynb"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.notebook_runtime.assert_called_once_with("notebooks/demo.ipynb")
 
-    def test_v2_notebook_projection(self):
-        client = self._mock_v2_client()
+    def test_core_notebook_projection(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "notebook-projection", "notebooks/demo.ipynb"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "notebook-projection", "notebooks/demo.ipynb"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.notebook_projection.assert_called_once_with("notebooks/demo.ipynb")
 
-    def test_v2_project_visible_notebook(self):
-        client = self._mock_v2_client()
+    def test_core_project_visible_notebook(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         with tempfile.TemporaryDirectory() as tmp:
@@ -2371,8 +2371,8 @@ class TestCommands(unittest.TestCase):
             cells_file.write_text(json.dumps([{"cell_type": "code", "source": "x = 1"}]))
             sys.stdout = buf
             try:
-                with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                    code = main(["v2", "project-visible-notebook", "notebooks/demo.ipynb", "--cells-file", str(cells_file)])
+                with mock.patch("agent_repl.cli._core_client", return_value=client):
+                    code = main(["core", "project-visible-notebook", "notebooks/demo.ipynb", "--cells-file", str(cells_file)])
             finally:
                 sys.stdout = old
         self.assertEqual(code, 0)
@@ -2381,14 +2381,14 @@ class TestCommands(unittest.TestCase):
             cells=[{"cell_type": "code", "source": "x = 1"}],
         )
 
-    def test_v2_execute_visible_cell(self):
-        client = self._mock_v2_client()
+    def test_core_execute_visible_cell(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "execute-visible-cell", "notebooks/demo.ipynb", "--cell-index", "2", "-s", "x = 1"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "execute-visible-cell", "notebooks/demo.ipynb", "--cell-index", "2", "-s", "x = 1"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
@@ -2398,28 +2398,28 @@ class TestCommands(unittest.TestCase):
             source="x = 1",
         )
 
-    def test_v2_branches(self):
-        client = self._mock_v2_client()
+    def test_core_branches(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "branches"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "branches"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.list_branches.assert_called_once()
 
-    def test_v2_branch_start(self):
-        client = self._mock_v2_client()
+    def test_core_branch_start(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
                 code = main([
-                    "v2", "branch-start",
+                    "core", "branch-start",
                     "--document-id", "doc-1",
                     "--owner-session-id", "sess-1",
                     "--title", "Experiment",
@@ -2437,40 +2437,40 @@ class TestCommands(unittest.TestCase):
             branch_id=None,
         )
 
-    def test_v2_branch_finish(self):
-        client = self._mock_v2_client()
+    def test_core_branch_finish(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "branch-finish", "--branch-id", "branch-1", "--status-value", "merged"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "branch-finish", "--branch-id", "branch-1", "--status-value", "merged"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.finish_branch.assert_called_once_with("branch-1", status="merged")
 
-    def test_v2_runtimes(self):
-        client = self._mock_v2_client()
+    def test_core_runtimes(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "runtimes"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "runtimes"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.list_runtimes.assert_called_once()
 
-    def test_v2_runtime_start(self):
-        client = self._mock_v2_client()
+    def test_core_runtime_start(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "runtime-start", "--mode", "shared", "--label", "primary", "--environment", ".venv"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "runtime-start", "--mode", "shared", "--label", "primary", "--environment", ".venv"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
@@ -2481,41 +2481,41 @@ class TestCommands(unittest.TestCase):
             environment=".venv",
         )
 
-    def test_v2_runtime_stop(self):
-        client = self._mock_v2_client()
+    def test_core_runtime_stop(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "runtime-stop", "--runtime-id", "rt-1"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "runtime-stop", "--runtime-id", "rt-1"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.stop_runtime.assert_called_once_with("rt-1")
 
-    def test_v2_runs(self):
-        client = self._mock_v2_client()
+    def test_core_runs(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "runs"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "runs"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
         client.list_runs.assert_called_once()
 
-    def test_v2_run_start(self):
-        client = self._mock_v2_client()
+    def test_core_run_start(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
                 code = main([
-                    "v2", "run-start",
+                    "core", "run-start",
                     "--runtime-id", "rt-1",
                     "--target-type", "document",
                     "--target-ref", "doc-1",
@@ -2531,14 +2531,14 @@ class TestCommands(unittest.TestCase):
             run_id=None,
         )
 
-    def test_v2_run_finish(self):
-        client = self._mock_v2_client()
+    def test_core_run_finish(self):
+        client = self._mock_core_client()
         buf = StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._v2_client", return_value=client):
-                code = main(["v2", "run-finish", "--run-id", "run-1", "--status-value", "completed"])
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "run-finish", "--run-id", "run-1", "--status-value", "completed"])
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
@@ -2568,7 +2568,7 @@ class TestVersionSurface(unittest.TestCase):
         finally:
             sys.stdout = old
         self.assertEqual(exited.exception.code, 0)
-        self.assertNotIn("v2", stdout.getvalue())
+        self.assertNotIn("core", stdout.getvalue())
 
     def test_python_and_extension_versions_stay_in_sync(self):
         root = Path(__file__).resolve().parents[1]
@@ -2633,7 +2633,7 @@ class TestDocsSurface(unittest.TestCase):
         self.assertIn("--interactive", commands)
 
 
-class TestV2ServerRobustness(unittest.TestCase):
+class TestServerRobustness(unittest.TestCase):
     def test_server_returns_json_error_when_run_finish_handler_raises(self):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -2665,7 +2665,7 @@ class TestV2ServerRobustness(unittest.TestCase):
         self.addCleanup(server.shutdown)
 
         port = server.server_address[1]
-        client = V2Client(f"http://127.0.0.1:{port}", "tok")
+        client = CoreClient(f"http://127.0.0.1:{port}", "tok")
 
         with self.assertRaisesRegex(RuntimeError, "boom for run-1:completed"):
             client.finish_run("run-1", status="completed")

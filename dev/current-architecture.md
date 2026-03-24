@@ -4,13 +4,13 @@ This document describes the current shipped architecture used by `agent-repl` to
 
 For the north-star target architecture, see:
 
-- [Design Docs](v2/README.md)
-- [North Star](v2/north-star.md)
-- [Review Rubric](v2/review-rubric.md)
+- [Design Docs](design/README.md)
+- [North Star](design/north-star.md)
+- [Review Rubric](design/review-rubric.md)
 
 The current system is mixed, but it is no longer purely bridge-driven:
 
-- the public notebook commands now prefer the shared headless runtime in `src/agent_repl/v2/`
+- the public notebook commands now prefer the shared headless runtime in `src/agent_repl/core/`
 - the VS Code extension still matters for live editor projection, prompt-cell UX, kernel discovery, and extension reload
 - the extension still hosts bridge routes for editor-backed and compatibility features
 
@@ -26,7 +26,7 @@ agent-repl Runtime
 Agent CLI
 ```
 
-### Shared Runtime (`src/agent_repl/v2/`)
+### Shared Runtime (`src/agent_repl/core/`)
 
 The shared runtime owns the headless notebook path. It:
 
@@ -39,8 +39,8 @@ Key modules:
 
 | Module | Purpose |
 |--------|---------|
-| `v2/server.py` | Workspace daemon, notebook authority, headless kernel ownership |
-| `v2/client.py` | Runtime discovery and HTTP client |
+| `core/server.py` | Workspace daemon, notebook authority, headless kernel ownership |
+| `core/client.py` | Runtime discovery and HTTP client |
 | `cli.py` | Public command routing; notebook commands prefer the shared runtime |
 
 ### VS Code Extension (`extension/src/`)
@@ -65,7 +65,7 @@ Key modules:
 | `notebook/resolver.ts` | Find notebooks by path, resolve cells by ID/index |
 | `notebook/outputs.ts` | Output format conversion + agent-facing media stripping |
 | `execution/queue.ts` | Per-notebook execution queues, kernel state tracking |
-| `v2.ts` | Auto-attach and runtime projection into open notebook documents |
+| `session.ts` | Auto-attach and runtime projection into open notebook documents |
 
 ### CLI (`src/agent_repl/`)
 

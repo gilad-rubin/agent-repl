@@ -61,8 +61,8 @@
   "scripts": {
     "compile": "tsc -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
-    "test:artifact": "npm run package && node scripts/check-v2-auto-attach-package.js",
-    "test:installed-v2-auto-attach": "npm run compile && node tests/v2-installed-auto-attach.smoke.js",
+    "test:artifact": "npm run package && node scripts/check-session-auto-attach-package.js",
+    "test:installed-session-auto-attach": "npm run compile && node tests/session-installed-auto-attach.smoke.js",
     "watch": "tsc -watch -p ./",
     "package": "npx vsce package --allow-missing-repository",
     "vscode:prepublish": "npm run compile"
