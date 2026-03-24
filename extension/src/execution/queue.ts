@@ -601,6 +601,7 @@ async function runCellViaJupyterKernelApi(
     let outputs: vscode.NotebookCellOutput[] = [];
     let started = false;
     const startTime = Date.now();
+    const cancellation = new vscode.CancellationTokenSource();
 
     try {
         await replaceCellState(doc, cellIndex, outputs, 'running', {
@@ -609,7 +610,7 @@ async function runCellViaJupyterKernelApi(
         });
         const source = doc.cellAt(cellIndex).document.getText();
 
-        for await (const output of kernel.executeCode(source)) {
+        for await (const output of kernel.executeCode(source, cancellation.token)) {
             started = true;
             if (!isNotebookOutput(output)) { continue; }
             outputs = applyNotebookOutput(outputs, output);
@@ -654,6 +655,7 @@ async function runCellViaJupyterKernelApi(
         await replaceCellState(doc, cellIndex, outputs, 'error');
         throw err;
     } finally {
+        cancellation.dispose();
         await clearAgentRunState(doc, cellIndex);
     }
 }

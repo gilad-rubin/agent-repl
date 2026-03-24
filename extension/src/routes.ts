@@ -653,12 +653,17 @@ export function buildRoutes(maxQueue: number): Routes {
                 if (code) {
                     try {
                         const kernel = await kernels.getKernel(doc.uri);
+                        const cancellation = new vscode.CancellationTokenSource();
                         const outputs = [];
-                        for await (const output of kernel.executeCode(code)) {
-                            outputs.push({
-                                items: Array.isArray(output?.items) ? output.items.length : 0,
-                                metadata: output?.metadata ?? {},
-                            });
+                        try {
+                            for await (const output of kernel.executeCode(code, cancellation.token)) {
+                                outputs.push({
+                                    items: Array.isArray(output?.items) ? output.items.length : 0,
+                                    metadata: output?.metadata ?? {},
+                                });
+                            }
+                        } finally {
+                            cancellation.dispose();
                         }
                         notebookProbe.executeCode = { status: 'ok', outputs };
                     } catch (err: any) {
