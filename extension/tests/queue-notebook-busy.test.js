@@ -43,7 +43,7 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
     }
 }
 
-test('status is tracked per notebook path rather than by global busy state', async () => {
+test('status is tracked per notebook path rather than by global busy state', { concurrency: false }, async () => {
     let onChange;
     const docs = new Map([
         ['/tmp/a.ipynb', { uri: { fsPath: '/tmp/a.ipynb' }, cellAt: () => ({ document: { getText: () => 'print(1)' } }) }],
@@ -87,4 +87,65 @@ test('status is tracked per notebook path rather than by global busy state', asy
     const status = await queue.getStatus('/tmp/b.ipynb');
     assert.equal(status.busy, false);
     assert.equal(status.kernel_state, 'idle');
+});
+
+test('shared-kernel queue reports human-owned running work when an agent execution is queued', { concurrency: false }, async () => {
+    let onChange;
+    const doc = {
+        uri: { fsPath: '/tmp/a.ipynb' },
+        cellAt: () => ({ document: { getText: () => 'print(1)' } }),
+    };
+
+    const queue = loadQueueModule(
+        {
+            workspace: {
+                onDidChangeNotebookDocument(callback) {
+                    onChange = callback;
+                    return { dispose() {} };
+                },
+                getConfiguration: () => ({
+                    get: (_name, fallback) => fallback,
+                }),
+            },
+            extensions: {
+                getExtension: (id) => {
+                    if (id !== 'ms-toolsai.jupyter') {
+                        return undefined;
+                    }
+                    return {
+                        isActive: true,
+                        exports: {
+                            kernels: {
+                                getKernel: async () => ({ status: 'busy' }),
+                            },
+                        },
+                    };
+                },
+            },
+        },
+        {
+            resolveNotebook: () => doc,
+        },
+    );
+
+    queue.resetExecutionState();
+    queue.initExecutionMonitor();
+
+    onChange({
+        notebook: { uri: { fsPath: '/tmp/a.ipynb' } },
+        cellChanges: [{
+            cell: {
+                index: 0,
+                document: { getText: () => 'print(1)' },
+            },
+            executionSummary: { timing: { startTime: 1 } },
+        }],
+    });
+
+    const result = await queue.startExecution('/tmp/a.ipynb', { cell_id: 'cell-1' }, 20);
+    assert.equal(result.status, 'queued');
+    assert.equal(result.kernel_state, 'busy');
+    assert.equal(result.currently_running.length, 1);
+    assert.equal(result.currently_running[0].owner, 'human');
+    assert.equal(result.currently_running[0].cell_id, 'cell-1');
 });

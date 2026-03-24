@@ -155,6 +155,56 @@ function isNotebookBusy(path: string): boolean {
     return hasExecutingCell(path) || queue.some(e => e.status === 'running');
 }
 
+function describeRunningExecutions(
+    path: string,
+    doc: vscode.NotebookDocument,
+    queue: QueueEntry[]
+): Array<{
+    cell_id: string;
+    cell_index: number;
+    source_preview: string;
+    owner: 'human' | 'agent';
+}> {
+    const fsPath = doc.uri.fsPath;
+    const agentRunningIds = new Set(
+        queue.filter(entry => entry.status === 'running').map(entry => entry.cellId)
+    );
+
+    const running: Array<{
+        cell_id: string;
+        cell_index: number;
+        source_preview: string;
+        owner: 'human' | 'agent';
+    }> = [];
+
+    for (const info of executingCells.values()) {
+        if (info.fsPath !== fsPath) { continue; }
+        running.push({
+            cell_id: info.cellId,
+            cell_index: info.cellIndex,
+            source_preview: info.sourcePreview,
+            owner: agentRunningIds.has(info.cellId) ? 'agent' : 'human',
+        });
+    }
+
+    for (const entry of queue.filter(item => item.status === 'running')) {
+        if (running.some(item => item.cell_id === entry.cellId)) { continue; }
+        try {
+            const cellIndex = resolveCell(doc, { cell_id: entry.cellId });
+            running.push({
+                cell_id: entry.cellId,
+                cell_index: cellIndex,
+                source_preview: entry.sourcePreview,
+                owner: 'agent',
+            });
+        } catch {
+            // Ignore cells that disappeared while queued/running.
+        }
+    }
+
+    return running;
+}
+
 /**
  * Check the real kernel status via Jupyter APIs.
  * If our tracking says busy but the kernel is actually idle/dead,
@@ -222,7 +272,7 @@ export async function executeCell(
     const queue = queues.get(path) ?? [];
     queues.set(path, queue);
 
-    const running = queue.filter(e => e.status === 'running');
+    const running = describeRunningExecutions(path, doc, queue);
 
     if (running.length === 0 && !isNotebookBusy(path)) {
         return runCell(path, doc, idx, cellId, execId, preview);
@@ -247,11 +297,7 @@ export async function executeCell(
             cell_id: cellId,
             position: queue.filter(e => e.status === 'queued').length,
             kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
-            currently_running: running.map(e => ({
-                cell_id: e.cellId,
-                source_preview: e.sourcePreview,
-                owner: 'agent'
-            })),
+            currently_running: running,
             message: kernelState === 'busy'
                 ? `Kernel is busy (human or agent execution in progress). Queued.`
                 : `Queued after ${running.length} running cell(s)`
@@ -289,43 +335,7 @@ export async function getStatus(path: string): Promise<any> {
     const fsPath = doc.uri.fsPath;
     const queue = queues.get(path) ?? [];
 
-    // Collect agent-running cell IDs for ownership tagging
-    const agentRunningIds = new Set(
-        queue.filter(e => e.status === 'running').map(e => e.cellId)
-    );
-
-    // Build running list from executingCells (covers both human and agent)
-    const running: Array<{
-        cell_id: string;
-        cell_index: number;
-        source_preview: string;
-        owner: 'human' | 'agent';
-    }> = [];
-
-    for (const info of executingCells.values()) {
-        if (info.fsPath !== fsPath) { continue; }
-        running.push({
-            cell_id: info.cellId,
-            cell_index: info.cellIndex,
-            source_preview: info.sourcePreview,
-            owner: agentRunningIds.has(info.cellId) ? 'agent' : 'human',
-        });
-    }
-
-    for (const entry of queue.filter(e => e.status === 'running')) {
-        if (running.some(r => r.cell_id === entry.cellId)) { continue; }
-        try {
-            const cellIndex = resolveCell(doc, { cell_id: entry.cellId });
-            running.push({
-                cell_id: entry.cellId,
-                cell_index: cellIndex,
-                source_preview: entry.sourcePreview,
-                owner: 'agent',
-            });
-        } catch {
-            // Ignore cells that disappeared while queued/running.
-        }
-    }
+    const running = describeRunningExecutions(path, doc, queue);
 
     const queued = queue
         .filter(e => e.status === 'queued')
@@ -427,7 +437,7 @@ async function enqueueExecution(
     const queue = queues.get(path) ?? [];
     queues.set(path, queue);
 
-    const running = queue.filter(e => e.status === 'running');
+    const running = describeRunningExecutions(path, doc, queue);
 
     if (running.length === 0 && !isNotebookBusy(path)) {
         const entry: QueueEntry = {
@@ -471,21 +481,17 @@ async function enqueueExecution(
     };
     queue.push(entry);
 
-    return {
-        status: 'queued',
-        execution_id: execId,
-        cell_id: cellId,
-        cell_index: idx,
-        position: queue.filter(e => e.status === 'queued').length,
-        kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
-        currently_running: running.map(e => ({
-            cell_id: e.cellId,
-            source_preview: e.sourcePreview,
-            owner: 'agent',
-        })),
-        message: kernelState === 'busy'
-            ? 'Kernel is busy (human or agent execution in progress). Queued.'
-            : `Queued after ${running.length} running cell(s)`,
+        return {
+            status: 'queued',
+            execution_id: execId,
+            cell_id: cellId,
+            cell_index: idx,
+            position: queue.filter(e => e.status === 'queued').length,
+            kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
+            currently_running: running,
+            message: kernelState === 'busy'
+                ? 'Kernel is busy (human or agent execution in progress). Queued.'
+                : `Queued after ${running.length} running cell(s)`,
     };
 }
 
