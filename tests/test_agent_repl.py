@@ -234,6 +234,36 @@ class TestV2Discovery(unittest.TestCase):
             session_id="sess-1",
         )
 
+    def test_start_restarts_stale_daemon_when_installed_code_is_newer(self):
+        stale_client = mock.MagicMock(spec=V2Client)
+        stale_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 1.0, "code_hash": "stale"}
+        fresh_client = mock.MagicMock(spec=V2Client)
+        fresh_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 20.0, "code_hash": "fresh"}
+
+        with (
+            mock.patch.object(V2Client, "discover", side_effect=[stale_client, RuntimeError("gone"), fresh_client]),
+            mock.patch("agent_repl.v2.client._current_install_hash", return_value="fresh"),
+            mock.patch("agent_repl.v2.client.subprocess.Popen") as mock_popen,
+            mock.patch("agent_repl.v2.client.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2]),
+            mock.patch("agent_repl.v2.client.time.sleep"),
+        ):
+            result = V2Client.start("/workspace", timeout=1.0, runtime_dir="/tmp/runtime")
+
+        stale_client.shutdown.assert_called_once()
+        mock_popen.assert_called_once()
+        self.assertFalse(result["already_running"])
+        self.assertEqual(result["workspace_root"], "/workspace")
+
+
+class TestPackagingMetadata(unittest.TestCase):
+    """Packaging metadata must include the headless runtime dependencies."""
+
+    def test_project_dependencies_include_headless_runtime_requirements(self):
+        pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+        dependencies = pyproject["project"]["dependencies"]
+        self.assertTrue(any(dep.startswith("jupyter-client") for dep in dependencies))
+        self.assertTrue(any(dep.startswith("nbformat") for dep in dependencies))
+
 
 class TestV2CoreState(unittest.TestCase):
     """Direct tests for v2 core document/file sync behavior."""
@@ -376,85 +406,60 @@ class TestV2CoreState(unittest.TestCase):
 
         self.assertFalse(overlap_detected.is_set())
 
-    def test_notebook_contents_proxies_through_bridge_and_syncs_document_record(self):
-        bridge = mock.Mock(spec=BridgeClient)
-        bridge.contents.return_value = {
-            "path": "notebooks/demo.ipynb",
-            "cells": [{"index": 0, "cell_id": "cell-1", "cell_type": "code", "source": "x = 1"}],
-        }
-
-        with mock.patch.object(self.state, "_projection_client", return_value=bridge):
+    def test_notebook_contents_uses_headless_snapshot_and_syncs_document_record(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
             body, status = self.state.notebook_contents("notebooks/demo.ipynb")
 
         self.assertEqual(status, 200)
-        self.assertEqual(body["cells"][0]["cell_id"], "cell-1")
-        bridge.contents.assert_called_once_with("notebooks/demo.ipynb")
+        self.assertGreaterEqual(len(body["cells"]), 0)
         self.assertEqual(len(self.state.document_records), 1)
         record = next(iter(self.state.document_records.values()))
         self.assertEqual(record.relative_path, "notebooks/demo.ipynb")
         self.assertEqual(record.sync_state, "in-sync")
 
-    def test_notebook_create_proxies_through_bridge_and_registers_document(self):
-        bridge = mock.Mock(spec=BridgeClient)
-        bridge.create.return_value = {
-            "status": "ok",
-            "path": "notebooks/demo.ipynb",
-            "kernel_status": "selected",
-        }
-
-        with mock.patch.object(self.state, "_projection_client", return_value=bridge):
+    def test_notebook_create_uses_headless_runtime_and_registers_document(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
             body, status = self.state.notebook_create(
                 "notebooks/demo.ipynb",
                 cells=[{"type": "code", "source": "x = 1"}],
-                kernel_id="subtext-venv",
+                kernel_id=_python_with_ipykernel(),
             )
 
         self.assertEqual(status, 200)
         self.assertEqual(body["kernel_status"], "selected")
-        bridge.create.assert_called_once_with(
-            "notebooks/demo.ipynb",
-            cells=[{"type": "code", "source": "x = 1"}],
-            kernel_id="subtext-venv",
-        )
         self.assertEqual(len(self.state.document_records), 1)
 
-    def test_notebook_edit_proxies_through_bridge_and_syncs_document_record(self):
-        bridge = mock.Mock(spec=BridgeClient)
-        bridge.edit.return_value = {"path": "notebooks/demo.ipynb", "results": [{"op": "replace-source", "changed": True}]}
-
-        with mock.patch.object(self.state, "_projection_client", return_value=bridge):
+    def test_notebook_edit_uses_headless_runtime_and_syncs_document_record(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            self.state.notebook_create(
+                "notebooks/demo.ipynb",
+                cells=[{"type": "code", "source": "x = 1"}],
+                kernel_id=_python_with_ipykernel(),
+            )
             body, status = self.state.notebook_edit(
                 "notebooks/demo.ipynb",
-                [{"op": "replace-source", "cell_id": "cell-1", "source": "x = 2"}],
+                [{"op": "replace-source", "cell_id": None, "cell_index": 0, "source": "x = 2"}],
             )
 
         self.assertEqual(status, 200)
         self.assertEqual(body["results"][0]["op"], "replace-source")
-        bridge.edit.assert_called_once_with(
-            "notebooks/demo.ipynb",
-            [{"op": "replace-source", "cell_id": "cell-1", "source": "x = 2"}],
-        )
         self.assertEqual(len(self.state.document_records), 1)
 
-    def test_notebook_execute_cell_proxies_wait_false(self):
-        bridge = mock.Mock(spec=BridgeClient)
-        bridge.execute_cell.return_value = {"status": "started", "execution_id": "exec-1", "cell_id": "cell-1"}
-
-        with mock.patch.object(self.state, "_projection_client", return_value=bridge):
+    def test_notebook_execute_cell_uses_headless_runtime(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            self.state.notebook_create(
+                "notebooks/demo.ipynb",
+                cells=[{"type": "code", "source": "x = 1\nx"}],
+                kernel_id=_python_with_ipykernel(),
+            )
             body, status = self.state.notebook_execute_cell(
                 "notebooks/demo.ipynb",
-                cell_id="cell-1",
-                cell_index=None,
+                cell_id=None,
+                cell_index=0,
             )
 
         self.assertEqual(status, 200)
-        self.assertEqual(body["status"], "started")
-        bridge.execute_cell.assert_called_once_with(
-            "notebooks/demo.ipynb",
-            cell_id="cell-1",
-            cell_index=None,
-            wait=False,
-        )
+        self.assertEqual(body["status"], "ok")
 
     def test_headless_notebook_round_trip_without_projection_client(self):
         notebook_path = "notebooks/headless.ipynb"
@@ -631,6 +636,85 @@ class TestV2CoreState(unittest.TestCase):
             self.assertEqual(contents_status, 200)
             self.assertEqual(contents_body["cells"][0]["source"], "x = 9\nx")
             self.assertEqual(contents_body["cells"][0]["outputs"][0]["data"]["text/plain"], "9")
+
+    def test_headless_edit_delete_and_move_update_structure(self):
+        notebook_path = "notebooks/headless-structure.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "markdown", "source": "# Title"},
+                    {"type": "code", "source": "x = 1\nx"},
+                    {"type": "code", "source": "x + 1"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            code_cell_id = contents_body["cells"][2]["cell_id"]
+
+            move_body, move_status = self.state.notebook_edit(
+                notebook_path,
+                [{"op": "move", "cell_id": code_cell_id, "to_index": 1}],
+            )
+            self.assertEqual(move_status, 200)
+            self.assertTrue(move_body["results"][0]["changed"])
+
+            moved_body, moved_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(moved_status, 200)
+            self.assertEqual(moved_body["cells"][1]["cell_id"], code_cell_id)
+
+            delete_body, delete_status = self.state.notebook_edit(
+                notebook_path,
+                [{"op": "delete", "cell_id": code_cell_id}],
+            )
+            self.assertEqual(delete_status, 200)
+            self.assertTrue(delete_body["results"][0]["changed"])
+
+            deleted_body, deleted_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(deleted_status, 200)
+            self.assertEqual(len(deleted_body["cells"]), 2)
+            self.assertNotIn(code_cell_id, [cell["cell_id"] for cell in deleted_body["cells"]])
+
+    def test_headless_clear_outputs_all_clears_every_code_cell(self):
+        notebook_path = "notebooks/headless-clear-outputs.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "x = 2\nx"},
+                    {"type": "code", "source": "x + 5"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            first_exec, first_status = self.state.notebook_execute_cell(notebook_path, cell_id=None, cell_index=0)
+            self.assertEqual(first_status, 200)
+            self.assertEqual(first_exec["status"], "ok")
+            second_exec, second_status = self.state.notebook_execute_cell(notebook_path, cell_id=None, cell_index=1)
+            self.assertEqual(second_status, 200)
+            self.assertEqual(second_exec["status"], "ok")
+
+            clear_body, clear_status = self.state.notebook_edit(
+                notebook_path,
+                [{"op": "clear-outputs", "all": True}],
+            )
+            self.assertEqual(clear_status, 200)
+            self.assertTrue(clear_body["results"][0]["changed"])
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            self.assertEqual(contents_body["cells"][0]["outputs"], [])
+            self.assertEqual(contents_body["cells"][1]["outputs"], [])
 
     def test_session_can_detach_touch_and_resume(self):
         created = self.state.start_session("agent", "cli", "worker", "sess-1")
@@ -1394,6 +1478,23 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(data["path"], "nb.ipynb")
         self.assertEqual(len(data["cells"]), 1)
         client.contents.assert_called_once_with("nb.ipynb")
+
+    def test_new_does_not_fall_back_to_bridge_when_core_runtime_bootstrap_fails(self):
+        stderr = StringIO()
+        old_err = sys.stderr
+        sys.stderr = stderr
+        bridge = self._mock_client()
+        try:
+            with (
+                mock.patch("agent_repl.cli.V2Client.start", side_effect=RuntimeError("core bootstrap failed")),
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+            ):
+                code = main(["new", "nb.ipynb"])
+        finally:
+            sys.stderr = old_err
+        self.assertEqual(code, 1)
+        self.assertIn("core bootstrap failed", stderr.getvalue())
+        bridge.create.assert_not_called()
 
     def test_cat_prefers_core_notebook_projection(self):
         bridge = self._mock_client()

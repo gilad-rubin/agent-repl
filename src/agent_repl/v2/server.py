@@ -217,6 +217,7 @@ class CoreState:
             "started_at": self.started_at,
             "state_file": self.state_file,
             "version": self.version,
+            "code_hash": _current_package_hash(),
             "documents": self.documents,
             "sessions": self.sessions,
             "runs": self.runs,
@@ -418,21 +419,13 @@ class CoreState:
 
     def notebook_contents(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.contents(relative_path)
-        else:
-            payload = self._headless_notebook_contents(real_path, relative_path)
+        payload = self._headless_notebook_contents(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_status(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.status(relative_path)
-        else:
-            payload = self._headless_notebook_status(real_path, relative_path)
+        payload = self._headless_notebook_status(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -444,21 +437,13 @@ class CoreState:
         kernel_id: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.create(relative_path, cells=cells, kernel_id=kernel_id)
-        else:
-            payload = self._headless_notebook_create(real_path, relative_path, cells=cells, kernel_id=kernel_id)
+        payload = self._headless_notebook_create(real_path, relative_path, cells=cells, kernel_id=kernel_id)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_edit(self, path: str, operations: list[dict[str, Any]]) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.edit(relative_path, operations)
-        else:
-            payload = self._headless_notebook_edit(real_path, relative_path, operations)
+        payload = self._headless_notebook_edit(real_path, relative_path, operations)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -470,22 +455,13 @@ class CoreState:
         cell_index: int | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.execute_cell(
-                relative_path,
-                cell_id=cell_id,
-                cell_index=cell_index,
-                wait=False,
-            )
-        else:
-            payload = self._headless_notebook_execute_cell(
-                real_path,
-                relative_path,
-                cell_id=cell_id,
-                cell_index=cell_index,
-            )
-            self._sync_document_record(real_path, relative_path)
+        payload = self._headless_notebook_execute_cell(
+            real_path,
+            relative_path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+        )
+        self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_insert_execute(
@@ -497,24 +473,14 @@ class CoreState:
         at_index: int,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.insert_and_execute(
-                relative_path,
-                source,
-                cell_type=cell_type,
-                at_index=at_index,
-                wait=False,
-            )
-        else:
-            payload = self._headless_notebook_insert_execute(
-                real_path,
-                relative_path,
-                source=source,
-                cell_type=cell_type,
-                at_index=at_index,
-            )
-            self._sync_document_record(real_path, relative_path)
+        payload = self._headless_notebook_insert_execute(
+            real_path,
+            relative_path,
+            source=source,
+            cell_type=cell_type,
+            at_index=at_index,
+        )
+        self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_execution(self, execution_id: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -526,11 +492,7 @@ class CoreState:
 
     def notebook_execute_all(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.execute_all(relative_path)
-        else:
-            payload = self._headless_notebook_execute_all(real_path, relative_path)
+        payload = self._headless_notebook_execute_all(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -577,21 +539,13 @@ class CoreState:
 
     def notebook_restart(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.restart_kernel(relative_path)
-        else:
-            payload = self._headless_notebook_restart(real_path, relative_path)
+        payload = self._headless_notebook_restart(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_restart_and_run_all(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._projection_client(real_path)
-        if client is not None:
-            payload = client.restart_and_run_all(relative_path)
-        else:
-            payload = self._headless_notebook_restart_and_run_all(real_path, relative_path)
+        payload = self._headless_notebook_restart_and_run_all(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -881,6 +835,25 @@ class CoreState:
                 for position, current in enumerate(notebook.cells):
                     self._ensure_cell_identity(current, position)
                 results.append({"op": "insert", "changed": True, "cell_id": self._cell_id(cell, index), "cell_count": len(notebook.cells)})
+                changed = True
+            elif command == "delete":
+                index = self._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
+                cell = notebook.cells.pop(index)
+                for position, current in enumerate(notebook.cells):
+                    self._ensure_cell_identity(current, position)
+                results.append({"op": "delete", "changed": True, "cell_id": self._cell_id(cell, index), "cell_count": len(notebook.cells)})
+                changed = True
+            elif command == "move":
+                index = self._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
+                to_index = int(op.get("to_index", index))
+                if to_index == -1:
+                    to_index = len(notebook.cells) - 1
+                to_index = max(0, min(to_index, len(notebook.cells) - 1))
+                cell = notebook.cells.pop(index)
+                notebook.cells.insert(to_index, cell)
+                for position, current in enumerate(notebook.cells):
+                    self._ensure_cell_identity(current, position)
+                results.append({"op": "move", "changed": True, "cell_id": self._cell_id(cell, to_index), "cell_count": len(notebook.cells)})
                 changed = True
             elif command == "clear-outputs":
                 if op.get("all"):
@@ -1373,6 +1346,7 @@ def serve_forever(
         "port": actual_port,
         "token": token,
         "version": state.version,
+        "code_hash": _current_package_hash(),
         "workspace_root": workspace_root,
         "started_at": state.started_at,
     }))
@@ -1796,6 +1770,18 @@ def _path_within(candidate: str, root: str) -> bool:
         return common == os.path.realpath(root)
     except ValueError:
         return False
+
+
+def _current_package_hash() -> str:
+    package_root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for source in sorted(package_root.rglob("*.py")):
+        try:
+            digest.update(str(source.relative_to(package_root)).encode("utf-8"))
+            digest.update(source.read_bytes())
+        except OSError:
+            continue
+    return digest.hexdigest()
 
 
 def _file_format(path: str) -> str:

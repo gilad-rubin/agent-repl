@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -47,8 +48,20 @@ class V2Client:
 
         if client is not None:
             result = client.status()
-            result["already_running"] = True
-            return result
+            if result.get("code_hash") == _current_install_hash():
+                result["already_running"] = True
+                return result
+            try:
+                client.shutdown()
+            except Exception:
+                pass
+            shutdown_deadline = time.monotonic() + timeout
+            while time.monotonic() < shutdown_deadline:
+                try:
+                    cls.discover(workspace_root, runtime_dir=runtime_dir)
+                    time.sleep(0.1)
+                except RuntimeError:
+                    break
 
         Path(runtime_dir).mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
@@ -427,6 +440,18 @@ def _runtime_dir() -> str:
     if sys.platform == "darwin":
         return os.path.realpath(os.path.join(os.path.expanduser("~"), "Library", "Jupyter", "runtime"))
     return os.path.realpath(os.path.join(os.path.expanduser("~"), ".local", "share", "jupyter", "runtime"))
+
+
+def _current_install_hash() -> str:
+    package_root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for source in sorted(package_root.rglob("*.py")):
+        try:
+            digest.update(str(source.relative_to(package_root)).encode("utf-8"))
+            digest.update(source.read_bytes())
+        except OSError:
+            continue
+    return digest.hexdigest()
 
 
 def _pid_alive(pid: int) -> bool:

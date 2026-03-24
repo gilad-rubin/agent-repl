@@ -41,11 +41,8 @@ def _workspace_root() -> str:
 
 def _notebook_client(path: str) -> V2Client | BridgeClient:
     workspace_root = _workspace_root()
-    try:
-        V2Client.start(workspace_root)
-        return _v2_client(path)
-    except Exception:
-        return _client(path)
+    V2Client.start(workspace_root)
+    return _v2_client(path)
 
 
 # ------------------------------------------------------------------
