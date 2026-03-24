@@ -56,13 +56,11 @@ async function replaceSource(
 ): Promise<EditResult> {
     const idx = resolveCell(doc, { cell_id: op.cell_id, cell_index: op.cell_index });
     const cell = doc.cellAt(idx);
-    const cellDoc = cell.document;
-    const fullRange = new vscode.Range(
-        cellDoc.lineAt(0).range.start,
-        cellDoc.lineAt(cellDoc.lineCount - 1).range.end
-    );
+    const cellData = new vscode.NotebookCellData(cell.kind, op.source, cell.document.languageId);
+    cellData.metadata = cell.metadata;
+    cellData.outputs = [];
     const edit = new vscode.WorkspaceEdit();
-    edit.replace(cellDoc.uri, fullRange, op.source);
+    edit.set(doc.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(idx, idx + 1), [cellData])]);
     const ok = await vscode.workspace.applyEdit(edit);
     return { op: 'replace-source', changed: ok, cell_id: getCellId(cell), cell_count: doc.cellCount };
 }

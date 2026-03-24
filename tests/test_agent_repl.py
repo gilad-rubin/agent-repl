@@ -15,7 +15,7 @@ import requests
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
 from agent_repl.v2.client import DEFAULT_START_TIMEOUT, V2Client
-from agent_repl.v2.server import CoreState, _load_or_create_state
+from agent_repl.v2.server import CoreState, _handler_factory, _load_or_create_state
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +321,48 @@ class TestV2CoreState(unittest.TestCase):
         refreshed = refresh_body["document"]
         self.assertEqual(refreshed["sync_state"], "missing")
         self.assertFalse(refreshed["observed_snapshot"]["exists"])
+
+    def test_notebook_contents_proxies_through_bridge_and_syncs_document_record(self):
+        bridge = mock.Mock(spec=BridgeClient)
+        bridge.contents.return_value = {
+            "path": "notebooks/demo.ipynb",
+            "cells": [{"index": 0, "cell_id": "cell-1", "cell_type": "code", "source": "x = 1"}],
+        }
+
+        with mock.patch.object(self.state, "_bridge_client", return_value=bridge):
+            body, status = self.state.notebook_contents("notebooks/demo.ipynb")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["cells"][0]["cell_id"], "cell-1")
+        bridge.contents.assert_called_once_with("notebooks/demo.ipynb")
+        self.assertEqual(len(self.state.document_records), 1)
+        record = next(iter(self.state.document_records.values()))
+        self.assertEqual(record.relative_path, "notebooks/demo.ipynb")
+        self.assertEqual(record.sync_state, "in-sync")
+
+    def test_notebook_create_proxies_through_bridge_and_registers_document(self):
+        bridge = mock.Mock(spec=BridgeClient)
+        bridge.create.return_value = {
+            "status": "ok",
+            "path": "notebooks/demo.ipynb",
+            "kernel_status": "selected",
+        }
+
+        with mock.patch.object(self.state, "_bridge_client", return_value=bridge):
+            body, status = self.state.notebook_create(
+                "notebooks/demo.ipynb",
+                cells=[{"type": "code", "source": "x = 1"}],
+                kernel_id="subtext-venv",
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["kernel_status"], "selected")
+        bridge.create.assert_called_once_with(
+            "notebooks/demo.ipynb",
+            cells=[{"type": "code", "source": "x = 1"}],
+            kernel_id="subtext-venv",
+        )
+        self.assertEqual(len(self.state.document_records), 1)
 
     def test_session_can_detach_touch_and_resume(self):
         created = self.state.start_session("agent", "cli", "worker", "sess-1")
@@ -677,6 +719,31 @@ class TestV2Endpoints(unittest.TestCase):
         self.assertIn("/api/documents/rebind", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"document_id": "doc-1"})
 
+    def test_notebook_contents_calls_post(self):
+        self.client.notebook_contents("nb.ipynb")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/contents", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "nb.ipynb"})
+
+    def test_notebook_status_calls_post(self):
+        self.client.notebook_status("nb.ipynb")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/status", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "nb.ipynb"})
+
+    def test_notebook_create_calls_post(self):
+        self.client.notebook_create("nb.ipynb", cells=[{"type": "code", "source": "x = 1"}], kernel_id="subtext-venv")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/create", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {
+                "path": "nb.ipynb",
+                "cells": [{"type": "code", "source": "x = 1"}],
+                "kernel_id": "subtext-venv",
+            },
+        )
+
     def test_list_branches_calls_get(self):
         self.client.list_branches()
         url = self.mock_get.call_args[0][0]
@@ -905,7 +972,10 @@ class TestCommands(unittest.TestCase):
         old = sys.stdout
         sys.stdout = buf
         try:
-            with mock.patch("agent_repl.cli._client", return_value=mock_client):
+            with (
+                mock.patch("agent_repl.cli._client", return_value=mock_client),
+                mock.patch("agent_repl.cli._notebook_client", return_value=mock_client),
+            ):
                 code = main(argv)
         finally:
             sys.stdout = old
@@ -951,6 +1021,9 @@ class TestCommands(unittest.TestCase):
         client.open_document.return_value = {"status": "ok", "document": {"document_id": "doc-1"}}
         client.refresh_document.return_value = {"status": "ok", "document": {"document_id": "doc-1", "sync_state": "external-change"}}
         client.rebind_document.return_value = {"status": "ok", "document": {"document_id": "doc-1", "sync_state": "in-sync"}}
+        client.notebook_contents.return_value = {"path": "nb.ipynb", "cells": []}
+        client.notebook_status.return_value = {"path": "nb.ipynb", "kernel_state": "idle"}
+        client.notebook_create.return_value = {"status": "ok", "path": "nb.ipynb"}
         client.list_branches.return_value = {"status": "ok", "branches": []}
         client.start_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "active"}}
         client.finish_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "merged"}}
@@ -973,11 +1046,50 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(len(data["cells"]), 1)
         client.contents.assert_called_once_with("nb.ipynb")
 
+    def test_cat_prefers_core_notebook_projection(self):
+        bridge = self._mock_client()
+        core = self._mock_v2_client(notebook_contents={
+            "path": "nb.ipynb",
+            "cells": [{"index": 0, "cell_id": "doc-1", "cell_type": "markdown", "source": "# hi"}],
+        })
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["cat", "nb.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_contents.assert_called_once_with("nb.ipynb")
+        bridge.contents.assert_not_called()
+
     def test_status(self):
         client = self._mock_client()
         code, _ = self._run(["status", "nb.ipynb"], client)
         self.assertEqual(code, 0)
         client.status.assert_called_once_with("nb.ipynb")
+
+    def test_status_prefers_core_notebook_projection(self):
+        bridge = self._mock_client()
+        core = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["status", "nb.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_status.assert_called_once_with("nb.ipynb")
+        bridge.status.assert_not_called()
 
     def test_ix(self):
         client = self._mock_client()
@@ -1031,6 +1143,24 @@ class TestCommands(unittest.TestCase):
         code, _ = self._run(["new", "nb.ipynb"], client)
         self.assertEqual(code, 0)
         client.create.assert_called_once_with("nb.ipynb", cells=None, kernel_id=None)
+
+    def test_new_prefers_core_notebook_projection(self):
+        bridge = self._mock_client()
+        core = self._mock_v2_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["new", "nb.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_create.assert_called_once_with("nb.ipynb", cells=None, kernel_id=None)
+        bridge.create.assert_not_called()
 
     def test_new_with_kernel_and_cells_json(self):
         client = self._mock_client()
@@ -1473,6 +1603,44 @@ class TestDocsSurface(unittest.TestCase):
         self.assertIn("Use `--no-wait` only when you intentionally want fire-and-forget behavior.", commands)
         self.assertIn("agent-repl reload --pretty", commands)
         self.assertIn("Use top-level bridge commands such as `new`, `cat`, `status`, `ix`, `edit`, `exec`, and `select-kernel`", commands)
+
+
+class TestV2ServerRobustness(unittest.TestCase):
+    def test_server_returns_json_error_when_run_finish_handler_raises(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        workspace_root = Path(tmpdir.name)
+        runtime_dir = workspace_root / "runtime"
+        runtime_dir.mkdir()
+        state = CoreState(
+            workspace_root=str(workspace_root),
+            runtime_dir=str(runtime_dir),
+            token="tok",
+            pid=1234,
+            started_at=1.0,
+        )
+
+        def boom(run_id: str, status: str):
+            raise RuntimeError(f"boom for {run_id}:{status}")
+
+        state.finish_run = boom  # type: ignore[method-assign]
+
+        from http.server import ThreadingHTTPServer
+        import threading
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_factory(state))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        port = server.server_address[1]
+        client = V2Client(f"http://127.0.0.1:{port}", "tok")
+
+        with self.assertRaisesRegex(RuntimeError, "boom for run-1:completed"):
+            client.finish_run("run-1", status="completed")
 
 
 if __name__ == "__main__":

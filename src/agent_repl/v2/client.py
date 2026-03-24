@@ -212,6 +212,26 @@ class V2Client:
     def rebind_document(self, document_id: str) -> dict[str, Any]:
         return self._post("/api/documents/rebind", {"document_id": document_id})
 
+    def notebook_contents(self, path: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/contents", {"path": path})
+
+    def notebook_status(self, path: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/status", {"path": path})
+
+    def notebook_create(
+        self,
+        path: str,
+        *,
+        cells: list[dict[str, Any]] | None = None,
+        kernel_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path}
+        if cells is not None:
+            body["cells"] = cells
+        if kernel_id is not None:
+            body["kernel_id"] = kernel_id
+        return self._post("/api/notebooks/create", body)
+
     def list_branches(self) -> dict[str, Any]:
         return self._get("/api/branches")
 

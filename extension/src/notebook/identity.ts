@@ -23,6 +23,13 @@ export function resolveCell(
         for (let i = 0; i < doc.cellCount; i++) {
             if (getCellId(doc.cellAt(i)) === sel.cell_id) { return i; }
         }
+        const fallbackMatch = /^index-(\d+)$/.exec(sel.cell_id);
+        if (fallbackMatch) {
+            const fallbackIndex = Number.parseInt(fallbackMatch[1], 10);
+            if (fallbackIndex >= 0 && fallbackIndex < doc.cellCount) {
+                return fallbackIndex;
+            }
+        }
         const err = new Error(`No cell matched id '${sel.cell_id}'`) as any;
         err.statusCode = 404;
         throw err;

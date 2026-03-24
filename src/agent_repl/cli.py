@@ -35,12 +35,29 @@ def _v2_client(workspace_hint: str | None = None, runtime_dir: str | None = None
     return V2Client.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir)
 
 
+def _workspace_root() -> str:
+    return os.path.realpath(os.getcwd())
+
+
+def _notebook_client(path: str) -> V2Client | BridgeClient:
+    workspace_root = _workspace_root()
+    try:
+        V2Client.start(workspace_root)
+        return _v2_client(path)
+    except Exception:
+        return _client(path)
+
+
 # ------------------------------------------------------------------
 # Subcommand handlers
 # ------------------------------------------------------------------
 
 def cmd_cat(args: argparse.Namespace) -> int:
-    result = _client(args.path).contents(args.path)
+    client = _notebook_client(args.path)
+    if hasattr(client, "notebook_contents"):
+        result = client.notebook_contents(args.path)
+    else:
+        result = client.contents(args.path)
     include_outputs = not getattr(args, "no_outputs", False)
     # Clean up cells — only show what the agent needs
     clean_cells = []
@@ -79,7 +96,11 @@ def cmd_reload(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    result = _client(args.path).status(args.path)
+    client = _notebook_client(args.path)
+    if hasattr(client, "notebook_status"):
+        result = client.notebook_status(args.path)
+    else:
+        result = client.status(args.path)
     _out(result, args.pretty)
     return 0
 
@@ -170,7 +191,11 @@ def cmd_new(args: argparse.Namespace) -> int:
     if args.cells_json:
         cells = json.loads(args.cells_json)
     kernel_id = getattr(args, "kernel", None)
-    result = _client(args.path).create(args.path, cells=cells, kernel_id=kernel_id)
+    client = _notebook_client(args.path)
+    if hasattr(client, "notebook_create"):
+        result = client.notebook_create(args.path, cells=cells, kernel_id=kernel_id)
+    else:
+        result = client.create(args.path, cells=cells, kernel_id=kernel_id)
     _out(result, args.pretty)
     return 0
 
@@ -196,7 +221,11 @@ def cmd_select_kernel(args: argparse.Namespace) -> int:
 
 
 def cmd_prompts(args: argparse.Namespace) -> int:
-    result = _client(args.path).contents(args.path)
+    client = _notebook_client(args.path)
+    if hasattr(client, "notebook_contents"):
+        result = client.notebook_contents(args.path)
+    else:
+        result = client.contents(args.path)
     cells = result.get("cells", [])
     prompts = [
         c for c in cells
