@@ -193,4 +193,4 @@ Review each slice against:
 
 - [North Star](north-star.md)
 - [Reference Stack](reference-stack.md)
-- [Current v1 Architecture](../architecture.md)
+- [Current Architecture](../current-architecture.md)

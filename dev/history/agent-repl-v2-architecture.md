@@ -440,7 +440,7 @@ These are the most relevant reference points for the architecture.
 
 - [hypergraph architecture](/Users/giladrubin/python_workspace/hypergraph/dev/ARCHITECTURE.md)
 - [hypster core](/Users/giladrubin/python_workspace/hypster/src/hypster/core.py)
-- [agent-repl v2 plan](/Users/giladrubin/python_workspace/agent-repl/tmp/agent-repl-v2.md)
+- [agent-repl v2 plan](/Users/giladrubin/python_workspace/agent-repl/dev/history/agent-repl-v2.md)
 
 ## Reference Posture
 

@@ -28,9 +28,9 @@ Use these docs to answer:
 
 These docs should stay stable enough that we can compare every serious change against them without rewriting the target each time.
 
-## Relationship to v1
+## Relationship to the Current Codebase
 
-The current shipped system is documented in [../architecture.md](../architecture.md).
+The current shipped implementation is documented in [../current-architecture.md](../current-architecture.md).
 
 That document explains how `agent-repl` works today.
 

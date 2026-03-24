@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the current shipped bridge architecture used by `agent-repl` today.
+This document describes the current shipped architecture used by `agent-repl` today.
 
 For the north-star target architecture, see:
 
@@ -8,39 +8,50 @@ For the north-star target architecture, see:
 - [North Star](v2/north-star.md)
 - [Review Rubric](v2/review-rubric.md)
 
-agent-repl uses a bridge architecture: a VS Code extension runs an HTTP server, and the CLI talks to it. Notebook reads and edits go through VS Code's notebook API. Execution can run through either a background Jupyter session (`no-yank`) or VS Code's native notebook command path (`native`).
+The current system is mixed, but it is no longer purely bridge-driven:
+
+- the public notebook commands now prefer the shared headless runtime in `src/agent_repl/v2/`
+- the VS Code extension still matters for live editor projection, prompt-cell UX, kernel discovery, and extension reload
+- the extension still hosts bridge routes for editor-backed and compatibility features
 
 ## Components
 
 ```
-┌─────────────────────────────────────────────┐
-│  VS Code / Cursor                           │
-│  ┌───────────────────────────────────────┐  │
-│  │  agent-repl Extension                 │  │
-│  │  ┌─────────┐  ┌──────────────────┐   │  │
-│  │  │ HTTP    │  │ Notebook API     │   │  │
-│  │  │ Server  │──│ (read/edit/exec) │   │  │
-│  │  └─────────┘  └──────────────────┘   │  │
-│  │       ↑                               │  │
-│  └───────│───────────────────────────────┘  │
-└──────────│──────────────────────────────────┘
-           │ HTTP + bearer token
-┌──────────│──────────────────────────────────┐
-│  CLI     │                                   │
-│  ┌───────┴──────┐                            │
-│  │ BridgeClient │ → auto-discovers bridge    │
-│  └──────────────┘                            │
-└──────────────────────────────────────────────┘
+Human (VS Code / Cursor, optional)
+    ↕
+Projection Extension
+    ↕
+agent-repl Runtime
+    ↕
+Agent CLI
 ```
+
+### Shared Runtime (`src/agent_repl/v2/`)
+
+The shared runtime owns the headless notebook path. It:
+
+1. Starts a workspace-scoped daemon on demand
+2. Creates and manages headless Jupyter kernels
+3. Reads, edits, and executes notebooks without requiring the editor
+4. Serves runtime-owned notebook projections back to editor clients
+
+Key modules:
+
+| Module | Purpose |
+|--------|---------|
+| `v2/server.py` | Workspace daemon, notebook authority, headless kernel ownership |
+| `v2/client.py` | Runtime discovery and HTTP client |
+| `cli.py` | Public command routing; notebook commands prefer the shared runtime |
 
 ### VS Code Extension (`extension/src/`)
 
-The extension activates when a Jupyter notebook is opened. It:
+The extension is now primarily a projection and editor-integration layer. It:
 
 1. Starts an HTTP server on a random port (or configured port)
 2. Writes a connection file to `~/Library/Jupyter/runtime/agent-repl-bridge-<pid>.json`
-3. Handles all API requests by calling VS Code's notebook API
-4. Manages an execution queue per notebook
+3. Auto-attaches the editor window to the matching shared runtime
+4. Projects runtime-owned notebook state into open notebook documents
+5. Still handles editor-backed features such as prompt cells, reload, kernel inspection, and compatibility routes
 
 Key modules:
 
@@ -54,21 +65,21 @@ Key modules:
 | `notebook/resolver.ts` | Find notebooks by path, resolve cells by ID/index |
 | `notebook/outputs.ts` | Output format conversion + agent-facing media stripping |
 | `execution/queue.ts` | Per-notebook execution queues, kernel state tracking |
+| `v2.ts` | Auto-attach and runtime projection into open notebook documents |
 
 ### CLI (`src/agent_repl/`)
 
-The CLI is a thin HTTP client. It:
+The CLI now has two roles:
 
-1. Scans `~/Library/Jupyter/runtime/` for connection files
-2. Pings each bridge's health endpoint
-3. Requires a workspace or open-notebook match before sending commands, including the CLI's current working directory for notebook path resolution
+1. public notebook commands route to the shared runtime first
+2. editor-backed utility commands still talk to the extension bridge
 
 Two files:
 
 | File | Purpose |
 |------|---------|
 | `cli.py` | Argparse command definitions, handler functions |
-| `client.py` | `BridgeClient` class, discovery logic, endpoint methods |
+| `client.py` | Extension bridge discovery and editor-backed endpoints |
 
 ## Connection Discovery
 

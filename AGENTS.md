@@ -1,6 +1,6 @@
 # agent-repl
 
-CLI + VS Code extension: agents and humans collaborate on Jupyter notebooks in real time. See README.md for user-facing docs; run `agent-repl --help` for CLI reference.
+Runtime-first notebook system for agents and humans. See [README.md](/Users/giladrubin/python_workspace/agent-repl/README.md) for user-facing docs and [dev/README.md](/Users/giladrubin/python_workspace/agent-repl/dev/README.md) for development docs.
 
 ## Development
 
@@ -9,22 +9,24 @@ uv run agent-repl <command>              # run from source
 uv tool install . --reinstall            # install globally (--reinstall forces rebuild from source)
 uv run pytest                            # tests (mock-based, no running extension needed)
 cd extension && npm run compile          # build extension
-cd extension && npx vsce package         # package as .vsix
+cd extension && npx --yes @vscode/vsce package --allow-missing-repository -o agent-repl-0.3.0.vsix
 ```
 
 ## Architecture
 
 ```
-Human (VS Code / Cursor)
+Human (VS Code / Cursor, optional)
     ↕
-VS Code Extension (HTTP bridge on localhost, bearer token auth)
+Projection Extension + Editor Commands
+    ↕
+agent-repl Runtime
     ↕
 Agent (CLI)
 ```
 
-- Extension writes `~/Library/Jupyter/runtime/agent-repl-bridge-<pid>.json` on startup
-- CLI auto-discovers by scanning connection files, matching `cwd` to `workspace_folders`, pinging health
-- All commands output JSON — never print unstructured text to stdout
+- Core notebook commands prefer the shared runtime, even when the editor is closed
+- The extension still hosts editor-specific surfaces such as projection attach, prompt cells, kernel discovery, and reload
+- Public subcommands output JSON; top-level help and version output are plain text
 
 ## Coupling
 
@@ -37,9 +39,10 @@ API changes require updating both sides together:
 
 ## Extension Notes
 
-- `routes.ts` is the API surface — keep backward-compatible with the Python CLI
+- `routes.ts` is still the extension API surface for editor-backed features and compatibility paths
 - `execution/queue.ts` is the most complex module — read fully before modifying
-- Three execution backends (tried in order): private Jupyter session, Jupyter kernel API, VS Code notebook command. First two are "no-yank" (don't steal focus).
+- The extension now also acts as a projection client for headless runtimes through `v2.ts`
+- Execution paths must stay background-safe; if a path steals focus or surfaces UI, treat that as a product bug
 - `executingCells` map tracks running cells via `onDidChangeNotebookDocument`; `reconcileKernelState()` checks real kernel status before declaring busy
 - `POST /api/reload` clears `require.cache` for all modules under `out/` except `extension.js` and `server.js`
 - Changes to `extension.ts` or `server.ts` require full window reload; everything else can hot-reload
@@ -48,7 +51,7 @@ API changes require updating both sides together:
 
 </important>
 
-<important if="writing catch blocks or fallback logic in extension/src/">
+<important if="writing catch blocks or alternate-path logic in extension/src/">
 
 ## Error Handling: No Silent Swallowing
 
@@ -65,7 +68,7 @@ try {
 }
 ```
 
-When a fallback chain fails (multiple methods tried in sequence), return ALL diagnostics so the caller can see which steps were attempted and why each failed.
+When a multi-method attach or selection attempt fails, return ALL diagnostics so the caller can see which steps were attempted and why each failed.
 
 </important>
 
@@ -73,7 +76,7 @@ When a fallback chain fails (multiple methods tried in sequence), return ALL dia
 
 ## CLI Notes
 
-- `client.py`: bridge discovery + HTTP calls. `cli.py`: arg parsing + output formatting
+- `client.py`: extension bridge discovery + HTTP calls. `v2/client.py`: shared runtime client. `cli.py`: public command surface
 - Source input pattern (`-s`, `--source-file`, stdin) is shared across `ix`, `respond`, `edit replace-source`, `edit insert` — keep consistent
 - Cell targeting (`--cell-id` or `-i INDEX`) is shared across cell-specific commands — keep consistent
 
@@ -84,11 +87,11 @@ When a fallback chain fails (multiple methods tried in sequence), return ALL dia
 ## Adding/Changing Commands
 
 Both sides must be updated:
-1. Route in `extension/src/routes.ts`
-2. Subcommand in `src/agent_repl/cli.py`
-3. Client method in `src/agent_repl/client.py`
-4. Test in `tests/test_agent_repl.py`
-5. Docs: README.md, docs/commands.md, SKILL.md command table
+1. Public CLI parser/handler in `src/agent_repl/cli.py`
+2. Shared-runtime method in `src/agent_repl/v2/client.py` and `src/agent_repl/v2/server.py` when the command is core-backed
+3. Extension route/client updates in `extension/src/routes.ts` and `src/agent_repl/client.py` when the command is editor-backed
+4. Test in `tests/test_agent_repl.py` and extension tests when relevant
+5. Docs: `README.md`, `docs/commands.md`, `SKILL.md`
 
 </important>
 

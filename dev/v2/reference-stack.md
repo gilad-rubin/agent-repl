@@ -136,7 +136,7 @@ Nearby local design references:
 
 - [/Users/giladrubin/python_workspace/hypergraph/dev/ARCHITECTURE.md](/Users/giladrubin/python_workspace/hypergraph/dev/ARCHITECTURE.md)
 - [/Users/giladrubin/python_workspace/hypster/src/hypster/core.py](/Users/giladrubin/python_workspace/hypster/src/hypster/core.py)
-- [/Users/giladrubin/python_workspace/agent-repl/tmp/agent-repl-v2.md](/Users/giladrubin/python_workspace/agent-repl/tmp/agent-repl-v2.md)
+- [/Users/giladrubin/python_workspace/agent-repl/dev/history/agent-repl-v2.md](/Users/giladrubin/python_workspace/agent-repl/dev/history/agent-repl-v2.md)
 
 What we borrow from them:
 

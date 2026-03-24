@@ -1,376 +1,224 @@
 # Command Reference
 
-Complete reference for every `agent-repl` command. All commands return JSON (compact by default, formatted with `--pretty`).
+**Headless notebook workflow** - `new`, `ix`, `edit`, `exec`, `cat`, `status`, `run-all`, `restart`, and `restart-run-all` are the core notebook commands.
 
----
+**Editor-assisted workflow** - `kernels`, `select-kernel`, `prompts`, `respond`, and `reload` are mainly for extension-backed or development scenarios.
 
-## cat
+**Structured outputs** - Public subcommands return JSON. Use `--pretty` when you want indented output.
 
-Read notebook contents, cleaned for agent consumption. Rich media (HTML, images, widgets) is stripped; the notebook file retains everything for humans.
-
-```
-agent-repl cat PATH [--no-outputs] [--pretty]
-```
-
-| Flag | Description |
-|------|-------------|
-| `PATH` | Notebook path (relative to workspace) |
-| `--no-outputs` | Show cell sources only, without outputs |
-| `--pretty` | Pretty-print JSON output |
+## Minimal Happy Path
 
 ```bash
-agent-repl cat demo.ipynb
+agent-repl new tmp/validation.ipynb
+agent-repl ix tmp/validation.ipynb -s 'x = 2\nx * 3'
 ```
 
-Each cell in the response includes: `index`, `cell_id`, `cell_type`, `source`, and optionally `outputs` and `execution_count`. Cells with prompt metadata include an `agent_repl` object with `type` and `status`.
-Paths outside the active workspace are rejected.
-If the notebook is still closed and only readable from disk, `cat` may emit placeholder IDs like `index-1`. Once the notebook becomes live/open in VS Code, re-run `cat --no-outputs` and switch to the live UUIDs before `exec` or `edit`.
+That is the default workflow. Use `cat` or `status` only when you need diagnostics.
 
----
+## Core Notebook Commands
 
-## status
+### `new`
 
-Get kernel execution state and queue information for a notebook.
-
-```
-agent-repl status PATH [--pretty]
-```
+Create a notebook and prepare the runtime.
 
 ```bash
-agent-repl status demo.ipynb
+agent-repl new PATH [--kernel PYTHON] [--cells-json JSON]
 ```
 
-Returns kernel state (idle/busy), currently running cells, and queued cells with their owner (human/agent). Paths outside the active workspace are rejected.
-
----
-
-## exec
-
-Execute code in a notebook's kernel. Either run an existing cell by ID, or insert and execute inline code.
-
-```
-agent-repl exec PATH (--cell-id ID | -c CODE) [--pretty]
-```
-
-| Flag | Description |
-|------|-------------|
-| `PATH` | Notebook path |
-| `--cell-id` | Execute an existing cell by its ID |
-| `-c`, `--code` | Code to insert and execute |
-
-```bash
-# Execute existing cell
-agent-repl exec demo.ipynb --cell-id abc123
-
-# Insert and execute inline code
-agent-repl exec demo.ipynb -c 'x = 42; print(x)'
-```
-
-When using `-c`, a new persistent cell is inserted and executed (same as `ix`). One of `--cell-id` or `-c` is required.
-
-Completed `exec` responses include:
-
-- `execution_mode`: the backend that actually ran the cell, such as `jupyter-private-session` or `notebook-command`
-- `execution_preference`: the requested behavior, either `no-yank` or `native`
-- `execution_fallback_reason`: present when the command had to leave the steady-state background path
-
----
-
-## ix
-
-Insert a new cell and execute it.
-
-```
-agent-repl ix PATH (-s SOURCE | --source-file FILE | stdin) [--pretty]
-```
-
-| Flag | Description |
-|------|-------------|
-| `PATH` | Notebook path |
-| `-s`, `--source` | Cell source code |
-| `--source-file` | File containing cell source |
-
-```bash
-# Inline source
-agent-repl ix demo.ipynb -s 'import pandas as pd; print(pd.__version__)'
-
-# From a file
-agent-repl ix demo.ipynb --source-file /tmp/cell.py
-
-# From stdin
-echo 'print("hello")' | agent-repl ix demo.ipynb
-```
-
-The cell is appended to the end of the notebook by default.
-`ix` waits up to 30 seconds for completion by default. Use `--no-wait` only when you intentionally want fire-and-forget behavior.
-
-`ix` respects the `agent-repl.executionMode` setting:
-
-- `no-yank` (default) prefers the background Jupyter execution path so the notebook can update without stealing focus
-- `native` always uses VS Code's notebook execution command path
-
-On a brand-new notebook or first kernel attach, Jupyter may still briefly reveal the notebook before later runs settle into the no-yank path.
-
----
-
-## edit
-
-Edit notebook cells. Five subcommands for different operations.
-
-### edit replace-source
-
-Replace the source of an existing cell.
-
-```
-agent-repl edit PATH replace-source (--cell-id ID | -i INDEX) (-s SOURCE | --source-file FILE | stdin) [--pretty]
-```
-
-```bash
-agent-repl edit demo.ipynb replace-source --cell-id abc -s 'x = 99'
-```
-
-### edit insert
-
-Insert a new cell at a specified position.
-
-```
-agent-repl edit PATH insert (-s SOURCE | --source-file FILE | stdin) [--cell-type TYPE] [--at-index INT] [--pretty]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--cell-type` | `code` | Cell type: `code` or `markdown` |
-| `--at-index` | `-1` (end) | Position to insert at |
-
-```bash
-agent-repl edit demo.ipynb insert --at-index 0 --cell-type code -s 'import math'
-```
-
-### edit delete
-
-Delete a cell from the notebook.
-
-```
-agent-repl edit PATH delete (--cell-id ID | -i INDEX) [--pretty]
-```
-
-```bash
-agent-repl edit demo.ipynb delete --cell-id abc
-```
-
-### edit move
-
-Move a cell to a different position.
-
-```
-agent-repl edit PATH move (--cell-id ID | -i INDEX) --to-index INT [--pretty]
-```
-
-```bash
-agent-repl edit demo.ipynb move --cell-id abc --to-index 0
-```
-
-### edit clear-outputs
-
-Clear outputs from one or all cells.
-
-```
-agent-repl edit PATH clear-outputs [--cell-id ID | -i INDEX | --all] [--pretty]
-```
-
-```bash
-agent-repl edit demo.ipynb clear-outputs --all
-```
-
----
-
-## run-all
-
-Trigger execution of all cells in the notebook and return immediately.
-
-```
-agent-repl run-all PATH [--pretty]
-```
-
-```bash
-agent-repl run-all demo.ipynb
-```
-
-Use `agent-repl status PATH` to watch the run until the kernel becomes idle.
-
----
-
-## restart
-
-Restart the notebook's kernel without running any cells.
-
-```
-agent-repl restart PATH [--pretty]
-```
-
-```bash
-agent-repl restart demo.ipynb
-```
-
----
-
-## restart-run-all
-
-Restart the kernel, trigger execution of all cells, and return immediately.
-
-```
-agent-repl restart-run-all PATH [--pretty]
-```
-
-```bash
-agent-repl restart-run-all demo.ipynb
-```
-
-Use `agent-repl status PATH` to watch the run until the kernel becomes idle.
-
----
-
-## new
-
-Create a new notebook in the workspace.
-
-```
-agent-repl new PATH [--kernel ID] [--cells-json JSON] [--pretty]
-```
-
-| Flag | Description |
-|------|-------------|
-| `PATH` | Notebook path to create |
-| `--kernel` | Kernel ID to auto-select (skips interactive picker) |
-| `--cells-json` | JSON array of `{"type": "code", "source": "..."}` |
+Examples:
 
 ```bash
 agent-repl new analysis.ipynb
-agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"import pandas as pd"}]'
+agent-repl new analysis.ipynb --cells-json '[{"type":"markdown","source":"# Notes"},{"type":"code","source":"print(1)"}]'
 ```
 
-The notebook is created with a ready runtime/kernel. If VS Code is open, it reflects the same notebook state live; if it is closed, the command still succeeds headlessly.
-Starter cells created by `new --cells-json` are not auto-executed. If later validation steps depend on seed variables from those cells, execute the seed cell explicitly first.
+Notes:
 
-When a workspace `.venv` is present, `new` prefers it automatically and the response includes `kernel_status: "selected"` plus a message naming the selected kernel. The response also marks the notebook `ready: true`. If no workspace `.venv` is available, `new` fails clearly and asks for an explicit `--kernel` rather than leaving the notebook in a half-ready state.
+- uses the workspace `.venv` automatically when it exists
+- returns `ready: true` when the notebook is immediately usable
+- does not auto-run starter cells from `--cells-json`
 
----
+### `ix`
 
-## kernels
+Insert a new cell, run it, and return the result.
 
-List available Jupyter kernels, including workspace `.venv` and installed kernelspecs.
-
+```bash
+agent-repl ix PATH (-s SOURCE | --source-file FILE | stdin) [--at-index N] [--timeout SECONDS] [--no-wait]
 ```
-agent-repl kernels [--pretty]
+
+Examples:
+
+```bash
+agent-repl ix analysis.ipynb -s 'import pandas as pd; print(pd.__version__)'
+agent-repl ix analysis.ipynb --source-file /tmp/cell.py
 ```
+
+Notes:
+
+- waits for completion by default
+- use `--no-wait` only when you intentionally want fire-and-forget behavior
+- the result is returned directly, so `cat` is not required in the normal path
+
+### `edit`
+
+Edit notebook cells.
+
+```bash
+agent-repl edit PATH replace-source --cell-id ID -s 'new code'
+agent-repl edit PATH insert -s 'print(1)' [--cell-type code|markdown] [--at-index N]
+agent-repl edit PATH delete --cell-id ID
+agent-repl edit PATH move --cell-id ID --to-index N
+agent-repl edit PATH clear-outputs --all
+```
+
+Use `--cell-id` when possible. It is safer than positional indexes.
+
+### `exec`
+
+Run an existing cell, or insert and run inline code.
+
+```bash
+agent-repl exec PATH --cell-id ID [--timeout SECONDS] [--no-wait]
+agent-repl exec PATH -c 'probe code'
+```
+
+Notes:
+
+- `exec --cell-id` reruns an existing cell
+- `exec -c` inserts a real persistent code cell and runs it
+
+### `cat`
+
+Inspect notebook structure and outputs.
+
+```bash
+agent-repl cat PATH [--no-outputs]
+```
+
+Use this when you need:
+
+- live `cell_id` values
+- full notebook structure
+- a source/output inspection pass
+
+If the notebook is still on a disk-only path, `cat` may emit placeholder IDs such as `index-1`. Once the notebook becomes live, re-run `cat --no-outputs` and switch to the real UUIDs.
+
+### `status`
+
+Inspect notebook execution state.
+
+```bash
+agent-repl status PATH
+```
+
+Use this when:
+
+- a run is long-lived
+- a command timed out
+- you want to confirm the notebook is idle before the next step
+
+### `run-all`
+
+Execute every code cell and return the execution results.
+
+```bash
+agent-repl run-all PATH
+```
+
+On the public CLI path, this runs synchronously against the shared runtime and returns the resulting execution payloads.
+
+### `restart`
+
+Restart the notebook runtime.
+
+```bash
+agent-repl restart PATH
+```
+
+### `restart-run-all`
+
+Restart the notebook runtime and execute every code cell.
+
+```bash
+agent-repl restart-run-all PATH
+```
+
+On the public CLI path, this completes the restart and returns the execution results from the rerun.
+
+## Editor-Assisted Commands
+
+### `kernels`
+
+List available kernels in an editor-backed workspace.
 
 ```bash
 agent-repl kernels
 ```
 
-Returns `kernels` (array of kernel records with `id`, `label`, `type`, `python` path), `preferred_kernel` (workspace `.venv` if found), and `workspace` path. Use the returned `id` value with `select-kernel --kernel-id`.
+### `select-kernel`
 
----
-
-## select-kernel
-
-Select a kernel for a notebook. With `--kernel-id`, selects programmatically using one of the identifiers returned by `agent-repl kernels`. Without it, `agent-repl` first tries the workspace `.venv` automatically when one exists. Use `--interactive` to open VS Code's kernel picker explicitly.
-
-```
-agent-repl select-kernel PATH [--kernel-id ID] [--interactive] [--extension EXT] [--pretty]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `PATH` | | Notebook path |
-| `--kernel-id` | | Kernel ID to select programmatically |
-| `--interactive` | `false` | Open the VS Code kernel picker instead of defaulting to the workspace `.venv` |
-| `--extension` | `ms-toolsai.jupyter` | Extension providing the kernel controller |
+Explicitly choose a kernel for a notebook.
 
 ```bash
-# Programmatic selection using a kernel identifier from `agent-repl kernels`
-agent-repl select-kernel demo.ipynb --kernel-id /path/to/.venv/bin/python
-
-# Default to the workspace `.venv` when it exists
-agent-repl select-kernel demo.ipynb
-
-# Interactive picker
-agent-repl select-kernel demo.ipynb --interactive
+agent-repl select-kernel PATH [--kernel-id ID] [--interactive]
 ```
 
-If programmatic selection cannot be completed quietly, the command returns `status: "selection_failed"` with guidance instead of silently dropping into the interactive picker.
+Notes:
 
----
+- without `--kernel-id`, it tries the workspace `.venv` first
+- use `--interactive` only when you explicitly want the editor kernel picker
 
-## prompts
+### `prompts`
 
-List cells marked as agent prompts in a notebook.
-
-```
-agent-repl prompts PATH [--pretty]
-```
+List prompt cells already present in the notebook.
 
 ```bash
-agent-repl prompts demo.ipynb
+agent-repl prompts PATH
 ```
 
-Returns cells with `agent-repl` prompt metadata (created via the "Ask Agent" button in VS Code). Each prompt includes `cell_id`, `type`, `status` (pending/in-progress/answered), and the cell source.
+### `respond`
 
----
-
-## respond
-
-Respond to a prompt cell. Atomically: marks the prompt in-progress, inserts a response cell, executes it, then marks the prompt as answered.
-
-```
-agent-repl respond PATH --to CELL_ID (-s SOURCE | --source-file FILE | stdin) [--pretty]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--to` | Cell ID of the prompt to respond to (required) |
-| `-s`, `--source` | Response code |
-| `--source-file` | File containing response code |
+Answer a prompt cell from the CLI.
 
 ```bash
-agent-repl respond demo.ipynb --to abc123 -s 'df.dropna(inplace=True); print(df.shape)'
+agent-repl respond PATH --to CELL_ID (-s SOURCE | --source-file FILE | stdin)
 ```
 
----
+This workflow assumes a human is using the notebook UI and has created prompt cells from the editor. `respond` is still an editor-backed workflow today.
 
-## reload
+### `reload`
 
-Hot-reload the extension's route handlers without restarting the bridge server. Useful during extension development.
-
-```
-agent-repl reload [--pretty]
-```
+Hot-reload the installed extension routes.
 
 ```bash
 agent-repl reload --pretty
 ```
 
-Use `--pretty` when you need to verify the active `extension_root` and `routes_module` after reinstalling the extension.
+This is mainly a development or extension-debugging command.
 
----
+## Shared Input Rules
 
-## Shared Concepts
+Source-accepting commands support three input modes:
 
-### Source Input
+1. `-s 'inline code'`
+2. `--source-file /path/to/file`
+3. stdin when neither flag is provided
 
-Commands that accept source code (`ix`, `respond`, `edit replace-source`, `edit insert`) support three input methods:
+## Command Surface Summary
 
-1. **Inline flag**: `-s 'code here'`
-2. **File flag**: `--source-file path`
-3. **Stdin**: pipe content when neither flag is provided
-
-### Cell Selection
-
-Commands that target a specific cell accept either:
-
-- `--cell-id ID` — stable UUID (preferred, survives structural changes)
-- `-i INDEX` / `--index INDEX` — position (0-based)
-
-### Output Format
-
-All commands return JSON objects. Use `--pretty` for indented output. Errors are returned as `{"error": "message"}` on stderr with a non-zero exit code.
+| Command | Headless with editor closed | Live projection aware |
+|---|---|---|
+| `new` | Yes | Yes |
+| `ix` | Yes | Yes |
+| `edit` | Yes | Yes |
+| `exec` | Yes | Yes |
+| `cat` | Yes | Yes |
+| `status` | Yes | Yes |
+| `run-all` | Yes | Yes |
+| `restart` | Yes | Yes |
+| `restart-run-all` | Yes | Yes |
+| `kernels` | No | Yes |
+| `select-kernel` | No | Yes |
+| `prompts` | Yes | Yes |
+| `respond` | Usually no | Yes |
+| `reload` | No | Yes |

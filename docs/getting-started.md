@@ -1,162 +1,142 @@
 # Getting Started
 
-Create a notebook, execute code, edit cells, and use the prompt loop — all from the CLI.
+**Headless first** - You can create and run notebooks from the CLI without opening VS Code or Cursor.
+
+**Minimal happy path** - The common flow is `new`, then `ix`, then `edit` or `exec` only when you need to change or rerun code.
+
+**Optional live projection** - If the notebook is open in the editor, humans should see the same cells and outputs update live.
 
 ## Prerequisites
 
-1. **VS Code or Cursor** with the agent-repl extension installed and running
-2. **Python 3.10+** with the CLI installed (`uv tool install /path/to/agent-repl --reinstall` or `uv tool install . --reinstall`)
+- **CLI installed** - `uv tool install /path/to/agent-repl --reinstall`
+- **Python environment** - a workspace `.venv` is the default runtime when it exists
+- **Optional editor projection** - install the VS Code/Cursor extension only if you want live notebook projection or prompt cells
 
-The extension auto-starts when you open a notebook. Verify the CLI and bridge state first:
+Verify the installed CLI first:
 
 ```bash
 agent-repl --version
-agent-repl reload --pretty
+agent-repl --help
 ```
 
-If `agent-repl --version` is older than the repo version you meant to test, reinstall the CLI with `uv tool install /path/to/agent-repl --reinstall`. If `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, rebuild and reinstall the extension `.vsix`, then reload or reopen that VS Code window.
-
-## Create a Notebook
+## 1. Create a Notebook
 
 ```bash
-agent-repl new demo.ipynb
+agent-repl new tmp/validation.ipynb
 ```
 
-```json
-{"status":"ok","path":"demo.ipynb","kernel_status":"selected","ready":true,"message":"Selected workspace .venv kernel: subtext (.venv)"}
-```
+What to expect:
 
-The notebook appears in VS Code immediately with a selected kernel when a workspace `.venv` can be matched. If no `.venv` exists, `agent-repl new` fails clearly and asks for an explicit `--kernel` instead of leaving the notebook only partially prepared.
+- `status: "ok"`
+- `kernel_status: "selected"`
+- `ready: true`
 
-Create and kernel attach should stay in the background. If VS Code reveals the notebook, prompts for manual intervention, or asks the user to restart the kernel, treat that as a bug and capture the returned JSON plus the active `execution_mode`.
+If a workspace `.venv` exists, `new` uses it automatically. If no workspace `.venv` exists, `new` should fail clearly unless you pass `--kernel`.
 
-## Execute Code
-
-Use `ix` (insert-execute) to add a cell and run it:
+## 2. Insert and Run a Cell
 
 ```bash
-agent-repl ix demo.ipynb -s 'import math; print(math.pi)'
+agent-repl ix tmp/validation.ipynb -s 'x = 2\nx * 3'
 ```
 
-The cell appears in VS Code with its output. `ix` waits for completion by default; use `--no-wait` when you intentionally want fire-and-forget behavior.
+What to expect:
 
-By default, agent-triggered execution uses `agent-repl.executionMode = "no-yank"`, which prefers the background Jupyter execution path on an already-open notebook with a live kernel. That keeps the running cell and outputs visible without intentionally stealing focus. If you want the original VS Code notebook execution behavior instead, set `agent-repl.executionMode` to `native`.
+- the cell is inserted into the notebook
+- the code is executed
+- the JSON response contains the result directly
 
-To execute inline code that also inserts a cell:
+Use `ix` for the default “do notebook work” path. You should not need `cat` just to see the result of a normal `ix`.
+
+## 3. Edit and Re-Run
+
+Replace the cell source:
 
 ```bash
-agent-repl exec demo.ipynb -c 'x = 42; print(x)'
+agent-repl edit tmp/validation.ipynb replace-source --cell-id <id> -s 'x = 7\nx ** 2'
 ```
 
-To execute an existing cell by ID:
+Then rerun it:
 
 ```bash
-agent-repl exec demo.ipynb --cell-id a1b2c3
+agent-repl exec tmp/validation.ipynb --cell-id <id>
 ```
 
-Completed execution responses include `execution_mode` and `execution_preference`, so you can see whether the run used the background no-yank path or the native notebook command path.
-
-## Read the Notebook
+If you need the `cell_id`, fetch it with:
 
 ```bash
-agent-repl cat demo.ipynb
+agent-repl cat tmp/validation.ipynb --no-outputs
 ```
 
-```json
-{
-  "path": "demo.ipynb",
-  "cells": [
-    {
-      "index": 0,
-      "cell_id": "a1b2c3",
-      "cell_type": "code",
-      "source": "import math; print(math.pi)",
-      "execution_count": 1,
-      "outputs": [{"output_type": "stream", "name": "stdout", "text": "3.141592653589793\n"}]
-    }
-  ]
-}
-```
+`cat` and `status` are diagnostics. They are useful, but they are not part of the minimal happy path.
 
-Use `--no-outputs` for sources only:
+## 4. Work on an Existing Notebook
+
+Inspect structure only when needed:
 
 ```bash
-agent-repl cat demo.ipynb --no-outputs
+agent-repl cat notebooks/demo.ipynb --no-outputs
 ```
 
-If the notebook was still closed when you first read it, `cat` may have emitted fallback IDs like `index-1`. Once the notebook is live/open, re-run `cat --no-outputs` and switch to the real UUIDs before using `--cell-id`.
-
-## Edit Cells
-
-Replace a cell's source:
+Edit a cell:
 
 ```bash
-agent-repl edit demo.ipynb replace-source --cell-id a1b2c3 -s 'area = math.pi * 5 ** 2
-print(f"Area: {area:.2f}")'
+agent-repl edit notebooks/demo.ipynb replace-source --cell-id <id> -s 'print(\"updated\")'
 ```
 
-Insert a new cell:
+Run a new cell:
 
 ```bash
-agent-repl edit demo.ipynb insert --at-index 0 --cell-type code -s 'import math'
+agent-repl ix notebooks/demo.ipynb -s 'x + 1'
 ```
 
-Other edit operations: `delete`, `move`, `clear-outputs`.
-After editing code, re-run that cell and confirm that its outputs now match the new source.
+## 5. Open the Notebook Later
 
-## Check Status
+If you open the notebook after headless agent work, you should immediately see:
 
-See what the kernel is doing:
+- the created or edited cells
+- the latest source
+- the persisted outputs
+
+If the runtime is still alive, the next manual cell should continue naturally from the same in-memory objects.
+
+## 6. Work With the Notebook Already Open
+
+If the notebook is already open in VS Code or Cursor while the agent works, the editor should behave like a live projection:
+
+- new cells appear in place
+- edited source updates in place
+- running cells show execution state
+- outputs update when execution completes
+
+What should not happen:
+
+- focus steal
+- notebook tabs jumping to the foreground
+- kernel restart prompts
+- manual kernel picker interruptions
+
+## Prompt Cells
+
+Prompt cells are the one workflow that still starts from the editor today.
+
+Human in the editor:
+
+```text
+Click “Ask Agent” in the notebook toolbar
+```
+
+Agent in the CLI:
 
 ```bash
-agent-repl status demo.ipynb
+agent-repl prompts notebooks/demo.ipynb
+agent-repl respond notebooks/demo.ipynb --to <cell_id> -s 'df = df.dropna()'
 ```
 
-Returns kernel state (idle/busy), running cells, and queued cells.
-
-## The Prompt Loop
-
-Humans create prompt cells in VS Code using the "Ask Agent" toolbar button. Agents discover and respond:
-
-```bash
-agent-repl prompts demo.ipynb
-```
-
-```json
-{
-  "prompts": [
-    {
-      "cell_id": "d4e5f6",
-      "cell_type": "markdown",
-      "source": "calculate the circumference too",
-      "metadata": {
-        "custom": {
-          "agent-repl": {"cell_id": "d4e5f6", "type": "prompt", "status": "pending"}
-        }
-      }
-    }
-  ]
-}
-```
-
-Respond to the prompt:
-
-```bash
-agent-repl respond demo.ipynb --to d4e5f6 -s 'circ = 2 * math.pi * 5; print(f"Circumference: {circ:.2f}")'
-```
-
-The response cell is inserted after the prompt, executed, and the prompt is marked as answered.
-
-## Verify with Run-All
-
-Re-execute every cell to confirm reproducibility:
-
-```bash
-agent-repl restart-run-all demo.ipynb
-```
+Use this when the human is explicitly driving a notebook-as-conversation flow.
 
 ## Next Steps
 
-- [Command Reference](commands.md) — Full reference for all 14 commands
-- [Prompt Loop](prompt-loop.md) — Deep dive into the conversation pattern
-- [Architecture](architecture.md) — How the bridge works
+- [Command Reference](/Users/giladrubin/python_workspace/agent-repl/docs/commands.md)
+- [Installation](/Users/giladrubin/python_workspace/agent-repl/docs/installation.md)
+- [Prompt Loop](/Users/giladrubin/python_workspace/agent-repl/docs/prompt-loop.md)
+- [CLI JSON API](/Users/giladrubin/python_workspace/agent-repl/docs/api/cli-json.md)
