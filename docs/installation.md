@@ -13,7 +13,11 @@ Get agent-repl running: the VS Code extension and the CLI.
 Build and install the extension:
 
 ```bash
-make install-ext
+cd extension
+npm install
+npm run compile
+npx --yes @vscode/vsce package --allow-missing-repository -o agent-repl-0.3.0.vsix
+code --install-extension agent-repl-0.3.0.vsix --force
 ```
 
 This builds `extension/agent-repl-0.3.0.vsix` and reinstalls it into VS Code.
@@ -40,7 +44,7 @@ The extension auto-starts when you open a `.ipynb` file. You can also start it m
 uv tool install /path/to/agent-repl --reinstall
 
 # Or from inside this repo checkout
-make install-dev
+uv tool install . --reinstall
 
 # Or as a dev dependency in another project
 uv add --dev agent-repl --path /path/to/agent-repl
@@ -56,10 +60,11 @@ agent-repl --version
 0.3.0
 ```
 
-You can also run the repo-provided verification shortcut:
+Minimal verification:
 
 ```bash
-make verify-install
+agent-repl --version
+agent-repl --help
 ```
 
 ## 3. Verify the Setup
@@ -98,11 +103,11 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 
 **"Installed CLI is missing recent changes from the repo"**
 - Check the installed version with `agent-repl --version`
-- Reinstall local path installs with `uv tool install /path/to/agent-repl --reinstall` or `make install-dev`
+- Reinstall local path installs with `uv tool install /path/to/agent-repl --reinstall`
 - When working from source without reinstalling, prefer `uv run --project /path/to/agent-repl agent-repl ...`
 
 **"Installed extension is still an older build"**
-- Run `make install-ext`
+- Or rebuild and reinstall directly with `cd extension && npm run compile && npx --yes @vscode/vsce package --allow-missing-repository -o agent-repl-0.3.0.vsix && code --install-extension agent-repl-0.3.0.vsix --force`
 - Then run `agent-repl reload --pretty` from the target workspace and confirm both `extension_root` and `routes_module` point at the new installed version
 
 **"Auto-attach cannot find agent-repl"**

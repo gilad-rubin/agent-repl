@@ -16,8 +16,8 @@ agent-repl --version
 agent-repl reload --pretty
 ```
 
-- if `agent-repl --version` fails, reinstall the CLI with `make install-dev` or `uv tool install /path/to/agent-repl --reinstall`
-- if `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, reinstall the extension with `make install-ext`, then reload or reopen that VS Code window
+- if `agent-repl --version` fails, reinstall the CLI with `uv tool install /path/to/agent-repl --reinstall`
+- if `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, rebuild and reinstall the extension `.vsix`, then reload or reopen that VS Code window
 - when you intentionally want to test repo source before reinstalling, prefer `uv run --project /Users/giladrubin/python_workspace/agent-repl agent-repl ...`
 
 ## Core Loop
@@ -217,12 +217,21 @@ If timeout occurs:
 uv tool install /path/to/agent-repl --reinstall
 ```
 
-From this repo checkout, `make install-dev` and `make verify-install` are the fastest path.
+From this repo checkout, the fastest install/verify path is:
+
+```bash
+uv tool install . --reinstall
+agent-repl --version
+agent-repl --help
+```
 
 **Repo source changed, but VS Code still runs old behavior** — `agent-repl reload` hot-reloads the installed extension, not your repo checkout. After changing `extension/src/*`, package and reinstall the extension or use an Extension Development Host:
 
 ```bash
-make install-ext
+cd extension
+npm run compile
+npx --yes @vscode/vsce package --allow-missing-repository -o agent-repl-0.3.0.vsix
+code --install-extension agent-repl-0.3.0.vsix --force
 agent-repl reload --pretty
 ```
 

@@ -165,6 +165,7 @@ test('create route keeps notebook in the background when quiet kernel attach suc
                 ),
             }),
             startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
+            startNotebookExecutionAll: async () => [],
         },
     });
 
@@ -179,6 +180,268 @@ test('create route keeps notebook in the background when quiet kernel attach suc
         assert.equal(result.kernel_status, 'selected');
         assert.equal(ensureCalls, 0);
         assert.equal(showCalls, 0);
+    } finally {
+        if (originalEnv === undefined) {
+            delete process.env.JUPYTER_PATH;
+        } else {
+            process.env.JUPYTER_PATH = originalEnv;
+        }
+        fs.existsSync = originalExistsSync;
+        fs.readdirSync = originalReaddirSync;
+        fs.readFileSync = originalReadFileSync;
+    }
+});
+
+test('execute-all route stays in the background and queues code cells through the internal executor', async () => {
+    const uri = { fsPath: '/workspace/tmp/demo.ipynb', toString: () => 'file:///workspace/tmp/demo.ipynb' };
+    const doc = {
+        uri,
+        notebookType: 'jupyter-notebook',
+        cellCount: 2,
+        cellAt(index) {
+            return index === 0
+                ? { kind: 1, document: { getText: () => '# heading' } }
+                : { kind: 2, document: { getText: () => 'print(1)' } };
+        },
+    };
+    let showCalls = 0;
+    let executeAllCalls = 0;
+
+    const routesModule = loadRoutesModule({
+        vscode: {
+            NotebookCellKind: { Markup: 1, Code: 2 },
+            workspace: {
+                workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
+                notebookDocuments: [],
+                openNotebookDocument: async () => doc,
+            },
+            window: {
+                showNotebookDocument: async () => {
+                    showCalls += 1;
+                    return {};
+                },
+                activeNotebookEditor: undefined,
+                activeTextEditor: undefined,
+                visibleNotebookEditors: [],
+            },
+            commands: {
+                executeCommand: async () => {
+                    throw new Error('notebook.execute should not run');
+                },
+            },
+            extensions: { getExtension: () => undefined },
+        },
+        resolver: {
+            resolveNotebook: () => doc,
+            resolveNotebookUri: () => uri,
+            resolveOrOpenNotebook: async () => doc,
+            findOpenNotebook: () => undefined,
+            findEditor: () => {
+                throw new Error('not needed');
+            },
+            ensureNotebookEditor: async () => {
+                throw new Error('should not ensure editor for execute-all');
+            },
+            captureEditorFocus: () => ({ kind: 'none' }),
+            restoreEditorFocus: async () => {},
+        },
+        queue: {
+            executeCell: async () => ({ status: 'ok' }),
+            getExecution: () => ({ status: 'ok' }),
+            getStatus: async () => ({ kernel_state: 'idle' }),
+            insertAndExecute: async () => ({ status: 'ok' }),
+            resetExecutionState: () => {},
+            resetJupyterApiCache: () => {},
+            getJupyterApi: async () => undefined,
+            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
+            startNotebookExecutionAll: async (pathArg) => {
+                executeAllCalls += 1;
+                assert.equal(pathArg, '/workspace/tmp/demo.ipynb');
+                return [{ status: 'started', execution_id: 'exec-1', cell_index: 1 }];
+            },
+        },
+    });
+
+    const routes = routesModule.buildRoutes(20);
+    const result = await routes['POST /api/notebook/execute-all']({
+        path: 'tmp/demo.ipynb',
+        cwd: '/workspace',
+    });
+
+    assert.equal(result.status, 'started');
+    assert.equal(result.executions.length, 1);
+    assert.equal(executeAllCalls, 1);
+    assert.equal(showCalls, 0);
+});
+
+test('restart routes use background shutdown and quiet reattach without opening the notebook UI', async () => {
+    const originalEnv = process.env.JUPYTER_PATH;
+    const originalExistsSync = fs.existsSync;
+    const originalReaddirSync = fs.readdirSync;
+    const originalReadFileSync = fs.readFileSync;
+
+    const fakeRoot = path.join('/tmp', 'agent-repl-restart');
+    const kernelsDir = path.join(fakeRoot, 'kernels');
+    const specDir = path.join(kernelsDir, 'subtext-venv');
+    const specFile = path.join(specDir, 'kernel.json');
+    const workspacePython = path.join('/workspace', '.venv', 'bin', 'python');
+    const uri = { fsPath: '/workspace/notebooks/demo.ipynb', toString: () => 'file:///workspace/notebooks/demo.ipynb' };
+    const doc = { uri, notebookType: 'jupyter-notebook', cellCount: 1 };
+
+    let shutdownCalls = 0;
+    let openNotebookCalls = 0;
+    let showCalls = 0;
+    let commandCalls = 0;
+    let resetCalls = 0;
+    let resetApiCalls = 0;
+    let executeAllCalls = 0;
+
+    process.env.JUPYTER_PATH = fakeRoot;
+    fs.existsSync = (target) => (
+        target === kernelsDir ||
+        target === specFile ||
+        target === workspacePython
+    );
+    fs.readdirSync = (target) => {
+        if (target !== kernelsDir) {
+            throw new Error(`Unexpected dir: ${target}`);
+        }
+        return [{ name: 'subtext-venv', isDirectory: () => true }];
+    };
+    fs.readFileSync = (target, ...args) => {
+        if (target !== specFile) {
+            return originalReadFileSync(target, ...args);
+        }
+        return JSON.stringify({
+            argv: [workspacePython],
+            display_name: 'subtext (.venv)',
+            language: 'python',
+        });
+    };
+
+    const routesModule = loadRoutesModule({
+        vscode: {
+            workspace: {
+                workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
+                notebookDocuments: [doc],
+                openNotebookDocument: async () => doc,
+            },
+            window: {
+                showNotebookDocument: async () => {
+                    showCalls += 1;
+                    return {};
+                },
+                activeNotebookEditor: undefined,
+                activeTextEditor: undefined,
+                visibleNotebookEditors: [],
+            },
+            commands: {
+                executeCommand: async () => {
+                    commandCalls += 1;
+                    throw new Error('interactive restart should not run');
+                },
+            },
+            extensions: {
+                getExtension: (id) => {
+                    if (id !== 'ms-toolsai.jupyter') {
+                        return undefined;
+                    }
+                    return {
+                        isActive: true,
+                        exports: {
+                            openNotebook: async () => {
+                                openNotebookCalls += 1;
+                            },
+                            kernels: {
+                                getKernel: async () => ({
+                                    status: 'idle',
+                                    shutdown: async () => {
+                                        shutdownCalls += 1;
+                                    },
+                                }),
+                            },
+                            getPythonEnvironment: async () => ({
+                                executable: { uri: { fsPath: workspacePython } },
+                            }),
+                        },
+                    };
+                },
+            },
+        },
+        resolver: {
+            resolveNotebook: () => doc,
+            resolveNotebookUri: () => uri,
+            resolveOrOpenNotebook: async () => doc,
+            findOpenNotebook: () => doc,
+            findEditor: () => {
+                throw new Error('not needed');
+            },
+            ensureNotebookEditor: async () => {
+                throw new Error('should not ensure editor for restart');
+            },
+            captureEditorFocus: () => ({ kind: 'none' }),
+            restoreEditorFocus: async () => {},
+        },
+        queue: {
+            executeCell: async () => ({ status: 'ok' }),
+            getExecution: () => ({ status: 'ok' }),
+            getStatus: async () => ({ kernel_state: 'idle' }),
+            insertAndExecute: async () => ({ status: 'ok' }),
+            resetExecutionState: () => {
+                resetCalls += 1;
+            },
+            resetJupyterApiCache: () => {
+                resetApiCalls += 1;
+            },
+            getJupyterApi: async () => ({
+                openNotebook: async () => {
+                    openNotebookCalls += 1;
+                },
+                kernels: {
+                    getKernel: async () => ({
+                        status: 'idle',
+                        shutdown: async () => {
+                            shutdownCalls += 1;
+                        },
+                    }),
+                },
+                getPythonEnvironment: async () => ({
+                    executable: { uri: { fsPath: workspacePython } },
+                }),
+            }),
+            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
+            startNotebookExecutionAll: async (pathArg) => {
+                executeAllCalls += 1;
+                assert.equal(pathArg, '/workspace/notebooks/demo.ipynb');
+                return [{ status: 'started', execution_id: 'exec-1', cell_index: 0 }];
+            },
+        },
+    });
+
+    try {
+        const routes = routesModule.buildRoutes(20);
+
+        const restart = await routes['POST /api/notebook/restart-kernel']({
+            path: 'notebooks/demo.ipynb',
+            cwd: '/workspace',
+        });
+        assert.equal(restart.status, 'ok');
+        assert.match(restart.method, /jupyter\.openNotebook/);
+
+        const restartRunAll = await routes['POST /api/notebook/restart-and-run-all']({
+            path: 'notebooks/demo.ipynb',
+            cwd: '/workspace',
+        });
+        assert.equal(restartRunAll.status, 'started');
+        assert.equal(restartRunAll.executions.length, 1);
+
+        assert.equal(shutdownCalls, 2);
+        assert.equal(openNotebookCalls, 2);
+        assert.equal(resetCalls, 2);
+        assert.equal(resetApiCalls, 2);
+        assert.equal(executeAllCalls, 1);
+        assert.equal(showCalls, 0);
+        assert.equal(commandCalls, 0);
     } finally {
         if (originalEnv === undefined) {
             delete process.env.JUPYTER_PATH;

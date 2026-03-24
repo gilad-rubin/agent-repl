@@ -371,6 +371,21 @@ export async function insertAndExecute(
     return { ...result, operation: 'insert-execute', cell_id: cellId, cell_index: index };
 }
 
+export async function startNotebookExecutionAll(path: string, maxQueue: number): Promise<any[]> {
+    const doc = resolveNotebook(path);
+    const executions: any[] = [];
+
+    for (let index = 0; index < doc.cellCount; index++) {
+        const cell = doc.cellAt(index);
+        if (cell.kind !== vscode.NotebookCellKind.Code) {
+            continue;
+        }
+        executions.push(await startExecution(path, { cell_index: index }, maxQueue));
+    }
+
+    return executions;
+}
+
 // --- Internal ---
 
 /** Run a cell using a new queue entry (called from executeCell for immediate execution). */

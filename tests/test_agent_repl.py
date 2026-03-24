@@ -1781,10 +1781,13 @@ class TestDocsSurface(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         skill = (root / "SKILL.md").read_text()
         self.assertIn("agent-repl --version", skill)
+        self.assertIn("uv tool install . --reinstall", skill)
         self.assertIn("index-1", skill)
         self.assertIn("starter cells are created, not auto-executed", skill)
         self.assertNotIn("agent-repl v2 --help", skill)
         self.assertNotIn("may briefly steal focus", skill)
+        self.assertNotIn("make install-dev", skill)
+        self.assertNotIn("make install-ext", skill)
 
     def test_getting_started_matches_ix_wait_behavior(self):
         root = Path(__file__).resolve().parents[1]
@@ -1800,6 +1803,17 @@ class TestDocsSurface(unittest.TestCase):
         self.assertNotIn("Experimental v2 core daemon", readme)
         self.assertNotIn("| `v2` |", readme)
         self.assertNotIn("including experimental `v2`", readme)
+        self.assertNotIn("make install-dev", readme)
+        self.assertNotIn("make install-ext", readme)
+
+    def test_installation_docs_prefer_direct_uv_and_extension_commands(self):
+        root = Path(__file__).resolve().parents[1]
+        install = (root / "docs" / "installation.md").read_text()
+        self.assertIn("uv tool install . --reinstall", install)
+        self.assertIn("npx --yes @vscode/vsce package", install)
+        self.assertNotIn("make install-dev", install)
+        self.assertNotIn("make install-ext", install)
+        self.assertNotIn("make verify-install", install)
 
     def test_command_reference_warns_about_closed_notebook_fallback_ids(self):
         root = Path(__file__).resolve().parents[1]

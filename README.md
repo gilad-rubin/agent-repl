@@ -26,7 +26,7 @@ By default, the bridge only operates on notebooks inside its own workspace; it w
 # Install the CLI
 uv tool install /path/to/agent-repl --reinstall
 # or from inside this checkout
-make install-dev
+uv tool install . --reinstall
 
 # Create a notebook and start working
 agent-repl new analysis.ipynb
@@ -95,7 +95,7 @@ All commands output JSON. Pass `--pretty` for formatted output.
 uv tool install /path/to/agent-repl --reinstall
 
 # Or from inside this repo checkout
-make install-dev
+uv tool install . --reinstall
 
 # Dev dependency in another project
 uv add --dev agent-repl --path /path/to/agent-repl
@@ -104,13 +104,15 @@ uv add --dev agent-repl --path /path/to/agent-repl
 Before validating from another workspace, verify the PATH-installed CLI:
 
 ```bash
-make verify-install
+agent-repl --version
+agent-repl --help
 ```
 
 The VS Code extension must also be installed. Build and reinstall it with:
 
 ```bash
-make install-ext
+cd extension && npm run compile && npx --yes @vscode/vsce package --allow-missing-repository -o agent-repl-0.3.0.vsix
+code --install-extension extension/agent-repl-0.3.0.vsix --force
 ```
 
 Or manually run `cd extension && npm run compile && npx vsce package`, then install the `.vsix`.

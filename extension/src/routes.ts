@@ -7,7 +7,7 @@ import { resolveNotebook, resolveNotebookUri, resolveOrOpenNotebook, findOpenNot
 import { applyEdits, EditOp } from './notebook/operations';
 import { getCellId, ensureIds, resolveCell, withCellId, newCellId } from './notebook/identity';
 import { toJupyter, stripForAgent } from './notebook/outputs';
-import { executeCell, getExecution, getStatus, insertAndExecute, resetExecutionState, resetJupyterApiCache, getJupyterApi, startExecution } from './execution/queue';
+import { executeCell, getExecution, getStatus, insertAndExecute, resetExecutionState, resetJupyterApiCache, getJupyterApi, startExecution, startNotebookExecutionAll } from './execution/queue';
 
 type KernelRecord = {
     id: string;
@@ -503,6 +503,34 @@ async function attachKernelQuietly(
     return true;
 }
 
+async function attachEnvironmentQuietly(
+    doc: vscode.NotebookDocument,
+    environment: any,
+    diagnostics: AttachDiagnostic[]
+): Promise<boolean> {
+    const api = await getJupyterApi();
+    if (typeof api?.openNotebook !== 'function') {
+        diagnostics.push({ method: 'jupyter.openNotebook', detail: 'api.openNotebook is not a function (Jupyter extension API unavailable or not yet activated)' });
+        return false;
+    }
+
+    const request = {
+        id: environment?.id ?? null,
+        path: pythonEnvironmentExecutablePath(environment) ?? null,
+    };
+
+    try {
+        await api.openNotebook(doc.uri, environment);
+        return true;
+    } catch (err: any) {
+        diagnostics.push({
+            method: 'jupyter.openNotebook',
+            detail: `openNotebook(${JSON.stringify(request)}) threw: ${err?.message ?? String(err)}`,
+        });
+        return false;
+    }
+}
+
 async function selectKernelViaCommand(
     doc: vscode.NotebookDocument,
     notebookEditor: vscode.NotebookEditor,
@@ -778,66 +806,25 @@ export function buildRoutes(maxQueue: number): Routes {
         'POST /api/notebook/execute-all': async (body) => {
             const { path, cwd } = body as { path: string; cwd?: string };
             const doc = await resolveOrOpenNotebook(path, cwd);
-            await vscode.window.showNotebookDocument(doc);
-            await vscode.commands.executeCommand('notebook.execute');
-            // Collect results
-            const cells = [];
-            for (let i = 0; i < doc.cellCount; i++) {
-                const cell = doc.cellAt(i);
-                if (cell.kind === vscode.NotebookCellKind.Code) {
-                    cells.push({
-                        index: i,
-                        cell_id: getCellId(cell),
-                        outputs: stripForAgent(toJupyter(cell)),
-                        execution_count: cell.executionSummary?.executionOrder ?? null
-                    });
-                }
-            }
-            return { status: 'ok', path, cells };
+            const executions = await startNotebookExecutionAll(doc.uri.fsPath, maxQueue);
+            return { status: 'started', path, executions };
         },
 
         'POST /api/notebook/restart-kernel': async (body) => {
             const { path, cwd } = body as { path: string; cwd?: string };
             const doc = await resolveOrOpenNotebook(path, cwd);
-            const focus = captureEditorFocus();
-            try {
-                await ensureNotebookEditor(doc, { preserveFocus: true, preview: false });
-                await restartKernel(doc.uri);
-            } finally {
-                resetExecutionState(doc.uri.fsPath);
-                resetJupyterApiCache();
-                await restoreEditorFocus(focus);
-            }
-            return { status: 'ok', path };
+            const diagnostics: AttachDiagnostic[] = [];
+            const method = await restartKernelQuietly(doc, resolveWorkspaceDir(cwd), diagnostics);
+            return { status: 'ok', path, method, diagnostics };
         },
 
         'POST /api/notebook/restart-and-run-all': async (body) => {
             const { path, cwd } = body as { path: string; cwd?: string };
             const doc = await resolveOrOpenNotebook(path, cwd);
-            const focus = captureEditorFocus();
-            try {
-                await ensureNotebookEditor(doc, { preserveFocus: true, preview: false });
-                await restartKernel(doc.uri);
-                resetExecutionState(doc.uri.fsPath);
-                resetJupyterApiCache();
-                // notebook.execute requires the notebook to be active
-                await vscode.window.showNotebookDocument(doc, { preserveFocus: true });
-                await vscode.commands.executeCommand('notebook.execute');
-            } finally {
-                await restoreEditorFocus(focus);
-            }
-            const cells = [];
-            for (let i = 0; i < doc.cellCount; i++) {
-                const cell = doc.cellAt(i);
-                if (cell.kind === vscode.NotebookCellKind.Code) {
-                    cells.push({
-                        index: i, cell_id: getCellId(cell),
-                        outputs: stripForAgent(toJupyter(cell)),
-                        execution_count: cell.executionSummary?.executionOrder ?? null
-                    });
-                }
-            }
-            return { status: 'ok', path, cells };
+            const diagnostics: AttachDiagnostic[] = [];
+            const method = await restartKernelQuietly(doc, resolveWorkspaceDir(cwd), diagnostics);
+            const executions = await startNotebookExecutionAll(doc.uri.fsPath, maxQueue);
+            return { status: 'started', path, method, diagnostics, executions };
         },
 
         'POST /api/notebook/select-kernel': async (body) => {
@@ -1062,24 +1049,49 @@ export function buildRoutes(maxQueue: number): Routes {
     };
 }
 
-// --- Kernel restart helper ---
-// Try multiple command IDs — availability depends on VS Code version and Cursor.
-// Pass the notebook URI so the command doesn't rely on activeNotebookEditor (which would require focus).
-async function restartKernel(notebookUri?: vscode.Uri): Promise<void> {
-    const commands = [
-        'jupyter.notebookeditor.restartkernel',
-        'notebook.restartKernel',
-        'jupyter.restartkernel',
-    ];
-    for (const cmd of commands) {
-        try {
-            await vscode.commands.executeCommand(cmd, notebookUri);
-            return;
-        } catch {
-            // Command not available or failed — try next
-        }
+function formatDiagnostics(diagnostics: AttachDiagnostic[]): string {
+    return diagnostics.map(d => `${d.method}: ${d.detail}`).join(' | ');
+}
+
+async function restartKernelQuietly(
+    doc: vscode.NotebookDocument,
+    workspaceDir: string | null,
+    diagnostics: AttachDiagnostic[]
+): Promise<string> {
+    const currentKernel = await currentAttachedKernel(doc);
+    const currentEnvironment = await currentSelectedPythonEnvironment(doc);
+    const workspaceKernel = discoverKernels(workspaceDir).preferred_kernel;
+
+    if (!currentKernel || typeof currentKernel.shutdown !== 'function') {
+        diagnostics.push({
+            method: 'kernel.shutdown',
+            detail: 'Current kernel does not expose a background shutdown method',
+        });
+        throw new Error(`Background kernel restart is unavailable. ${formatDiagnostics(diagnostics)}`);
     }
-    throw new Error('No kernel restart command succeeded');
+
+    try {
+        await currentKernel.shutdown();
+    } catch (err: any) {
+        diagnostics.push({
+            method: 'kernel.shutdown',
+            detail: err?.message ?? String(err),
+        });
+        throw new Error(`Background kernel restart failed. ${formatDiagnostics(diagnostics)}`);
+    } finally {
+        resetExecutionState(doc.uri.fsPath);
+        resetJupyterApiCache();
+    }
+
+    if (currentEnvironment && await attachEnvironmentQuietly(doc, currentEnvironment, diagnostics)) {
+        return 'jupyter.openNotebook(current-environment)';
+    }
+
+    if (workspaceKernel && await attachKernelQuietly(doc, workspaceKernel, diagnostics)) {
+        return 'jupyter.openNotebook(workspace-preferred)';
+    }
+
+    throw new Error(`Background kernel restart could not reattach a kernel. ${formatDiagnostics(diagnostics)}`);
 }
 
 // Activity event bus
