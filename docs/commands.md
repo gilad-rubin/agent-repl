@@ -1,8 +1,8 @@
 # Command Reference
 
-**Headless notebook workflow** - `new`, `ix`, `edit`, `exec`, `cat`, `status`, `run-all`, `restart`, and `restart-run-all` are the core notebook commands.
+**Headless notebook workflow** - `new`, `ix`, `edit`, `exec`, `cat`, `status`, `select-kernel`, `run-all`, `restart`, and `restart-run-all` are the core notebook commands.
 
-**Editor-assisted workflow** - `kernels`, `select-kernel`, `prompts`, `respond`, and `reload` are mainly for extension-backed or development scenarios.
+**Editor-assisted workflow** - `kernels`, `prompts`, `respond`, and `reload` are mainly for extension-backed or development scenarios.
 
 **Structured outputs** - Public subcommands return JSON. Use `--pretty` when you want indented output.
 
@@ -58,6 +58,8 @@ Notes:
 - waits for completion by default
 - use `--no-wait` only when you intentionally want fire-and-forget behavior
 - the result is returned directly, so `cat` is not required in the normal path
+- if an infrastructure error occurs (kernel crash, connection lost, timeout), the inserted cell is automatically rolled back and the error message says "ix failed and the inserted cell was rolled back"
+- Python exceptions in your code are not rolled back — the cell stays with error output, like a normal notebook
 
 ### `edit`
 
@@ -145,6 +147,28 @@ agent-repl restart-run-all PATH
 
 On the public CLI path, this completes the restart and returns the execution results from the rerun.
 
+### `select-kernel`
+
+Choose a kernel for a notebook. This affects subsequent `ix` and `exec` calls on the same notebook.
+
+```bash
+agent-repl select-kernel PATH [--kernel-id ID] [--interactive]
+```
+
+Examples:
+
+```bash
+agent-repl select-kernel analysis.ipynb --kernel-id /opt/miniconda3/bin/python3
+agent-repl select-kernel analysis.ipynb --kernel-id python3
+```
+
+Notes:
+
+- without `--kernel-id`, it tries the workspace `.venv` first
+- this changes the active headless runtime kernel — the selected kernel is used by all subsequent execution commands
+- if a runtime is already running with a different kernel, it is restarted with the new one
+- use `--interactive` only when you explicitly want the VS Code editor kernel picker (requires extension)
+
 ## Editor-Assisted Commands
 
 ### `kernels`
@@ -154,19 +178,6 @@ List available kernels in an editor-backed workspace.
 ```bash
 agent-repl kernels
 ```
-
-### `select-kernel`
-
-Explicitly choose a kernel for a notebook.
-
-```bash
-agent-repl select-kernel PATH [--kernel-id ID] [--interactive]
-```
-
-Notes:
-
-- without `--kernel-id`, it tries the workspace `.venv` first
-- use `--interactive` only when you explicitly want the editor kernel picker
 
 ### `prompts`
 
@@ -218,7 +229,7 @@ Source-accepting commands support three input modes:
 | `restart` | Yes | Yes |
 | `restart-run-all` | Yes | Yes |
 | `kernels` | No | Yes |
-| `select-kernel` | No | Yes |
+| `select-kernel` | Yes | Yes |
 | `prompts` | Yes | Yes |
 | `respond` | Usually no | Yes |
 | `reload` | No | Yes |

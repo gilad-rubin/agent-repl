@@ -8,3 +8,4 @@ dist/
 .env
 extension/out/
 notebooks/
+.agent-repl/

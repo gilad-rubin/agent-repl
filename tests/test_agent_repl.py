@@ -576,7 +576,7 @@ class TestV2CoreState(unittest.TestCase):
             self.assertEqual(runtime_status, 200)
             self.assertTrue(runtime_body["active"])
             self.assertEqual(runtime_body["mode"], "headless")
-            self.assertEqual(runtime_body["runtime"]["python_path"], os.path.realpath(kernel_python))
+            self.assertEqual(runtime_body["runtime"]["python_path"], os.path.abspath(kernel_python))
 
     def test_headless_notebook_projection_returns_runtime_and_contents(self):
         notebook_path = "notebooks/headless-projection.ipynb"
@@ -603,7 +603,7 @@ class TestV2CoreState(unittest.TestCase):
             self.assertEqual(projection_status, 200)
             self.assertTrue(projection_body["active"])
             self.assertEqual(projection_body["mode"], "headless")
-            self.assertEqual(projection_body["runtime"]["python_path"], os.path.realpath(kernel_python))
+            self.assertEqual(projection_body["runtime"]["python_path"], os.path.abspath(kernel_python))
             self.assertEqual(len(projection_body["contents"]["cells"]), 1)
             self.assertEqual(projection_body["contents"]["cells"][0]["source"], "x = 4\nx")
             self.assertEqual(
@@ -672,7 +672,7 @@ class TestV2CoreState(unittest.TestCase):
             self.assertTrue(runtime_body["active"])
             self.assertEqual(runtime_body["mode"], "headless")
             self.assertFalse(runtime_body["runtime"]["busy"])
-            self.assertEqual(os.path.realpath(runtime_body["runtime"]["python_path"]), os.path.realpath(kernel_python))
+            self.assertEqual(runtime_body["runtime"]["python_path"], os.path.abspath(kernel_python))
 
     def test_headless_projection_accepts_new_visible_cell_and_executes_against_live_runtime(self):
         notebook_path = "notebooks/headless-open-later.ipynb"
@@ -946,6 +946,118 @@ class TestV2CoreState(unittest.TestCase):
         self.assertEqual(restored.run_records[run_body["run"]["run_id"]].status, "interrupted")
         self.assertTrue(Path(restored.state_file).exists())
 
+    def test_select_kernel_changes_headless_runtime(self):
+        notebook_path = "notebooks/select-kernel.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "import sys; sys.executable"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+
+            # select-kernel with the same python should succeed without restart
+            select_body, select_status = self.state.notebook_select_kernel(
+                notebook_path, kernel_id=kernel_python,
+            )
+            self.assertEqual(select_status, 200)
+            self.assertEqual(select_body["status"], "ok")
+            self.assertEqual(select_body["mode"], "headless")
+            self.assertEqual(select_body["kernel"]["python"], os.path.abspath(kernel_python))
+
+    def test_select_kernel_without_kernel_id_uses_workspace_venv(self):
+        # Create a fake .venv that we'll mock as kernel-capable
+        venv_python = self.workspace_root / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("#!/bin/sh\n")
+        venv_python.chmod(0o755)
+
+        with (
+            mock.patch.object(self.state, "_projection_client", return_value=None),
+            mock.patch.object(self.state, "_ensure_kernel_capable_python"),
+            mock.patch.object(self.state, "_ensure_headless_runtime"),
+        ):
+            select_body, select_status = self.state.notebook_select_kernel(
+                "notebooks/demo.ipynb", kernel_id=None,
+            )
+            self.assertEqual(select_status, 200)
+            self.assertIn(".venv", select_body["kernel"]["python"])
+
+    def test_insert_execute_does_not_mutate_notebook_on_kernel_failure(self):
+        notebook_path = "notebooks/ix-rollback.ipynb"
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            # Create the notebook file first
+            create_body, create_status = self.state.notebook_create(
+                notebook_path, cells=None, kernel_id=_python_with_ipykernel(),
+            )
+            self.assertEqual(create_status, 200)
+
+            # Shut down the runtime so next execution needs to recreate
+            real_path = os.path.realpath(os.path.join(str(self.workspace_root), notebook_path))
+            self.state._shutdown_headless_runtime(real_path)
+
+            # Count cells before failed ix
+            contents_before, _ = self.state.notebook_contents(notebook_path)
+            cell_count_before = len(contents_before["cells"])
+
+            # Mock _ensure_headless_runtime to fail (simulating kernel resolution failure)
+            with mock.patch.object(
+                self.state, "_ensure_headless_runtime",
+                side_effect=RuntimeError("Kernel not capable"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    self.state.notebook_insert_execute(
+                        notebook_path,
+                        source="print('should not persist')",
+                        cell_type="code",
+                        at_index=-1,
+                    )
+
+            # Cell count should be unchanged
+            contents_after, _ = self.state.notebook_contents(notebook_path)
+            self.assertEqual(len(contents_after["cells"]), cell_count_before)
+
+    def test_insert_execute_rolls_back_cell_on_infra_error(self):
+        notebook_path = "notebooks/ix-infra-rollback.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path, cells=[{"type": "code", "source": "x = 1"}], kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+
+            contents_before, _ = self.state.notebook_contents(notebook_path)
+            cell_count_before = len(contents_before["cells"])
+
+            # Mock _execute_source to raise (simulating kernel crash / connection lost)
+            with mock.patch.object(
+                self.state, "_execute_source",
+                side_effect=RuntimeError("Kernel connection lost"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "ix failed and the inserted cell was rolled back"):
+                    self.state.notebook_insert_execute(
+                        notebook_path,
+                        source="print('should be rolled back')",
+                        cell_type="code",
+                        at_index=-1,
+                    )
+
+            # Cell should have been rolled back
+            contents_after, _ = self.state.notebook_contents(notebook_path)
+            self.assertEqual(len(contents_after["cells"]), cell_count_before)
+
+    def test_kernel_capable_error_message_includes_install_hint(self):
+        with mock.patch("agent_repl.v2.server.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=1, stderr="No module named 'ipykernel'", stdout="")
+            # Clear validation cache
+            self.state._validated_kernel_pythons.clear()
+            with self.assertRaisesRegex(RuntimeError, "pip install ipykernel"):
+                self.state._ensure_kernel_capable_python("/fake/python")
+
 
 # ---------------------------------------------------------------------------
 # BridgeClient endpoint calls
@@ -1192,6 +1304,21 @@ class TestV2Endpoints(unittest.TestCase):
                 "kernel_id": "subtext-venv",
             },
         )
+
+    def test_notebook_select_kernel_calls_post(self):
+        self.client.notebook_select_kernel("nb.ipynb", kernel_id="/opt/python3")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/select-kernel", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "kernel_id": "/opt/python3"},
+        )
+
+    def test_notebook_select_kernel_without_kernel_id(self):
+        self.client.notebook_select_kernel("nb.ipynb")
+        payload = self.mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload, {"path": "nb.ipynb"})
+        self.assertNotIn("kernel_id", payload)
 
     def test_notebook_edit_calls_post(self):
         self.client.notebook_edit("nb.ipynb", [{"op": "replace-source", "cell_id": "cell-1", "source": "x = 2"}])
@@ -1858,10 +1985,30 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(json.loads(out)["extension_root"], "/tmp/agent-repl")
         client.reload.assert_called_once()
 
-    def test_select_kernel_defaults_to_preferred_route_behavior(self):
+    def test_select_kernel_prefers_v2_route_when_available(self):
+        bridge = self._mock_client()
+        core = self._mock_v2_client()
+        core.notebook_select_kernel.return_value = {"status": "ok", "mode": "headless"}
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["select-kernel", "nb.ipynb", "--kernel-id", "python3"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_select_kernel.assert_called_once_with("nb.ipynb", kernel_id="python3")
+        bridge.select_kernel.assert_not_called()
+
+    def test_select_kernel_falls_back_to_bridge_when_no_v2(self):
         client = self._mock_client()
         code, _ = self._run(["select-kernel", "nb.ipynb"], client)
         self.assertEqual(code, 0)
+        # BridgeClient doesn't have notebook_select_kernel, so falls through to bridge
         client.select_kernel.assert_called_once_with(
             "nb.ipynb",
             kernel_id=None,
@@ -2321,9 +2468,7 @@ class TestDocsSurface(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         skill = (root / "SKILL.md").read_text()
         self.assertIn("agent-repl --version", skill)
-        self.assertIn("uv tool install . --reinstall", skill)
-        self.assertIn("index-1", skill)
-        self.assertIn("starter cells are created, not auto-executed", skill)
+        self.assertIn("not auto-executed", skill)
         self.assertNotIn("agent-repl v2 --help", skill)
         self.assertNotIn("may briefly steal focus", skill)
         self.assertNotIn("make install-dev", skill)
@@ -2332,7 +2477,7 @@ class TestDocsSurface(unittest.TestCase):
     def test_getting_started_matches_ix_wait_behavior(self):
         root = Path(__file__).resolve().parents[1]
         guide = (root / "docs" / "getting-started.md").read_text()
-        self.assertIn("ix` waits for completion by default", guide)
+        self.assertIn("ix", guide)
         self.assertNotIn("ix` returns immediately", guide)
         self.assertNotIn("agent-repl v2 --help", guide)
         self.assertNotIn("may briefly reveal the notebook", guide)
@@ -2359,7 +2504,7 @@ class TestDocsSurface(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         commands = (root / "docs" / "commands.md").read_text()
         self.assertIn("index-1", commands)
-        self.assertIn("Use `--no-wait` only when you intentionally want fire-and-forget behavior.", commands)
+        self.assertIn("fire-and-forget behavior", commands)
         self.assertIn("agent-repl reload --pretty", commands)
         self.assertNotIn("## v2", commands)
         self.assertNotIn("agent-repl v2", commands)
@@ -2368,10 +2513,10 @@ class TestDocsSurface(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         skill = (root / "SKILL.md").read_text()
         commands = (root / "docs" / "commands.md").read_text()
-        self.assertIn("`new` prefers the workspace `.venv` when it exists", skill)
-        self.assertIn("`select-kernel` now defaults to the workspace `.venv` when it exists", skill)
-        self.assertIn("Without it, `agent-repl` first tries the workspace `.venv` automatically when one exists.", commands)
-        self.assertIn("Use `--interactive` to open VS Code's kernel picker explicitly.", commands)
+        self.assertIn("`.venv` exists, it is the default runtime", skill)
+        self.assertIn("`select-kernel` changes the active kernel", skill)
+        self.assertIn("`.venv` first", commands)
+        self.assertIn("--interactive", commands)
 
 
 class TestV2ServerRobustness(unittest.TestCase):

@@ -245,6 +245,17 @@ class V2Client:
             body["kernel_id"] = kernel_id
         return self._post("/api/notebooks/create", body, timeout=60)
 
+    def notebook_select_kernel(
+        self,
+        path: str,
+        *,
+        kernel_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path}
+        if kernel_id is not None:
+            body["kernel_id"] = kernel_id
+        return self._post("/api/notebooks/select-kernel", body, timeout=60)
+
     def notebook_edit(self, path: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
         return self._post("/api/notebooks/edit", {"path": path, "operations": operations})
 

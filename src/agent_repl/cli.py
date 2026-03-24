@@ -232,6 +232,14 @@ def cmd_select_kernel(args: argparse.Namespace) -> int:
     kernel_id = getattr(args, "kernel_id", None)
     extension = getattr(args, "extension", None)
     interactive = getattr(args, "interactive", False)
+    # Route through v2 runtime for headless kernel selection
+    if not interactive:
+        client = _notebook_client(args.path)
+        if hasattr(client, "notebook_select_kernel"):
+            result = client.notebook_select_kernel(args.path, kernel_id=kernel_id)
+            _out(result, args.pretty)
+            return 0
+    # Fall back to bridge for interactive picker
     result = _client(args.path).select_kernel(
         args.path,
         kernel_id=kernel_id,

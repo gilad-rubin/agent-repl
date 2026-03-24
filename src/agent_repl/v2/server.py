@@ -496,6 +496,37 @@ class CoreState:
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
+    def notebook_select_kernel(
+        self,
+        path: str,
+        *,
+        kernel_id: str | None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        python_path = self._resolve_python_path(kernel_id)
+        venv_path = os.path.join(self.workspace_root, ".venv", "bin", "python")
+        source_hint = venv_path if not kernel_id and os.path.exists(venv_path) else None
+        self._ensure_kernel_capable_python(python_path, source_hint=source_hint)
+        existing = self.headless_runtimes.get(real_path)
+        if existing is not None and existing.python_path == python_path:
+            existing.last_used_at = time.time()
+        else:
+            if existing is not None:
+                self._shutdown_headless_runtime(real_path)
+            self._ensure_headless_runtime(real_path, kernel_id=python_path)
+        return {
+            "status": "ok",
+            "path": relative_path,
+            "kernel": {
+                "id": python_path,
+                "label": Path(python_path).name,
+                "python": python_path,
+                "type": "headless",
+            },
+            "message": f"Selected kernel: {python_path}",
+            "mode": "headless",
+        }, HTTPStatus.OK
+
     def notebook_runtime(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
         runtime = self.headless_runtimes.get(real_path)
@@ -598,37 +629,40 @@ class CoreState:
             return None
 
     def _resolve_python_path(self, kernel_id: str | None) -> str:
-        candidates: list[str] = []
+        # Use abspath (not realpath) to preserve venv symlinks.
+        # .venv/bin/python is a symlink to the base interpreter, but running
+        # through the symlink activates the venv's site-packages via pyvenv.cfg.
+        # realpath resolves to the base interpreter which has no venv packages.
         if kernel_id:
             resolved = shutil.which(kernel_id) if not os.path.exists(kernel_id) else kernel_id
             if not resolved:
                 raise RuntimeError(f"Explicit kernel '{kernel_id}' is not an executable path")
-            candidates.append(resolved)
+            return os.path.abspath(resolved)
         workspace_python = os.path.join(self.workspace_root, ".venv", "bin", "python")
         if os.path.exists(workspace_python):
-            candidates.append(workspace_python)
-        if not candidates:
-            raise RuntimeError(
-                "No workspace .venv kernel was detected for this workspace. Re-run with --kernel <python-path>."
-            )
-        return os.path.realpath(candidates[0])
+            return os.path.abspath(workspace_python)
+        raise RuntimeError(
+            "No workspace .venv kernel was detected for this workspace. Re-run with --kernel <python-path>."
+        )
 
-    def _ensure_kernel_capable_python(self, python_path: str) -> None:
-        real_path = os.path.realpath(python_path)
-        if real_path in self._validated_kernel_pythons:
+    def _ensure_kernel_capable_python(self, python_path: str, *, source_hint: str | None = None) -> None:
+        # Use the path as-is (preserving symlinks) for both caching and probing.
+        canonical = os.path.abspath(python_path)
+        if canonical in self._validated_kernel_pythons:
             return
         probe = subprocess.run(
-            [real_path, "-c", "import ipykernel"],
+            [canonical, "-c", "import ipykernel"],
             capture_output=True,
             text=True,
             timeout=15,
         )
         if probe.returncode != 0:
-            detail = (probe.stderr or probe.stdout or "").strip() or "ipykernel import failed"
+            hint = source_hint or canonical
             raise RuntimeError(
-                f"Kernel executable '{real_path}' is not kernel-capable. Install ipykernel in that environment or use a workspace .venv. Detail: {detail}"
+                f"Kernel executable '{hint}' is not kernel-capable (ipykernel not installed). "
+                f"Install it with: {canonical} -m pip install ipykernel — or pass --kernel <path> to use a different environment."
             )
-        self._validated_kernel_pythons.add(real_path)
+        self._validated_kernel_pythons.add(canonical)
 
     def _ensure_headless_runtime(self, real_path: str, kernel_id: str | None = None) -> HeadlessNotebookRuntime:
         runtime = self.headless_runtimes.get(real_path)
@@ -637,13 +671,17 @@ class CoreState:
                 runtime.last_used_at = time.time()
                 return runtime
             python_path = self._resolve_python_path(kernel_id)
-            self._ensure_kernel_capable_python(python_path)
+            venv_path = os.path.join(self.workspace_root, ".venv", "bin", "python")
+            source_hint = venv_path if not kernel_id and os.path.exists(venv_path) else None
+            self._ensure_kernel_capable_python(python_path, source_hint=source_hint)
             if runtime.python_path == python_path:
                 runtime.last_used_at = time.time()
                 return runtime
         else:
             python_path = self._resolve_python_path(kernel_id)
-            self._ensure_kernel_capable_python(python_path)
+            venv_path = os.path.join(self.workspace_root, ".venv", "bin", "python")
+            source_hint = venv_path if not kernel_id and os.path.exists(venv_path) else None
+            self._ensure_kernel_capable_python(python_path, source_hint=source_hint)
         if runtime is not None:
             self._shutdown_headless_runtime(real_path)
 
@@ -684,6 +722,16 @@ class CoreState:
     def shutdown_headless_runtimes(self) -> None:
         for real_path in list(self.headless_runtimes.keys()):
             self._shutdown_headless_runtime(real_path)
+
+    def _rollback_inserted_cell(self, real_path: str, cell_id: str) -> None:
+        """Remove a cell that was inserted but whose execution failed at the infra level."""
+        try:
+            notebook, _ = self._load_notebook(real_path)
+            index = self._find_cell_index(notebook, cell_id=cell_id)
+            notebook.cells.pop(index)
+            self._save_notebook(real_path, notebook)
+        except Exception:
+            pass  # best-effort cleanup; don't mask the original error
 
     def _load_notebook(self, real_path: str) -> tuple[Any, bool]:
         created = False
@@ -1078,6 +1126,11 @@ class CoreState:
         cell_type: str,
         at_index: int,
     ) -> dict[str, Any]:
+        # For code cells, resolve the runtime BEFORE inserting the cell.
+        # This ensures failed kernel resolution doesn't leave orphan cells.
+        if cell_type == "code":
+            self._ensure_headless_runtime(real_path)
+
         notebook, _ = self._load_notebook(real_path)
         index = len(notebook.cells) if at_index == -1 else at_index
         cell = nbformat.v4.new_code_cell(source=source) if cell_type == "code" else nbformat.v4.new_markdown_cell(source=source)
@@ -1096,10 +1149,22 @@ class CoreState:
                 "execution_mode": "headless-runtime",
                 "execution_preference": "headless",
             }
-        return {
-            **self._headless_notebook_execute_cell(real_path, relative_path, cell_id=self._cell_id(cell, index), cell_index=None),
-            "operation": "insert-execute",
-        }
+        cell_id = self._cell_id(cell, index)
+        try:
+            result = self._headless_notebook_execute_cell(
+                real_path, relative_path, cell_id=cell_id, cell_index=None,
+            )
+        except Exception as exc:
+            # Agent-repl infrastructure error (kernel crash, timeout, connection
+            # lost) — roll back the inserted cell so ix doesn't leave orphans.
+            # Python exceptions in user code don't reach here; they're captured
+            # as error outputs by _execute_source and returned normally.
+            self._rollback_inserted_cell(real_path, cell_id)
+            raise RuntimeError(
+                f"ix failed and the inserted cell was rolled back (notebook unchanged). "
+                f"Cause: {exc}"
+            ) from exc
+        return {**result, "operation": "insert-execute"}
 
     def _headless_notebook_execute_all(self, real_path: str, relative_path: str) -> dict[str, Any]:
         notebook, _ = self._load_notebook(real_path)
@@ -1611,6 +1676,18 @@ def _handler_factory(state: CoreState):
                     body, status = state.notebook_edit(
                         path,
                         [item for item in operations if isinstance(item, dict)],
+                    )
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/select-kernel":
+                    path = payload.get("path")
+                    kernel_id = payload.get("kernel_id")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    body, status = state.notebook_select_kernel(
+                        path,
+                        kernel_id=kernel_id if isinstance(kernel_id, str) else None,
                     )
                     self._json(status, body)
                     return

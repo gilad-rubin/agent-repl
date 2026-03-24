@@ -90,11 +90,20 @@ What to confirm:
 
 ## Kernel Rules
 
-- if a workspace `.venv` exists, it is the default runtime for `new`
+- if a workspace `.venv` exists, it is the default runtime for `new` and `ix`
+- the `.venv` must have `ipykernel` installed — if it doesn't, the error will name the `.venv` path and tell you how to fix it
 - if no workspace `.venv` exists, pass `--kernel` explicitly
-- `select-kernel` is for explicit, editor-backed kernel choice rather than the normal path
+- `select-kernel` changes the active kernel for a notebook in the headless runtime — subsequent `ix` and `exec` use the selected kernel
+- use `--interactive` with `select-kernel` only when you want the VS Code kernel picker
+
+```bash
+agent-repl select-kernel analysis.ipynb --kernel-id /opt/miniconda3/bin/python3
+agent-repl ix analysis.ipynb -s 'import sys; print(sys.executable)'
+```
 
 Starter cells from `new --cells-json` are created, not auto-executed.
+
+Failed `ix` calls do not leave orphan cells — if the kernel cannot be resolved or an infrastructure error occurs (kernel crash, connection lost, timeout), the inserted cell is rolled back and the notebook is unchanged. The error message will say "ix failed and the inserted cell was rolled back." Python exceptions in your code are *not* rolled back — those behave like normal notebook cells with error output.
 
 ## Editor-Assisted Features
 
@@ -103,7 +112,6 @@ These features still assume the extension is available:
 - `prompts`
 - `respond`
 - `kernels`
-- `select-kernel`
 - `reload`
 
 If you are validating live editor projection behavior, rebuild/reinstall the extension when needed and then verify:
