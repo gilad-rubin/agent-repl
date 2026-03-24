@@ -25,6 +25,8 @@ By default, the bridge only operates on notebooks inside its own workspace; it w
 ```bash
 # Install the CLI
 uv tool install /path/to/agent-repl --reinstall
+# or from inside this checkout
+make install-dev
 
 # Create a notebook and start working
 agent-repl new analysis.ipynb
@@ -93,11 +95,26 @@ All commands output JSON. Pass `--pretty` for formatted output.
 # Global CLI tool (recommended)
 uv tool install /path/to/agent-repl --reinstall
 
+# Or from inside this repo checkout
+make install-dev
+
 # Dev dependency in another project
 uv add --dev agent-repl --path /path/to/agent-repl
 ```
 
-The VS Code extension must also be installed. Build it with `cd extension && npm run compile && npx vsce package`, then install the `.vsix`.
+Before validating from another workspace, verify the PATH-installed CLI:
+
+```bash
+make verify-install
+```
+
+The VS Code extension must also be installed. Build and reinstall it with:
+
+```bash
+make install-ext
+```
+
+Or manually run `cd extension && npm run compile && npx vsce package`, then install the `.vsix`.
 For the packaged v2 auto-attach smoke check, run `cd extension && npm run test:artifact`.
 Recompiling the repo alone does not update an already-installed extension under `~/.vscode/extensions/`; reinstall the `.vsix` after rebuilding, or run the repo in an Extension Development Host.
 

@@ -1432,6 +1432,18 @@ class TestVersionSurface(unittest.TestCase):
         self.assertEqual(exited.exception.code, 0)
         self.assertRegex(stdout.getvalue().strip(), r"^\d+\.\d+\.\d+$")
 
+    def test_help_mentions_v2_command_group(self):
+        stdout = StringIO()
+        old = sys.stdout
+        sys.stdout = stdout
+        try:
+            with self.assertRaises(SystemExit) as exited:
+                build_parser().parse_args(["--help"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(exited.exception.code, 0)
+        self.assertIn("v2", stdout.getvalue())
+
     def test_python_and_extension_versions_stay_in_sync(self):
         root = Path(__file__).resolve().parents[1]
         pyproject = tomllib.loads((root / "pyproject.toml").read_text())

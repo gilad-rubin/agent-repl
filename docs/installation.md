@@ -13,15 +13,17 @@ Get agent-repl running: the VS Code extension and the CLI.
 Build and install the extension:
 
 ```bash
+make install-ext
+```
+
+This builds `extension/agent-repl-0.3.0.vsix` and reinstalls it into VS Code.
+If you want the manual steps instead:
+
+```bash
 cd extension
 npm install
 npm run compile
 npx vsce package
-```
-
-This produces a `.vsix` file. Install it:
-
-```bash
 code --install-extension agent-repl-0.3.0.vsix
 ```
 
@@ -37,6 +39,9 @@ The extension auto-starts when you open a `.ipynb` file. You can also start it m
 # Global CLI tool (recommended)
 uv tool install /path/to/agent-repl --reinstall
 
+# Or from inside this repo checkout
+make install-dev
+
 # Or as a dev dependency in another project
 uv add --dev agent-repl --path /path/to/agent-repl
 ```
@@ -44,11 +49,18 @@ uv add --dev agent-repl --path /path/to/agent-repl
 Verify:
 
 ```bash
-agent-repl --help
+agent-repl --version
+agent-repl v2 --help
 ```
 
 ```
-usage: agent-repl [-h] [--pretty] {reload,cat,status,edit,exec,ix,run-all,restart,restart-run-all,new,kernels,select-kernel,prompts,respond} ...
+0.3.0
+```
+
+You can also run the repo-provided verification shortcut:
+
+```bash
+make verify-install
 ```
 
 ## 3. Verify the Setup
@@ -87,8 +99,12 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 
 **"Installed CLI is missing new commands like `v2`"**
 - Check the installed version with `agent-repl --version`
-- Reinstall local path installs with `uv tool install /path/to/agent-repl --reinstall`
+- Reinstall local path installs with `uv tool install /path/to/agent-repl --reinstall` or `make install-dev`
 - When working from source without reinstalling, prefer `uv run --project /path/to/agent-repl agent-repl ...`
+
+**"Installed extension is still an older build"**
+- Run `make install-ext`
+- Then run `agent-repl reload --pretty` from the target workspace and confirm `extension_root` points at the new installed version
 
 **"v2 auto-attach cannot find agent-repl"**
 - Set `agent-repl.cliPath` if the extension host cannot resolve the CLI from PATH
