@@ -64,7 +64,7 @@ agent-repl v2 run-finish --run-id <id> --status-value completed
 - prefer `--cell-id` over `--index`; IDs survive reordering while indexes do not
 - source input is shared across commands: `-s`, `--source-file`, or stdin
 - `run-all` and `restart-run-all` trigger notebook execution and return immediately; follow them with `status` until the kernel is idle before assuming the notebook is ready
-- `v2` commands are experimental workspace-core commands for the new architecture direction; they now cover daemon lifecycle plus attach/resume session flows, branch/document/runtime/run registration, explicit file-sync boundaries, and workspace-owned continuity across daemon restarts; the VS Code extension can now auto-attach as a projection client when the bridge starts, but the bridge workflow still remains the primary notebook-control surface
+- `v2` commands are experimental workspace-core commands for the new architecture direction; they now cover daemon lifecycle plus attach/resume session flows, branch/document/runtime/run registration, explicit file-sync boundaries, and workspace-owned continuity across daemon restarts; the VS Code extension can now auto-attach as a projection client when the bridge starts, and you can force deterministic launcher resolution with the `agent-repl.cliPath` extension setting, but the bridge workflow still remains the primary notebook-control surface
 
 ## Notebook Creation
 
