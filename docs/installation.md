@@ -22,7 +22,7 @@ npx vsce package
 This produces a `.vsix` file. Install it:
 
 ```bash
-code --install-extension agent-repl-0.2.0.vsix
+code --install-extension agent-repl-0.3.0.vsix
 ```
 
 If you edit the extension in a local repo checkout, `npm run compile` only updates that checkout. VS Code keeps running the installed copy under `~/.vscode/extensions/` until you reinstall the new `.vsix` or launch the repo in an Extension Development Host. `agent-repl reload` only hot-reloads the extension copy that is already active in the current editor window.
@@ -35,7 +35,7 @@ The extension auto-starts when you open a `.ipynb` file. You can also start it m
 
 ```bash
 # Global CLI tool (recommended)
-uv tool install /path/to/agent-repl
+uv tool install /path/to/agent-repl --reinstall
 
 # Or as a dev dependency in another project
 uv add --dev agent-repl --path /path/to/agent-repl
@@ -84,6 +84,11 @@ Settings available in VS Code (Settings → Extensions → Agent REPL):
 - Make sure VS Code/Cursor is open with a `.ipynb` file
 - Check that the extension is installed: look for "Agent REPL" in the activity bar
 - Manually start: Command Palette → "Agent REPL: Start Bridge"
+
+**"Installed CLI is missing new commands like `v2`"**
+- Check the installed version with `agent-repl --version`
+- Reinstall local path installs with `uv tool install /path/to/agent-repl --reinstall`
+- When working from source without reinstalling, prefer `uv run --project /path/to/agent-repl agent-repl ...`
 
 **"v2 auto-attach cannot find agent-repl"**
 - Set `agent-repl.cliPath` if the extension host cannot resolve the CLI from PATH

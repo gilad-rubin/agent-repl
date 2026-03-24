@@ -2,7 +2,7 @@
   "name": "agent-repl",
   "displayName": "Agent REPL",
   "description": "Multiplayer Jupyter notebooks — AI agents and humans collaborate in real time",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "GiladRubin",
   "license": "MIT",
   "engines": {

@@ -24,7 +24,7 @@ By default, the bridge only operates on notebooks inside its own workspace; it w
 
 ```bash
 # Install the CLI
-uv tool install /path/to/agent-repl
+uv tool install /path/to/agent-repl --reinstall
 
 # Create a notebook and start working
 agent-repl new analysis.ipynb
@@ -91,7 +91,7 @@ All commands output JSON. Pass `--pretty` for formatted output.
 
 ```bash
 # Global CLI tool (recommended)
-uv tool install /path/to/agent-repl
+uv tool install /path/to/agent-repl --reinstall
 
 # Dev dependency in another project
 uv add --dev agent-repl --path /path/to/agent-repl

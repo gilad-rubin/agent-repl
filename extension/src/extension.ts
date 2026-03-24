@@ -112,7 +112,7 @@ async function startBridge(
         const port = await server.start(config.get<number>('port', 0));
 
         writeConnectionFile({
-            port, token, pid: process.pid, version: '0.2.0',
+            port, token, pid: process.pid, version: '0.3.0',
             workspace_folders: (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath)
         });
 

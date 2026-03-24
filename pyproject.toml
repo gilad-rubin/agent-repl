@@ -1,6 +1,6 @@
 [project]
 name = "agent-repl"
-version = "0.2.0"
+version = "0.3.0"
 description = "CLI for AI agents to work with Jupyter notebooks via the VS Code bridge"
 requires-python = ">=3.10"
 dependencies = [

@@ -5,7 +5,7 @@ Create a notebook, execute code, edit cells, and use the prompt loop — all fro
 ## Prerequisites
 
 1. **VS Code or Cursor** with the agent-repl extension installed and running
-2. **Python 3.10+** with the CLI installed (`uv tool install /path/to/agent-repl`)
+2. **Python 3.10+** with the CLI installed (`uv tool install /path/to/agent-repl --reinstall`)
 
 The extension auto-starts when you open a notebook. Verify the bridge is running:
 

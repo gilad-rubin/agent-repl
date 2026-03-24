@@ -78,7 +78,7 @@ The extension writes a JSON connection file on startup:
 {
   "port": 54321,
   "token": "random-bearer-token",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "workspace_folders": ["/Users/you/project"]
 }
 ```

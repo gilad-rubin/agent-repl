@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import tempfile
 import sys
+import tomllib
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -1416,6 +1417,26 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         client.finish_run.assert_called_once_with("run-1", status="completed")
+
+
+class TestVersionSurface(unittest.TestCase):
+    def test_cli_exposes_version_flag(self):
+        stdout = StringIO()
+        old = sys.stdout
+        sys.stdout = stdout
+        try:
+            with self.assertRaises(SystemExit) as exited:
+                build_parser().parse_args(["--version"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(exited.exception.code, 0)
+        self.assertRegex(stdout.getvalue().strip(), r"^\d+\.\d+\.\d+$")
+
+    def test_python_and_extension_versions_stay_in_sync(self):
+        root = Path(__file__).resolve().parents[1]
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+        extension_package = json.loads((root / "extension" / "package.json").read_text())
+        self.assertEqual(pyproject["project"]["version"], extension_package["version"])
 
 
 if __name__ == "__main__":

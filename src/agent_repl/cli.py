@@ -5,6 +5,9 @@ import argparse
 import json
 import os
 import sys
+import tomllib
+from importlib.metadata import PackageNotFoundError, version as package_version
+from pathlib import Path
 from typing import Any
 
 from agent_repl.client import BridgeClient
@@ -14,6 +17,14 @@ from agent_repl.v2.server import serve_forever
 
 def _out(data: Any, pretty: bool = False) -> None:
     print(json.dumps(data, indent=2 if pretty else None))
+
+
+def _app_version() -> str:
+    try:
+        return package_version("agent-repl")
+    except PackageNotFoundError:
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        return tomllib.loads(pyproject.read_text())["project"]["version"]
 
 
 def _client(workspace_hint: str | None = None) -> BridgeClient:
@@ -397,6 +408,7 @@ def _read_source(args: argparse.Namespace) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-repl", description="Agent REPL bridge CLI")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
+    parser.add_argument("--version", action="version", version=_app_version())
     sub = parser.add_subparsers(dest="command")
 
     # reload

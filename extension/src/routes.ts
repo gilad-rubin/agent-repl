@@ -602,7 +602,7 @@ export function buildRoutes(maxQueue: number): Routes {
         // --- Health ---
         'GET /api/health': async () => ({
             status: 'ok',
-            version: '0.2.0',
+            version: '0.3.0',
             extension_root: path.resolve(__dirname, '..'),
             routes_module: __filename,
             open_notebooks: vscode.workspace.notebookDocuments
