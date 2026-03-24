@@ -284,6 +284,12 @@ class V2Client:
     def notebook_execute_all(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/execute-all", {"path": path}, timeout=120)
 
+    def notebook_restart(self, path: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/restart", {"path": path}, timeout=120)
+
+    def notebook_restart_and_run_all(self, path: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/restart-and-run-all", {"path": path}, timeout=120)
+
     def list_branches(self) -> dict[str, Any]:
         return self._get("/api/branches")
 

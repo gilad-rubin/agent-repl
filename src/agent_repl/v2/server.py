@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -13,6 +15,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+import nbformat
+from jupyter_client import KernelManager
+from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
 
@@ -149,6 +155,29 @@ class BranchRecord:
 
 
 @dataclass
+class HeadlessNotebookRuntime:
+    path: str
+    python_path: str
+    manager: Any
+    client: Any
+    created_at: float
+    last_used_at: float
+    busy: bool = False
+    current_execution: dict[str, Any] | None = None
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "python_path": self.python_path,
+            "busy": self.busy,
+            "current_execution": self.current_execution,
+            "created_at": self.created_at,
+            "last_used_at": self.last_used_at,
+        }
+
+
+@dataclass
 class CoreState:
     workspace_root: str
     runtime_dir: str
@@ -166,6 +195,8 @@ class CoreState:
     branch_records: dict[str, BranchRecord] = field(default_factory=dict)
     runtime_records: dict[str, RuntimeRecord] = field(default_factory=dict)
     run_records: dict[str, RunRecord] = field(default_factory=dict)
+    headless_runtimes: dict[str, HeadlessNotebookRuntime] = field(default_factory=dict, repr=False)
+    _validated_kernel_pythons: set[str] = field(default_factory=set, init=False, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -387,15 +418,21 @@ class CoreState:
 
     def notebook_contents(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._bridge_client(real_path)
-        payload = client.contents(relative_path)
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.contents(relative_path)
+        else:
+            payload = self._headless_notebook_contents(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_status(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._bridge_client(real_path)
-        payload = client.status(relative_path)
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.status(relative_path)
+        else:
+            payload = self._headless_notebook_status(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -407,15 +444,21 @@ class CoreState:
         kernel_id: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._bridge_client(real_path)
-        payload = client.create(relative_path, cells=cells, kernel_id=kernel_id)
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.create(relative_path, cells=cells, kernel_id=kernel_id)
+        else:
+            payload = self._headless_notebook_create(real_path, relative_path, cells=cells, kernel_id=kernel_id)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_edit(self, path: str, operations: list[dict[str, Any]]) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._bridge_client(real_path)
-        payload = client.edit(relative_path, operations)
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.edit(relative_path, operations)
+        else:
+            payload = self._headless_notebook_edit(real_path, relative_path, operations)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -427,13 +470,22 @@ class CoreState:
         cell_index: int | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._bridge_client(real_path)
-        payload = client.execute_cell(
-            relative_path,
-            cell_id=cell_id,
-            cell_index=cell_index,
-            wait=False,
-        )
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.execute_cell(
+                relative_path,
+                cell_id=cell_id,
+                cell_index=cell_index,
+                wait=False,
+            )
+        else:
+            payload = self._headless_notebook_execute_cell(
+                real_path,
+                relative_path,
+                cell_id=cell_id,
+                cell_index=cell_index,
+            )
+            self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_insert_execute(
@@ -445,25 +497,60 @@ class CoreState:
         at_index: int,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._bridge_client(real_path)
-        payload = client.insert_and_execute(
-            relative_path,
-            source,
-            cell_type=cell_type,
-            at_index=at_index,
-            wait=False,
-        )
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.insert_and_execute(
+                relative_path,
+                source,
+                cell_type=cell_type,
+                at_index=at_index,
+                wait=False,
+            )
+        else:
+            payload = self._headless_notebook_insert_execute(
+                real_path,
+                relative_path,
+                source=source,
+                cell_type=cell_type,
+                at_index=at_index,
+            )
+            self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
     def notebook_execution(self, execution_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        client = self._bridge_client(self.workspace_root)
+        client = self._projection_client(self.workspace_root)
+        if client is None:
+            return {"error": f"Unknown execution: {execution_id}"}, HTTPStatus.NOT_FOUND
         payload = client.execution(execution_id)
         return payload, HTTPStatus.OK
 
     def notebook_execute_all(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self._resolve_document_path(path)
-        client = self._bridge_client(real_path)
-        payload = client.execute_all(relative_path)
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.execute_all(relative_path)
+        else:
+            payload = self._headless_notebook_execute_all(real_path, relative_path)
+        self._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
+
+    def notebook_restart(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.restart_kernel(relative_path)
+        else:
+            payload = self._headless_notebook_restart(real_path, relative_path)
+        self._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
+
+    def notebook_restart_and_run_all(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self._resolve_document_path(path)
+        client = self._projection_client(real_path)
+        if client is not None:
+            payload = client.restart_and_run_all(relative_path)
+        else:
+            payload = self._headless_notebook_restart_and_run_all(real_path, relative_path)
         self._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
@@ -492,8 +579,457 @@ class CoreState:
         relative_path = os.path.relpath(real_path, self.workspace_root)
         return real_path, relative_path
 
-    def _bridge_client(self, workspace_hint: str) -> BridgeClient:
-        return BridgeClient.discover(workspace_hint=workspace_hint)
+    def _projection_client(self, workspace_hint: str) -> BridgeClient | None:
+        try:
+            return BridgeClient.discover(workspace_hint=workspace_hint)
+        except Exception:
+            return None
+
+    def _resolve_python_path(self, kernel_id: str | None) -> str:
+        candidates: list[str] = []
+        if kernel_id:
+            resolved = shutil.which(kernel_id) if not os.path.exists(kernel_id) else kernel_id
+            if not resolved:
+                raise RuntimeError(f"Explicit kernel '{kernel_id}' is not an executable path")
+            candidates.append(resolved)
+        workspace_python = os.path.join(self.workspace_root, ".venv", "bin", "python")
+        if os.path.exists(workspace_python):
+            candidates.append(workspace_python)
+        if not candidates:
+            raise RuntimeError(
+                "No workspace .venv kernel was detected for this workspace. Re-run with --kernel <python-path>."
+            )
+        return os.path.realpath(candidates[0])
+
+    def _ensure_kernel_capable_python(self, python_path: str) -> None:
+        real_path = os.path.realpath(python_path)
+        if real_path in self._validated_kernel_pythons:
+            return
+        probe = subprocess.run(
+            [real_path, "-c", "import ipykernel"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if probe.returncode != 0:
+            detail = (probe.stderr or probe.stdout or "").strip() or "ipykernel import failed"
+            raise RuntimeError(
+                f"Kernel executable '{real_path}' is not kernel-capable. Install ipykernel in that environment or use a workspace .venv. Detail: {detail}"
+            )
+        self._validated_kernel_pythons.add(real_path)
+
+    def _ensure_headless_runtime(self, real_path: str, kernel_id: str | None = None) -> HeadlessNotebookRuntime:
+        runtime = self.headless_runtimes.get(real_path)
+        if runtime is not None:
+            if kernel_id is None:
+                runtime.last_used_at = time.time()
+                return runtime
+            python_path = self._resolve_python_path(kernel_id)
+            self._ensure_kernel_capable_python(python_path)
+            if runtime.python_path == python_path:
+                runtime.last_used_at = time.time()
+                return runtime
+        else:
+            python_path = self._resolve_python_path(kernel_id)
+            self._ensure_kernel_capable_python(python_path)
+        if runtime is not None:
+            self._shutdown_headless_runtime(real_path)
+
+        manager = KernelManager(kernel_name="python3")
+        manager._kernel_spec = KernelSpec(  # type: ignore[attr-defined]
+            argv=[python_path, "-m", "ipykernel", "-f", "{connection_file}"],
+            display_name=f"agent-repl ({Path(python_path).name})",
+            language="python",
+        )
+        manager.start_kernel()
+        client = manager.client()
+        client.start_channels()
+        client.wait_for_ready(timeout=60)
+        runtime = HeadlessNotebookRuntime(
+            path=real_path,
+            python_path=python_path,
+            manager=manager,
+            client=client,
+            created_at=time.time(),
+            last_used_at=time.time(),
+        )
+        self.headless_runtimes[real_path] = runtime
+        return runtime
+
+    def _shutdown_headless_runtime(self, real_path: str) -> None:
+        runtime = self.headless_runtimes.pop(real_path, None)
+        if runtime is None:
+            return
+        try:
+            runtime.client.stop_channels()
+        except Exception:
+            pass
+        try:
+            runtime.manager.shutdown_kernel(now=True)
+        except Exception:
+            pass
+
+    def shutdown_headless_runtimes(self) -> None:
+        for real_path in list(self.headless_runtimes.keys()):
+            self._shutdown_headless_runtime(real_path)
+
+    def _load_notebook(self, real_path: str) -> tuple[Any, bool]:
+        created = False
+        if os.path.exists(real_path):
+            with open(real_path, "r", encoding="utf-8") as handle:
+                notebook = nbformat.read(handle, as_version=4)
+        else:
+            notebook = nbformat.v4.new_notebook()
+            created = True
+        changed = False
+        for index, cell in enumerate(notebook.cells):
+            changed = self._ensure_cell_identity(cell, index) or changed
+        return notebook, created or changed
+
+    def _save_notebook(self, real_path: str, notebook: Any) -> None:
+        Path(real_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(real_path, "w", encoding="utf-8") as handle:
+            nbformat.write(notebook, handle)
+
+    def _ensure_cell_identity(self, cell: Any, index: int) -> bool:
+        metadata = dict(getattr(cell, "metadata", {}) or {})
+        custom = dict(metadata.get("custom", {}) or {})
+        agent_repl = dict(custom.get("agent-repl", {}) or {})
+        if agent_repl.get("cell_id"):
+            return False
+        agent_repl["cell_id"] = str(uuid.uuid4())
+        custom["agent-repl"] = agent_repl
+        metadata["custom"] = custom
+        cell.metadata = metadata
+        if not getattr(cell, "id", None):
+            cell.id = f"cell-{index + 1}"
+        return True
+
+    def _cell_id(self, cell: Any, index: int) -> str:
+        self._ensure_cell_identity(cell, index)
+        metadata = dict(getattr(cell, "metadata", {}) or {})
+        custom = dict(metadata.get("custom", {}) or {})
+        agent_repl = dict(custom.get("agent-repl", {}) or {})
+        return agent_repl["cell_id"]
+
+    def _find_cell_index(self, notebook: Any, *, cell_id: str | None = None, cell_index: int | None = None) -> int:
+        if cell_id is not None:
+            for index, cell in enumerate(notebook.cells):
+                if self._cell_id(cell, index) == cell_id:
+                    return index
+            raise RuntimeError(f"No cell matched id '{cell_id}'")
+        if cell_index is not None:
+            if 0 <= cell_index < len(notebook.cells):
+                return cell_index
+            raise RuntimeError(f"Cell index out of range: {cell_index}")
+        raise RuntimeError("Provide cell_id or cell_index")
+
+    def _canonical_outputs(self, outputs: Any) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for output in outputs or []:
+            if isinstance(output, dict):
+                normalized.append(json.loads(json.dumps(output)))
+            else:
+                normalized.append(json.loads(json.dumps(output)))
+        return normalized
+
+    def _headless_notebook_contents(self, real_path: str, relative_path: str) -> dict[str, Any]:
+        notebook, changed = self._load_notebook(real_path)
+        if changed:
+            self._save_notebook(real_path, notebook)
+        cells = []
+        code_index = 0
+        for index, cell in enumerate(notebook.cells):
+            is_code = cell.cell_type == "code"
+            if is_code:
+                code_index += 1
+            cells.append(
+                {
+                    "index": index,
+                    "display_number": code_index if is_code else None,
+                    "cell_id": self._cell_id(cell, index),
+                    "cell_type": cell.cell_type,
+                    "source": cell.source,
+                    "outputs": self._canonical_outputs(getattr(cell, "outputs", [])),
+                    "execution_count": getattr(cell, "execution_count", None),
+                    "metadata": dict(getattr(cell, "metadata", {}) or {}),
+                }
+            )
+        return {"path": relative_path, "cells": cells}
+
+    def _headless_notebook_status(self, real_path: str, relative_path: str) -> dict[str, Any]:
+        runtime = self.headless_runtimes.get(real_path)
+        running = []
+        if runtime and runtime.current_execution:
+            running.append(runtime.current_execution)
+        return {
+            "path": relative_path,
+            "open": False,
+            "kernel_state": "busy" if runtime and runtime.busy else ("idle" if runtime else "not_open"),
+            "busy": bool(runtime and runtime.busy),
+            "running": running,
+            "queued": [],
+        }
+
+    def _create_notebook_cells(self, cells: list[dict[str, Any]] | None) -> list[Any]:
+        notebook_cells: list[Any] = []
+        for index, cell in enumerate(cells or []):
+            cell_type = "code" if cell.get("type") == "code" else "markdown"
+            source = cell.get("source", "")
+            if cell_type == "code":
+                notebook_cell = nbformat.v4.new_code_cell(source=source)
+            else:
+                notebook_cell = nbformat.v4.new_markdown_cell(source=source)
+            self._ensure_cell_identity(notebook_cell, index)
+            notebook_cells.append(notebook_cell)
+        return notebook_cells
+
+    def _headless_notebook_create(
+        self,
+        real_path: str,
+        relative_path: str,
+        *,
+        cells: list[dict[str, Any]] | None,
+        kernel_id: str | None,
+    ) -> dict[str, Any]:
+        python_path = self._resolve_python_path(kernel_id)
+        runtime = self._ensure_headless_runtime(real_path, python_path)
+        notebook = nbformat.v4.new_notebook(cells=self._create_notebook_cells(cells))
+        notebook.metadata["kernelspec"] = {
+            "display_name": f"{Path(python_path).parent.parent.name or Path(python_path).name}",
+            "language": "python",
+            "name": "python3",
+        }
+        self._save_notebook(real_path, notebook)
+        runtime.last_used_at = time.time()
+        return {
+            "status": "ok",
+            "path": relative_path,
+            "kernel_status": "selected",
+            "ready": True,
+            "kernel": {
+                "id": python_path,
+                "label": Path(python_path).name,
+                "python": python_path,
+                "type": "headless",
+            },
+            "message": f"Selected kernel: {python_path}",
+            "mode": "headless",
+        }
+
+    def _headless_notebook_edit(self, real_path: str, relative_path: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
+        notebook, changed = self._load_notebook(real_path)
+        results: list[dict[str, Any]] = []
+        for op in operations:
+            command = op.get("op")
+            if command == "replace-source":
+                index = self._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
+                cell = notebook.cells[index]
+                cell.source = op.get("source", "")
+                if cell.cell_type == "code":
+                    cell.outputs = []
+                    cell.execution_count = None
+                results.append({"op": "replace-source", "changed": True, "cell_id": self._cell_id(cell, index), "cell_count": len(notebook.cells)})
+                changed = True
+            elif command == "insert":
+                index = len(notebook.cells) if op.get("at_index", -1) == -1 else int(op.get("at_index", len(notebook.cells)))
+                cell_type = op.get("cell_type", "code")
+                source = op.get("source", "")
+                cell = nbformat.v4.new_code_cell(source=source) if cell_type == "code" else nbformat.v4.new_markdown_cell(source=source)
+                notebook.cells.insert(index, cell)
+                for position, current in enumerate(notebook.cells):
+                    self._ensure_cell_identity(current, position)
+                results.append({"op": "insert", "changed": True, "cell_id": self._cell_id(cell, index), "cell_count": len(notebook.cells)})
+                changed = True
+            elif command == "clear-outputs":
+                if op.get("all"):
+                    for index, cell in enumerate(notebook.cells):
+                        if cell.cell_type == "code":
+                            cell.outputs = []
+                            cell.execution_count = None
+                    results.append({"op": "clear-outputs", "changed": True, "cell_count": len(notebook.cells)})
+                    changed = True
+                else:
+                    index = self._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
+                    cell = notebook.cells[index]
+                    if cell.cell_type == "code":
+                        cell.outputs = []
+                        cell.execution_count = None
+                    results.append({"op": "clear-outputs", "changed": True, "cell_id": self._cell_id(cell, index), "cell_count": len(notebook.cells)})
+                    changed = True
+            else:
+                raise RuntimeError(f"Unsupported headless edit operation: {command}")
+        if changed:
+            self._save_notebook(real_path, notebook)
+        return {"path": relative_path, "results": results}
+
+    def _execute_source(self, runtime: HeadlessNotebookRuntime, source: str, *, cell_id: str, cell_index: int) -> tuple[list[Any], int | None, str | None]:
+        with runtime.lock:
+            runtime.busy = True
+            runtime.current_execution = {
+                "cell_id": cell_id,
+                "cell_index": cell_index,
+                "source_preview": source.splitlines()[0][:80] if source else "",
+                "owner": "agent",
+            }
+            runtime.last_used_at = time.time()
+            try:
+                msg_id = runtime.client.execute(source, store_history=True, allow_stdin=False, stop_on_error=True)
+                outputs: list[Any] = []
+                execution_count: int | None = None
+                error_text: str | None = None
+                idle_seen = False
+                while not idle_seen:
+                    message = runtime.client.get_iopub_msg(timeout=60)
+                    if message.get("parent_header", {}).get("msg_id") != msg_id:
+                        continue
+                    msg_type = message.get("msg_type") or message.get("header", {}).get("msg_type")
+                    content = message.get("content", {})
+                    if msg_type == "status" and content.get("execution_state") == "idle":
+                        idle_seen = True
+                        continue
+                    if msg_type == "execute_input":
+                        execution_count = content.get("execution_count")
+                        continue
+                    if msg_type == "stream":
+                        outputs.append(
+                            nbformat.v4.new_output(
+                                output_type="stream",
+                                name=content.get("name", "stdout"),
+                                text=content.get("text", ""),
+                            )
+                        )
+                        continue
+                    if msg_type == "execute_result":
+                        outputs.append(
+                            nbformat.v4.new_output(
+                                output_type="execute_result",
+                                data=content.get("data", {}),
+                                metadata=content.get("metadata", {}),
+                                execution_count=content.get("execution_count"),
+                            )
+                        )
+                        execution_count = content.get("execution_count", execution_count)
+                        continue
+                    if msg_type == "display_data":
+                        outputs.append(
+                            nbformat.v4.new_output(
+                                output_type="display_data",
+                                data=content.get("data", {}),
+                                metadata=content.get("metadata", {}),
+                            )
+                        )
+                        continue
+                    if msg_type == "error":
+                        outputs.append(
+                            nbformat.v4.new_output(
+                                output_type="error",
+                                ename=content.get("ename"),
+                                evalue=content.get("evalue"),
+                                traceback=content.get("traceback", []),
+                            )
+                        )
+                        error_text = content.get("evalue") or content.get("ename") or "Execution failed"
+                runtime.client.get_shell_msg(timeout=60)
+                return outputs, execution_count, error_text
+            finally:
+                runtime.busy = False
+                runtime.current_execution = None
+                runtime.last_used_at = time.time()
+
+    def _headless_notebook_execute_cell(
+        self,
+        real_path: str,
+        relative_path: str,
+        *,
+        cell_id: str | None,
+        cell_index: int | None,
+    ) -> dict[str, Any]:
+        notebook, changed = self._load_notebook(real_path)
+        index = self._find_cell_index(notebook, cell_id=cell_id, cell_index=cell_index)
+        cell = notebook.cells[index]
+        if cell.cell_type != "code":
+            raise RuntimeError("Only code cells can be executed")
+        runtime = self._ensure_headless_runtime(real_path)
+        stable_cell_id = self._cell_id(cell, index)
+        outputs, execution_count, error_text = self._execute_source(runtime, cell.source, cell_id=stable_cell_id, cell_index=index)
+        cell.outputs = outputs
+        cell.execution_count = execution_count
+        self._save_notebook(real_path, notebook)
+        return {
+            "status": "error" if error_text else "ok",
+            "path": relative_path,
+            "cell_id": stable_cell_id,
+            "cell_index": index,
+            "outputs": outputs,
+            "execution_count": execution_count,
+            "execution_mode": "headless-runtime",
+            "execution_preference": "headless",
+            **({"error": error_text} if error_text else {}),
+        }
+
+    def _headless_notebook_insert_execute(
+        self,
+        real_path: str,
+        relative_path: str,
+        *,
+        source: str,
+        cell_type: str,
+        at_index: int,
+    ) -> dict[str, Any]:
+        notebook, _ = self._load_notebook(real_path)
+        index = len(notebook.cells) if at_index == -1 else at_index
+        cell = nbformat.v4.new_code_cell(source=source) if cell_type == "code" else nbformat.v4.new_markdown_cell(source=source)
+        notebook.cells.insert(index, cell)
+        for position, current in enumerate(notebook.cells):
+            self._ensure_cell_identity(current, position)
+        self._save_notebook(real_path, notebook)
+        if cell_type != "code":
+            return {
+                "status": "ok",
+                "path": relative_path,
+                "cell_id": self._cell_id(cell, index),
+                "cell_index": index,
+                "operation": "insert-execute",
+                "outputs": [],
+                "execution_mode": "headless-runtime",
+                "execution_preference": "headless",
+            }
+        return {
+            **self._headless_notebook_execute_cell(real_path, relative_path, cell_id=self._cell_id(cell, index), cell_index=None),
+            "operation": "insert-execute",
+        }
+
+    def _headless_notebook_execute_all(self, real_path: str, relative_path: str) -> dict[str, Any]:
+        notebook, _ = self._load_notebook(real_path)
+        executions = []
+        for index, cell in enumerate(notebook.cells):
+            if cell.cell_type != "code":
+                continue
+            executions.append(self._headless_notebook_execute_cell(real_path, relative_path, cell_id=self._cell_id(cell, index), cell_index=None))
+        return {"status": "ok", "path": relative_path, "executions": executions, "mode": "headless"}
+
+    def _headless_notebook_restart(self, real_path: str, relative_path: str) -> dict[str, Any]:
+        runtime = self.headless_runtimes.get(real_path)
+        kernel_id = runtime.python_path if runtime is not None else None
+        if runtime is not None:
+            self._shutdown_headless_runtime(real_path)
+        self._ensure_headless_runtime(real_path, kernel_id=kernel_id)
+        return {
+            "status": "ok",
+            "path": relative_path,
+            "kernel_state": "idle",
+            "busy": False,
+            "mode": "headless",
+        }
+
+    def _headless_notebook_restart_and_run_all(self, real_path: str, relative_path: str) -> dict[str, Any]:
+        restarted = self._headless_notebook_restart(real_path, relative_path)
+        executed = self._headless_notebook_execute_all(real_path, relative_path)
+        return {
+            **executed,
+            "restart": restarted,
+        }
 
     def _sync_document_record(self, real_path: str, relative_path: str) -> None:
         now = time.time()
@@ -777,6 +1313,7 @@ def serve_forever(
         server.serve_forever(poll_interval=0.2)
     finally:
         try:
+            state.shutdown_headless_runtimes()
             server.server_close()
         finally:
             if state.runtime_file:
@@ -995,6 +1532,22 @@ def _handler_factory(state: CoreState):
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
                         return
                     body, status = state.notebook_execute_all(path)
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/restart":
+                    path = payload.get("path")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    body, status = state.notebook_restart(path)
+                    self._json(status, body)
+                    return
+                if self.path == "/api/notebooks/restart-and-run-all":
+                    path = payload.get("path")
+                    if not isinstance(path, str) or not path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
+                        return
+                    body, status = state.notebook_restart_and_run_all(path)
                     self._json(status, body)
                     return
                 if self.path == "/api/branches/start":

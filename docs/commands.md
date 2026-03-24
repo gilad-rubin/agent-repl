@@ -24,7 +24,7 @@ agent-repl cat demo.ipynb
 
 Each cell in the response includes: `index`, `cell_id`, `cell_type`, `source`, and optionally `outputs` and `execution_count`. Cells with prompt metadata include an `agent_repl` object with `type` and `status`.
 Paths outside the active workspace are rejected.
-If the notebook is still closed and only readable from disk, `cat` may emit fallback IDs like `index-1`. Once the notebook becomes live/open in VS Code, re-run `cat --no-outputs` and switch to the live UUIDs before `exec` or `edit`.
+If the notebook is still closed and only readable from disk, `cat` may emit placeholder IDs like `index-1`. Once the notebook becomes live/open in VS Code, re-run `cat --no-outputs` and switch to the live UUIDs before `exec` or `edit`.
 
 ---
 
@@ -72,7 +72,7 @@ Completed `exec` responses include:
 
 - `execution_mode`: the backend that actually ran the cell, such as `jupyter-private-session` or `notebook-command`
 - `execution_preference`: the requested behavior, either `no-yank` or `native`
-- `execution_fallback_reason`: present when a no-yank attempt had to fall back to the notebook command path
+- `execution_fallback_reason`: present when the command had to leave the steady-state background path
 
 ---
 
@@ -249,7 +249,7 @@ agent-repl new analysis.ipynb
 agent-repl new analysis.ipynb --cells-json '[{"type":"code","source":"import pandas as pd"}]'
 ```
 
-The notebook is created and opened in VS Code with a Python kernel.
+The notebook is created with a ready runtime/kernel. If VS Code is open, it reflects the same notebook state live; if it is closed, the command still succeeds headlessly.
 Starter cells created by `new --cells-json` are not auto-executed. If later validation steps depend on seed variables from those cells, execute the seed cell explicitly first.
 
 When a workspace `.venv` is present, `new` prefers it automatically and the response includes `kernel_status: "selected"` plus a message naming the selected kernel. The response also marks the notebook `ready: true`. If no workspace `.venv` is available, `new` fails clearly and asks for an explicit `--kernel` rather than leaving the notebook in a half-ready state.

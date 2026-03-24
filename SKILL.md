@@ -1,11 +1,11 @@
 ---
 name: agent-repl
-description: Work against a live Jupyter notebook via the VS Code bridge. Use this when an agent needs to create notebooks, select kernels, read or edit cells, execute notebook code, answer prompt cells, or debug bridge/kernel behavior while Cursor or VS Code is open.
+description: Work against the shared agent-repl notebook runtime. Use this when an agent needs to create notebooks, select kernels, read or edit cells, execute notebook code, answer prompt cells, or debug notebook/runtime behavior whether or not the editor is open.
 ---
 
 # agent-repl
 
-CLI for AI agents to work with a live Jupyter notebook through the VS Code/Cursor bridge. Agents use the CLI; humans see the notebook update live in the editor. Both share the same kernel.
+CLI for AI agents to work with a shared notebook runtime. Agents use the CLI; if VS Code/Cursor is open, humans see the notebook update live as a projection of that same runtime. The editor can be open or closed at the start.
 
 Everything prints JSON to stdout.
 
@@ -13,11 +13,10 @@ Before validating behavior from another workspace, check the install state first
 
 ```bash
 agent-repl --version
-agent-repl reload --pretty
 ```
 
 - if `agent-repl --version` fails, reinstall the CLI with `uv tool install /path/to/agent-repl --reinstall`
-- if `agent-repl reload --pretty` points at an older `extension_root` or `routes_module`, rebuild and reinstall the extension `.vsix`, then reload or reopen that VS Code window
+- if you are explicitly validating live editor projection behavior, also run `agent-repl reload --pretty`; if it points at an older `extension_root` or `routes_module`, rebuild and reinstall the extension `.vsix`, then reload or reopen that VS Code window
 - when you intentionally want to test repo source before reinstalling, prefer `uv run --project /Users/giladrubin/python_workspace/agent-repl agent-repl ...`
 
 ## Core Loop
@@ -41,7 +40,7 @@ agent-repl ix demo.ipynb -s 'x + 1'
 - `ix` is the default execution primitive because it inserts a visible code cell, runs it, and returns the result directly
 - `status` and `cat` are diagnostics, not required ritual for the happy path
 - use `cat --no-outputs` when you specifically need live `cell_id` values or full notebook structure
-- if `cat` returns fallback IDs like `index-1` for a closed notebook, re-run `cat --no-outputs` after the notebook becomes live before using `--cell-id`
+- if `cat` returns placeholder IDs like `index-1` for a closed notebook, re-run `cat --no-outputs` after the notebook becomes live before using `--cell-id`
 
 ## Validation Loop
 
@@ -49,7 +48,6 @@ For the prompt "test out the new agent-repl capabilities", use this order:
 
 ```bash
 agent-repl --version
-agent-repl reload --pretty
 ```
 
 Then validate a brand-new notebook:
@@ -73,10 +71,13 @@ agent-repl ix notebooks/demo.ipynb -s 'x + 1'
 Important validation expectations:
 
 - `new` should succeed only when the notebook is ready for immediate `ix`, `edit`, or `exec`
+- `new` should start or resume the needed runtime automatically; no separate bootstrap step is part of the happy path
 - if no workspace `.venv` exists and no explicit kernel is provided, `new` should fail clearly instead of prompting through UI
 - `ix` should return the result directly in the common case
 - after editing code, re-run the edited cell and verify that the outputs now match the new source
-- if you opened an existing notebook from a closed state, ignore fallback `index-*` IDs after it becomes live; re-`cat` and use the live UUIDs instead
+- if the editor is closed, the same commands should still work headlessly
+- if the editor is already open, the human should see the new/edited/running cells appear live without focus steal or popups
+- if you opened an existing notebook from a closed state, ignore placeholder `index-*` IDs after it becomes live; re-`cat` and use the live UUIDs instead
 
 ## Command Contracts
 
@@ -101,7 +102,7 @@ agent-repl restart analysis.ipynb
 
 ## Notebook Creation
 
-Use `new` when you want a real notebook file that opens in VS Code and attaches a kernel:
+Use `new` when you want a real notebook file with a ready runtime/kernel:
 
 ```bash
 agent-repl new analysis.ipynb
@@ -117,14 +118,13 @@ Important input rule:
 
 When `new` returns:
 
-- `kernel_status: "selected"`: kernel attached successfully
-- `kernel_status: "needs_selection"`: no preferred kernel was available; use `kernels` and `select-kernel`
-- `kernel_status: "selection_failed"`: the notebook was created, but kernel attachment needs manual recovery
+- `kernel_status: "selected"`: runtime/kernel prepared successfully
+- `ready: true`: notebook is immediately usable for `ix`, `edit`, or `exec`
 - starter cells are created, not auto-executed; execute the seed code explicitly before depending on its variables
 
 ## Kernel Selection
 
-`new` prefers the workspace `.venv` when it exists. If that does not settle cleanly:
+`new` prefers the workspace `.venv` when it exists. Use explicit selection only when you intentionally want a non-default kernel:
 
 ```bash
 agent-repl kernels
@@ -167,7 +167,7 @@ Use the JSON response from `new` directly:
 
 - if it already selected a kernel, continue with `ix`
 - if it returned kernel choices such as `available_kernels`, use `select-kernel` for the workspace default or `kernels` to inspect the exact IDs
-- if the notebook is open in the editor and auto-select still failed, retry `select-kernel` before falling back to manual UI clicks
+- if the notebook is open in the editor and auto-select still failed, retry `select-kernel` before resorting to manual UI clicks
 
 Creating a brand-new notebook and attaching a kernel should stay in the background. If VS Code prompts, steals focus, or asks the user to restart a kernel, treat that as a product bug and capture the exact command plus the returned JSON.
 
@@ -199,15 +199,15 @@ If timeout occurs:
 
 **Cell IDs changed after reload or edits** — Re-read with `cat` before using `--cell-id`.
 
-**Closed notebook `cat` returned `index-*` IDs** — Those fallback IDs are only safe while the notebook stays on the disk-only path. Once the notebook becomes live/open, re-run `cat --no-outputs` and switch to the real UUIDs before `exec` or `edit`.
+**Closed notebook `cat` returned `index-*` IDs** — Those placeholder IDs are only safe while the notebook stays on the disk-only path. Once the notebook becomes live/open, re-run `cat --no-outputs` and switch to the real UUIDs before `exec` or `edit`.
 
 **404 on execute/edit** — Usually means the cell ID is wrong, not that the route is missing.
 
 **`exec -c` left a surprise probe cell behind** — That is expected behavior: `exec -c` inserts a real notebook cell. Prefer `exec --cell-id` to rerun existing code, or delete the probe cell after debugging.
 
-**Notebook is outside the workspace** — The bridge only serves notebooks in its own workspace. Open the correct VS Code window first.
+**Notebook is outside the workspace** — Run the command from the correct workspace root, or pass a notebook path inside that workspace. Opening VS Code is not required for the headless path.
 
-**Kernel selection acted strangely** — Retry `select-kernel` first. If you need to inspect exact IDs, use `kernels`. If you need the VS Code picker, use `select-kernel --interactive`.
+**Kernel selection acted strangely** — Retry `select-kernel` first. If you need to inspect exact IDs, use `kernels`. If you need the VS Code picker, use `select-kernel --interactive` explicitly.
 
 **`run-all` or `restart-run-all` returned but the notebook is still busy** — Those commands return after triggering execution, not after completion. Use `status` to watch the active run.
 
@@ -242,4 +242,4 @@ agent-repl reload --pretty
 
 ## Execution Modes
 
-Agent-triggered execution defaults to `no-yank`, which prefers background Jupyter APIs and falls back to the notebook command path when needed. Set `agent-repl.executionMode` to `native` if you explicitly want VS Code's built-in execution behavior. Completed responses include `execution_mode` and `execution_preference`, so check them when debugging focus-stealing or execution-path issues.
+Agent-triggered execution defaults to `no-yank`, which means the steady-state path should stay in the background and avoid stealing editor focus. Set `agent-repl.executionMode` to `native` only if you explicitly want VS Code's built-in execution behavior. Completed responses include `execution_mode` and `execution_preference`, so check them when debugging focus-stealing or execution-path issues.

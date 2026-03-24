@@ -2,23 +2,23 @@
 
 **Multiplayer Jupyter notebooks — AI agents and humans collaborate in real time.**
 
-The notebook open in VS Code/Cursor is the human-facing surface. The CLI is the agent-facing surface. Both share the same kernel, the same file, and the same state.
+`agent-repl` owns the shared notebook runtime. The CLI is the agent-facing surface. If VS Code/Cursor is open, the notebook is the human-facing projection of that same runtime. The editor can be open or closed at the start.
 
 ## How It Works
 
-A VS Code extension runs an HTTP bridge server. The CLI talks to it. The extension handles notebook reads and edits through VS Code's notebook API, and executes cells either through a background Jupyter session (`no-yank`) or VS Code's native notebook command path (`native`).
+A workspace runtime serves notebook operations directly. When the VS Code extension is open, it attaches as a live projection client so humans can watch cells appear, run, and update without becoming the source of truth.
 
 ```
-Human (VS Code / Cursor)
+Human (VS Code / Cursor, optional)
     ↕
-VS Code Extension (bridge server)
+Projection Client (optional)
     ↕  HTTP / JSON
+agent-repl Runtime
+    ↕
 Agent (CLI)
 ```
 
-The extension auto-starts when VS Code finishes loading the workspace and writes a connection file so the CLI can discover it.
-The CLI now requires a workspace match instead of silently falling back to a different window's bridge.
-By default, the bridge only operates on notebooks inside its own workspace; it will reject external notebook paths instead of opening them in that window.
+The runtime can be started headlessly by the CLI, so notebook create/edit/execute can work even when the editor is closed. If the extension is open, it auto-attaches to the matching workspace so humans see the same notebook state live.
 
 ## Quick Start
 
@@ -31,12 +31,11 @@ uv tool install . --reinstall
 # Create a notebook and start working
 agent-repl new analysis.ipynb
 agent-repl ix analysis.ipynb -s 'import pandas as pd; print(pd.__version__)'
-agent-repl cat analysis.ipynb
 ```
 
-The `ix` command (insert-execute) adds a cell to the notebook and runs it. The cell appears in VS Code immediately — a human watching sees it show up with its output.
+The `ix` command (insert-execute) adds a cell to the notebook and runs it. It returns the result directly. If VS Code is open, a human watching sees the cell show up with its output.
 
-Agent-triggered execution defaults to `no-yank`, which prefers the background Jupyter path so the notebook can keep updating without stealing editor focus. If you want the original VS Code behavior, set `agent-repl.executionMode` to `native`.
+Agent-triggered execution defaults to `no-yank`, which means the steady-state path stays in the background without stealing editor focus. If you explicitly want VS Code's built-in execution behavior, set `agent-repl.executionMode` to `native`.
 
 Creating a brand-new notebook and attaching a kernel should stay in the background. `agent-repl new` and `agent-repl select-kernel` prefer the workspace `.venv` automatically when it exists, and the JSON response says which kernel was selected. If no workspace `.venv` exists, `agent-repl new` should fail clearly unless you pass `--kernel` explicitly. Use `agent-repl select-kernel ... --interactive` only when you explicitly want the VS Code kernel picker. If create or kernel attach reveals a notebook, prompts the user, or asks for a kernel restart, treat that as a product bug.
 
@@ -50,7 +49,7 @@ Creating a brand-new notebook and attaching a kernel should stay in the backgrou
 - **Hot-reload** — Update extension routes without restarting the bridge
 - **Workspace-scoped core authority** — Session continuity, document state, runtime ownership, and file-sync boundaries now live in one shared workspace process
 - **Editor projection attach** — The extension auto-attaches the editor window to the matching shared session when the bridge starts, so editor presence becomes part of the runtime contract
-- **Deterministic launcher discovery** — Auto-attach prefers an explicit CLI command and workspace-local `.venv` launchers before falling back to PATH-based resolution
+- **Deterministic launcher discovery** — Auto-attach prefers an explicit CLI command and workspace-local `.venv` launchers before PATH-based resolution
 - **Explicit file sync boundaries** — Registered documents track bound file snapshots, detect external changes, and require explicit rebinding instead of silently accepting disk drift
 
 ## The Prompt Loop

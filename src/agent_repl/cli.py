@@ -192,13 +192,21 @@ def cmd_run_all(args: argparse.Namespace) -> int:
 
 
 def cmd_restart(args: argparse.Namespace) -> int:
-    result = _client(args.path).restart_kernel(args.path)
+    client = _notebook_client(args.path)
+    if hasattr(client, "notebook_restart"):
+        result = client.notebook_restart(args.path)
+    else:
+        result = client.restart_kernel(args.path)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_restart_run_all(args: argparse.Namespace) -> int:
-    result = _client(args.path).restart_and_run_all(args.path)
+    client = _notebook_client(args.path)
+    if hasattr(client, "notebook_restart_and_run_all"):
+        result = client.notebook_restart_and_run_all(args.path)
+    else:
+        result = client.restart_and_run_all(args.path)
     _out(result, args.pretty)
     return 0
 
