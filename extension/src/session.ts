@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as util from 'util';
 import * as vscode from 'vscode';
 import { toJupyter, toVSCode } from './notebook/outputs';
+import { pushActivityEvent } from './routes';
 
 const execFile = util.promisify(childProcess.execFile);
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -206,9 +207,22 @@ type NotebookRuntimeState = {
     path: string;
     active: boolean;
     mode?: string | null;
+    reattach_policy?: {
+        action?: string;
+        reason?: string;
+        selected_runtime_id?: string | null;
+    } | null;
     runtime?: {
+        runtime_id?: string;
         python_path?: string;
         busy?: boolean;
+        kernel_generation?: number;
+    } | null;
+    runtime_record?: {
+        runtime_id?: string;
+        status?: string;
+        health?: string;
+        kernel_generation?: number;
     } | null;
 };
 
@@ -254,16 +268,44 @@ type NotebookProjectionState = {
     } | null;
 };
 
+type NotebookActivityState = {
+    status: string;
+    path: string;
+    cursor?: number;
+    recent_events?: NotebookActivityEvent[];
+};
+
+type NotebookActivityEvent = {
+    event_id?: string;
+    type?: string;
+    path?: string;
+    detail?: string;
+    actor?: string | null;
+    session_id?: string | null;
+    runtime_id?: string | null;
+    cell_id?: string | null;
+    cell_index?: number | null;
+    timestamp?: number;
+    data?: {
+        cell?: ProjectionCell;
+        output?: Record<string, any>;
+        execution_count?: number | null;
+        cell_id?: string;
+    } | null;
+};
+
 type ProjectionExecution = {
     cellId?: string;
     cellIndex: number;
     execution: vscode.NotebookCellExecution;
+    outputs: vscode.NotebookCellOutput[];
 };
 
 type TrackedProjection = {
     notebook: vscode.NotebookDocument;
     lastAppliedSignature?: string;
     activeExecution?: ProjectionExecution;
+    lastActivityCursor?: number;
 };
 
 export class HeadlessNotebookProjection implements vscode.Disposable {
@@ -325,6 +367,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             this.syncTimer = undefined;
         }
         for (const tracked of this.tracked.values()) {
+            void this.clearNotebookPresence(tracked.notebook);
             tracked.activeExecution?.execution.end(false, Date.now());
         }
         this.tracked.clear();
@@ -360,7 +403,15 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
                 '--workspace-root', workspaceRoot,
                 notebook.uri.fsPath,
             ]);
-            if (!state.active || state.mode !== 'headless') {
+            const action = state.reattach_policy?.action ?? 'none';
+            const shouldAttach = state.mode === 'headless' && (
+                state.active ||
+                action === 'resume-runtime' ||
+                action === 'create-runtime' ||
+                action === 'attach-with-warning' ||
+                action === 'observe-or-queue'
+            );
+            if (!shouldAttach) {
                 return false;
             }
             this.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
@@ -373,7 +424,9 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
                 });
             }
             this.trackNotebook(notebook);
-            await this.syncNotebookProjection(notebook);
+            if (state.active) {
+                await this.syncNotebookProjection(notebook);
+            }
             return true;
         } finally {
             this.attaching.delete(key);
@@ -397,16 +450,21 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             return false;
         }
 
+        this.syncTrackedExecution(tracked, state);
+        const signature = projectionSignature(state.contents.cells);
+        const activityState = await this.syncNotebookActivity(tracked, state);
+
         let changed = false;
-        const signature = JSON.stringify(state.contents.cells);
-        if (!notebook.isDirty && tracked.lastAppliedSignature !== signature) {
+        if (
+            !notebook.isDirty &&
+            tracked.lastAppliedSignature !== signature &&
+            (!activityState.changed || activityState.needsSnapshot)
+        ) {
             await applyProjectionSnapshot(notebook, state.contents.cells);
             tracked.lastAppliedSignature = signature;
             changed = true;
         }
-
-        this.syncTrackedExecution(tracked, state);
-        return changed;
+        return changed || activityState.changed;
     }
 
     private async executeCells(cells: readonly vscode.NotebookCell[], notebook: vscode.NotebookDocument): Promise<void> {
@@ -415,6 +473,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             throw new Error(`No workspace root matched '${notebook.uri.fsPath}'`);
         }
         const config = vscode.workspace.getConfiguration('agent-repl');
+        const sessionId = this.sessionIdForWorkspace(workspaceRoot);
         await this.projectVisibleNotebook(workspaceRoot, config, notebook);
         for (const cell of cells) {
             if (cell.kind !== vscode.NotebookCellKind.Code) {
@@ -426,6 +485,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
                 const result = await runCliJson<VisibleCellExecutionResult>(workspaceRoot, config, [
                     'core', 'execute-visible-cell',
                     '--workspace-root', workspaceRoot,
+                    ...(sessionId ? ['--session-id', sessionId] : []),
                     notebook.uri.fsPath,
                     '--cell-index', String(cell.index),
                     '--source', cell.document.getText(),
@@ -452,6 +512,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         config: vscode.WorkspaceConfiguration,
         notebook: vscode.NotebookDocument,
     ): Promise<void> {
+        const sessionId = this.sessionIdForWorkspace(workspaceRoot);
         const notebookCells = typeof notebook.getCells === 'function'
             ? notebook.getCells()
             : Array.from({ length: notebook.cellCount }, (_unused, index) => notebook.cellAt(index));
@@ -472,6 +533,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             await runCliJson<ProjectVisibleNotebookResult>(workspaceRoot, config, [
                 'core', 'project-visible-notebook',
                 '--workspace-root', workspaceRoot,
+                ...(sessionId ? ['--session-id', sessionId] : []),
                 notebook.uri.fsPath,
                 '--cells-file', tempFile,
             ]);
@@ -496,6 +558,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         if (!tracked) {
             return;
         }
+        void this.clearNotebookPresence(tracked.notebook);
         this.finishTrackedExecution(tracked, undefined);
         this.tracked.delete(fsPath);
     }
@@ -508,6 +571,78 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
                 console.warn('[agent-repl] notebook projection sync failed:', err?.message ?? String(err));
             }
         }
+    }
+
+    private async syncNotebookActivity(
+        tracked: TrackedProjection,
+        state?: NotebookProjectionState,
+    ): Promise<{ changed: boolean; needsSnapshot: boolean }> {
+        const workspaceRoot = workspaceRootForPath(tracked.notebook.uri.fsPath);
+        if (!workspaceRoot) {
+            return { changed: false, needsSnapshot: false };
+        }
+        const config = vscode.workspace.getConfiguration('agent-repl');
+        const sessionId = this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot));
+        if (sessionId) {
+            try {
+                await runCliJson(workspaceRoot, config, [
+                    'core', 'session-presence-upsert',
+                    '--workspace-root', workspaceRoot,
+                    '--session-id', sessionId,
+                    '--activity', 'observing',
+                    tracked.notebook.uri.fsPath,
+                ]);
+            } catch (err: any) {
+                console.warn('[agent-repl] notebook presence sync failed:', err?.message ?? String(err));
+            }
+        }
+
+        const args = [
+            'core', 'notebook-activity',
+            '--workspace-root', workspaceRoot,
+            tracked.notebook.uri.fsPath,
+        ];
+        if (typeof tracked.lastActivityCursor === 'number' && tracked.lastActivityCursor > 0) {
+            args.push('--since', String(tracked.lastActivityCursor));
+        }
+        const activity = await runCliJson<NotebookActivityState>(workspaceRoot, config, args);
+        const events = activity.recent_events ?? [];
+        const applyResult = await applyIncrementalActivityEvents(tracked, events);
+        for (const event of events) {
+            pushActivityEvent(event);
+        }
+        if (typeof activity.cursor === 'number') {
+            tracked.lastActivityCursor = activity.cursor;
+        }
+        if (!tracked.notebook.isDirty && state?.contents && applyResult.changed && !applyResult.needsSnapshot) {
+            tracked.lastAppliedSignature = projectionSignature(state.contents.cells);
+        }
+        return applyResult;
+    }
+
+    private async clearNotebookPresence(notebook: vscode.NotebookDocument): Promise<void> {
+        const workspaceRoot = workspaceRootForPath(notebook.uri.fsPath);
+        if (!workspaceRoot) {
+            return;
+        }
+        const sessionId = this.sessionIdForWorkspace(workspaceRoot);
+        if (!sessionId) {
+            return;
+        }
+        try {
+            await runCliJson(workspaceRoot, vscode.workspace.getConfiguration('agent-repl'), [
+                'core', 'session-presence-clear',
+                '--workspace-root', workspaceRoot,
+                '--session-id', sessionId,
+                '--path', notebook.uri.fsPath,
+            ]);
+        } catch (err: any) {
+            console.warn('[agent-repl] notebook presence clear failed:', err?.message ?? String(err));
+        }
+    }
+
+    private sessionIdForWorkspace(workspaceRoot: string): string | undefined {
+        return this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot));
     }
 
     private syncTrackedExecution(tracked: TrackedProjection, state: NotebookProjectionState): void {
@@ -533,6 +668,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             cellId: current.cell_id,
             cellIndex: current.cell_index,
             execution,
+            outputs: [],
         };
     }
 
@@ -559,22 +695,188 @@ async function applyProjectionSnapshot(
     notebook: vscode.NotebookDocument,
     cells: ProjectionCell[],
 ): Promise<void> {
+    await replaceProjectionCells(notebook, 0, notebook.cellCount, cells);
+    await notebook.save();
+}
+
+async function applyIncrementalActivityEvents(
+    tracked: TrackedProjection,
+    events: NotebookActivityEvent[],
+): Promise<{ changed: boolean; needsSnapshot: boolean }> {
+    const notebook = tracked.notebook;
+    if (notebook.isDirty) {
+        return { changed: false, needsSnapshot: true };
+    }
+    let documentChanged = false;
+    let needsSnapshot = false;
+    for (const event of events) {
+        const type = event.type ?? '';
+        if (type === 'notebook-reset-needed' || type === 'notebook-projected') {
+            needsSnapshot = true;
+            continue;
+        }
+        if (type === 'cell-execution-updated') {
+            if (tracked.activeExecution && event.cell_id && tracked.activeExecution.cellId === event.cell_id) {
+                const executionCount = event.data?.execution_count;
+                if (typeof executionCount === 'number') {
+                    tracked.activeExecution.execution.executionOrder = executionCount;
+                }
+            }
+            continue;
+        }
+        if (type === 'cell-output-appended') {
+            if (tracked.activeExecution && event.cell_id && tracked.activeExecution.cellId === event.cell_id && event.data?.output) {
+                tracked.activeExecution.outputs.push(toVSCode(event.data.output as any));
+                await tracked.activeExecution.execution.replaceOutput(tracked.activeExecution.outputs);
+                continue;
+            }
+            if (event.data?.cell) {
+                const replaced = await upsertProjectionCell(notebook, event.data.cell, false);
+                documentChanged = documentChanged || replaced;
+                continue;
+            }
+            needsSnapshot = true;
+            continue;
+        }
+        if (type === 'cell-inserted') {
+            if (!event.data?.cell) {
+                needsSnapshot = true;
+                continue;
+            }
+            const insertIndex = normalizeCellIndex(event.data.cell.index, notebook.cellCount);
+            await replaceProjectionCells(notebook, insertIndex, 0, [event.data.cell]);
+            shiftActiveExecutionForInsert(tracked, insertIndex);
+            documentChanged = true;
+            continue;
+        }
+        if (type === 'cell-removed') {
+            const targetIndex = findNotebookCellIndex(notebook, event.cell_id ?? undefined, event.cell_index ?? undefined);
+            if (targetIndex < 0) {
+                needsSnapshot = true;
+                continue;
+            }
+            await replaceProjectionCells(notebook, targetIndex, 1, []);
+            shiftActiveExecutionForDelete(tracked, targetIndex);
+            documentChanged = true;
+            continue;
+        }
+        if (type === 'cell-source-updated' || type === 'cell-outputs-updated' || type === 'cell-updated') {
+            if (!event.data?.cell) {
+                needsSnapshot = true;
+                continue;
+            }
+            const replaced = await upsertProjectionCell(notebook, event.data.cell, true);
+            if (!replaced) {
+                needsSnapshot = true;
+                continue;
+            }
+            documentChanged = true;
+        }
+    }
+    if (documentChanged) {
+        await notebook.save();
+    }
+    return { changed: documentChanged, needsSnapshot };
+}
+
+async function upsertProjectionCell(
+    notebook: vscode.NotebookDocument,
+    cell: ProjectionCell,
+    replaceExisting: boolean,
+): Promise<boolean> {
+    const existingIndex = findNotebookCellIndex(notebook, cell.cell_id, cell.index);
+    if (existingIndex >= 0) {
+        await replaceProjectionCells(notebook, existingIndex, 1, [cell]);
+        return true;
+    }
+    if (!replaceExisting) {
+        const insertIndex = normalizeCellIndex(cell.index, notebook.cellCount);
+        await replaceProjectionCells(notebook, insertIndex, 0, [cell]);
+        return true;
+    }
+    return false;
+}
+
+async function replaceProjectionCells(
+    notebook: vscode.NotebookDocument,
+    start: number,
+    deleteCount: number,
+    cells: ProjectionCell[],
+): Promise<void> {
     const edit = new vscode.WorkspaceEdit();
     edit.set(notebook.uri, [
         vscode.NotebookEdit.replaceCells(
-            new vscode.NotebookRange(0, notebook.cellCount),
-            cells.map((cell) => {
-                const kind = cell.cell_type === 'code' ? vscode.NotebookCellKind.Code : vscode.NotebookCellKind.Markup;
-                const languageId = cell.cell_type === 'code' ? 'python' : 'markdown';
-                const cellData = new vscode.NotebookCellData(kind, cell.source ?? '', languageId);
-                cellData.metadata = cell.metadata ?? {};
-                cellData.outputs = toNotebookOutputs(cell.outputs ?? []);
-                return cellData;
-            }),
+            new vscode.NotebookRange(start, start + deleteCount),
+            cells.map(toNotebookCellData),
         ),
     ]);
     await vscode.workspace.applyEdit(edit);
-    await notebook.save();
+}
+
+function toNotebookCellData(cell: ProjectionCell): vscode.NotebookCellData {
+    const kind = cell.cell_type === 'code' ? vscode.NotebookCellKind.Code : vscode.NotebookCellKind.Markup;
+    const languageId = cell.cell_type === 'code' ? 'python' : 'markdown';
+    const cellData = new vscode.NotebookCellData(kind, cell.source ?? '', languageId);
+    cellData.metadata = cell.metadata ?? {};
+    cellData.outputs = toNotebookOutputs(cell.outputs ?? []);
+    return cellData;
+}
+
+function projectionSignature(cells: ProjectionCell[]): string {
+    return JSON.stringify(cells);
+}
+
+function cellIdForNotebookCell(cell: vscode.NotebookCell | any): string | undefined {
+    return cell?.metadata?.custom?.['agent-repl']?.cell_id;
+}
+
+function findNotebookCellIndex(
+    notebook: vscode.NotebookDocument,
+    cellId?: string,
+    fallbackIndex?: number | null,
+): number {
+    const notebookCells = typeof notebook.getCells === 'function'
+        ? notebook.getCells()
+        : Array.from({ length: notebook.cellCount }, (_unused, index) => notebook.cellAt(index));
+    if (cellId) {
+        const matchIndex = notebookCells.findIndex((cell) => cellIdForNotebookCell(cell) === cellId);
+        if (matchIndex >= 0) {
+            return matchIndex;
+        }
+    }
+    if (typeof fallbackIndex === 'number' && fallbackIndex >= 0 && fallbackIndex < notebook.cellCount) {
+        return fallbackIndex;
+    }
+    return -1;
+}
+
+function normalizeCellIndex(index: number | undefined, length: number): number {
+    if (typeof index !== 'number' || Number.isNaN(index)) {
+        return length;
+    }
+    return Math.max(0, Math.min(index, length));
+}
+
+function shiftActiveExecutionForInsert(tracked: TrackedProjection, insertedIndex: number): void {
+    if (!tracked.activeExecution) {
+        return;
+    }
+    if (tracked.activeExecution.cellIndex >= insertedIndex) {
+        tracked.activeExecution.cellIndex += 1;
+    }
+}
+
+function shiftActiveExecutionForDelete(tracked: TrackedProjection, removedIndex: number): void {
+    if (!tracked.activeExecution) {
+        return;
+    }
+    if (tracked.activeExecution.cellIndex === removedIndex) {
+        tracked.activeExecution = undefined;
+        return;
+    }
+    if (tracked.activeExecution.cellIndex > removedIndex) {
+        tracked.activeExecution.cellIndex -= 1;
+    }
 }
 
 function toNotebookOutputs(outputs: Array<Record<string, any>>): vscode.NotebookCellOutput[] {
