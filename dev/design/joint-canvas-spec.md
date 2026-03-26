@@ -337,7 +337,7 @@ Operations like:
 - split or merge sections
 - clear outputs
 
-should be treated as higher-risk and may require:
+These operations should be treated as higher-risk and may require:
 
 - stronger leases
 - branch-local execution

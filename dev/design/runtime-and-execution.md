@@ -83,7 +83,7 @@ It answers:
 
 - what document or branch this execution context belongs to
 - what environment it uses
-- whether it is persistent, ephemeral, pinned, or shared
+- whether it is shared, ephemeral, pinned, or headless
 - whether it should be resumed, drained, expired, or reaped
 
 ### Kernel
@@ -216,7 +216,7 @@ At workspace scope, the question is:
 
 Examples:
 
-- one persistent shared runtime for the main notebook line
+- one shared runtime for the main notebook line
 - one ephemeral runtime for an agent experiment
 - one pinned runtime for a long-running background computation
 
@@ -318,7 +318,7 @@ These are the allowed meanings:
 - the runtime or kernel died unexpectedly or became unusable
 - automatic reattach for continuity is no longer valid
 - history remains inspectable
-- recovery must create or attach a replacement runtime
+- recovery must re-provision the runtime record with a replacement kernel or attach a replacement runtime behind the same runtime identity
 
 ### `reaped`
 
@@ -368,19 +368,19 @@ Runtime mode and runtime state are different dimensions.
 
 Runtime modes may transition under explicit policy:
 
-- `ephemeral -> persistent`
+- `ephemeral -> shared`
 - `ephemeral -> pinned`
-- `persistent -> pinned`
-- `pinned -> persistent`
+- `shared -> pinned`
+- `pinned -> shared`
 
 Runtime modes should not silently transition because of incidental UI actions.
 
 Examples:
 
-- opening a notebook must not convert `ephemeral` to `persistent`
-- closing an editor must not convert `persistent` to `ephemeral`
+- opening a notebook must not convert `ephemeral` to `shared`
+- closing an editor must not convert `shared` to `ephemeral`
 
-Promotion from `ephemeral` to `persistent` is a user-visible collaboration event, not an implementation detail.
+Promotion from `ephemeral` to `shared` is a user-visible collaboration event, not an implementation detail.
 
 ## Streaming and Visibility
 

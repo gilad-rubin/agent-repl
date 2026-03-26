@@ -43,7 +43,7 @@ Notes:
 Insert a new cell, run it, and return the result.
 
 ```bash
-agent-repl ix PATH (-s SOURCE | --source-file FILE | stdin) [--at-index N] [--timeout SECONDS] [--no-wait]
+agent-repl ix PATH (-s SOURCE | --source-file FILE | stdin) [--at-index N] [--timeout SECONDS] [--no-wait] [--session-id ID]
 ```
 
 Examples:
@@ -51,12 +51,14 @@ Examples:
 ```bash
 agent-repl ix analysis.ipynb -s 'import pandas as pd; print(pd.__version__)'
 agent-repl ix analysis.ipynb --source-file /tmp/cell.py
+agent-repl ix analysis.ipynb -s 'df.head()' --session-id sess-human
 ```
 
 Notes:
 
 - waits for completion by default
 - use `--no-wait` only when you intentionally want fire-and-forget behavior
+- use `--session-id` when the run should be attributed to a live collaboration session
 - the result is returned directly, so `cat` is not required in the normal path
 - if an infrastructure error occurs (kernel crash, connection lost, timeout), the inserted cell is automatically rolled back and the error message says "ix failed and the inserted cell was rolled back"
 - Python exceptions in your code are not rolled back — the cell stays with error output, like a normal notebook
@@ -67,27 +69,29 @@ Edit notebook cells.
 
 ```bash
 agent-repl edit PATH replace-source --cell-id ID -s 'new code'
-agent-repl edit PATH insert -s 'print(1)' [--cell-type code|markdown] [--at-index N]
+agent-repl edit PATH insert -s 'print(1)' [--cell-type code|markdown] [--at-index N] [--session-id ID]
 agent-repl edit PATH delete --cell-id ID
 agent-repl edit PATH move --cell-id ID --to-index N
 agent-repl edit PATH clear-outputs --all
 ```
 
 Use `--cell-id` when possible. It is safer than positional indexes.
+Use `--session-id` when you want edit events and lease checks tied to a specific collaboration session.
 
 ### `exec`
 
 Run an existing cell, or insert and run inline code.
 
 ```bash
-agent-repl exec PATH --cell-id ID [--timeout SECONDS] [--no-wait]
-agent-repl exec PATH -c 'probe code'
+agent-repl exec PATH --cell-id ID [--timeout SECONDS] [--no-wait] [--session-id ID]
+agent-repl exec PATH -c 'probe code' [--session-id ID]
 ```
 
 Notes:
 
 - `exec --cell-id` reruns an existing cell
 - `exec -c` inserts a real persistent code cell and runs it
+- `--session-id` attributes the execution to a live collaboration session for activity and lease checks
 
 ### `cat`
 

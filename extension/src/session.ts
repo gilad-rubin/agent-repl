@@ -123,8 +123,12 @@ export class SessionAutoAttach implements vscode.Disposable {
             throw new Error('session attach returned no session_id');
         }
         this.session = { workspaceRoot, sessionId };
-        await this.context.workspaceState.update(sessionStorageKey(workspaceRoot), sessionId);
-        await this.context.workspaceState.update(legacySessionStorageKey(workspaceRoot), undefined);
+        const sessionKey = sessionStorageKey(workspaceRoot);
+        const legacyKey = legacySessionStorageKey(workspaceRoot);
+        await this.context.workspaceState.update(sessionKey, sessionId);
+        if (legacyKey !== sessionKey) {
+            await this.context.workspaceState.update(legacyKey, undefined);
+        }
         this.startHeartbeat();
     }
 
@@ -582,7 +586,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             return { changed: false, needsSnapshot: false };
         }
         const config = vscode.workspace.getConfiguration('agent-repl');
-        const sessionId = this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot));
+        const sessionId = this.sessionIdForWorkspace(workspaceRoot);
         if (sessionId) {
             try {
                 await runCliJson(workspaceRoot, config, [
@@ -642,7 +646,8 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
     }
 
     private sessionIdForWorkspace(workspaceRoot: string): string | undefined {
-        return this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot));
+        return this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot))
+            ?? this.context.workspaceState.get<string>(legacySessionStorageKey(workspaceRoot));
     }
 
     private syncTrackedExecution(tracked: TrackedProjection, state: NotebookProjectionState): void {
@@ -728,6 +733,10 @@ async function applyIncrementalActivityEvents(
             if (tracked.activeExecution && event.cell_id && tracked.activeExecution.cellId === event.cell_id && event.data?.output) {
                 tracked.activeExecution.outputs.push(toVSCode(event.data.output as any));
                 await tracked.activeExecution.execution.replaceOutput(tracked.activeExecution.outputs);
+                if (event.data.cell) {
+                    const replaced = await upsertProjectionCell(notebook, event.data.cell, true);
+                    documentChanged = documentChanged || replaced;
+                }
                 continue;
             }
             if (event.data?.cell) {
@@ -871,6 +880,7 @@ function shiftActiveExecutionForDelete(tracked: TrackedProjection, removedIndex:
         return;
     }
     if (tracked.activeExecution.cellIndex === removedIndex) {
+        tracked.activeExecution.execution.end(false, Date.now());
         tracked.activeExecution = undefined;
         return;
     }

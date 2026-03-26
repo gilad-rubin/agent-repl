@@ -393,23 +393,24 @@ class CoreState:
         cell_index: int | None = None,
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        event = ActivityEventRecord(
-            event_id=str(uuid.uuid4()),
-            path=path,
-            type=event_type,
-            detail=detail,
-            actor=actor,
-            session_id=session_id,
-            runtime_id=runtime_id,
-            cell_id=cell_id,
-            cell_index=cell_index,
-            data=json.loads(json.dumps(data)) if isinstance(data, dict) else None,
-            timestamp=time.time(),
-        )
-        self.activity_records.append(event)
-        if len(self.activity_records) > MAX_ACTIVITY_RECORDS:
-            del self.activity_records[: len(self.activity_records) - MAX_ACTIVITY_RECORDS]
-        return event.payload()
+        with self._lock:
+            event = ActivityEventRecord(
+                event_id=str(uuid.uuid4()),
+                path=path,
+                type=event_type,
+                detail=detail,
+                actor=actor,
+                session_id=session_id,
+                runtime_id=runtime_id,
+                cell_id=cell_id,
+                cell_index=cell_index,
+                data=json.loads(json.dumps(data)) if isinstance(data, dict) else None,
+                timestamp=time.time(),
+            )
+            self.activity_records.append(event)
+            if len(self.activity_records) > MAX_ACTIVITY_RECORDS:
+                del self.activity_records[: len(self.activity_records) - MAX_ACTIVITY_RECORDS]
+            return event.payload()
 
     def _transition_runtime_record(
         self,
@@ -445,43 +446,47 @@ class CoreState:
         return record
 
     def _clear_session_presence(self, session_id: str) -> None:
-        self.notebook_presence.pop(session_id, None)
+        with self._lock:
+            self.notebook_presence.pop(session_id, None)
 
     def _refresh_session_leases(self, session_id: str) -> None:
-        now = time.time()
-        changed = False
-        for lease in self.cell_leases.values():
-            if lease.session_id != session_id:
-                continue
-            lease.updated_at = now
-            lease.expires_at = now + CELL_LEASE_TTL_SECONDS
-            changed = True
+        with self._lock:
+            now = time.time()
+            changed = False
+            for lease in list(self.cell_leases.values()):
+                if lease.session_id != session_id:
+                    continue
+                lease.updated_at = now
+                lease.expires_at = now + CELL_LEASE_TTL_SECONDS
+                changed = True
         if changed:
             self.persist()
 
     def _clear_session_leases(self, session_id: str) -> None:
-        removed = [key for key, lease in self.cell_leases.items() if lease.session_id == session_id]
-        for key in removed:
-            self.cell_leases.pop(key, None)
+        with self._lock:
+            removed = [key for key, lease in list(self.cell_leases.items()) if lease.session_id == session_id]
+            for key in removed:
+                self.cell_leases.pop(key, None)
 
     def _lease_key(self, relative_path: str, cell_id: str) -> str:
         return f"{relative_path}::{cell_id}"
 
     def _reap_expired_cell_leases(self) -> None:
-        now = time.time()
-        expired = [key for key, lease in self.cell_leases.items() if lease.expires_at <= now]
-        for key in expired:
-            self.cell_leases.pop(key, None)
+        with self._lock:
+            now = time.time()
+            expired = [key for key, lease in list(self.cell_leases.items()) if lease.expires_at <= now]
+            for key in expired:
+                self.cell_leases.pop(key, None)
 
     def _leases_payload_for_path(self, relative_path: str) -> list[dict[str, Any]]:
         self._reap_expired_cell_leases()
+        with self._lock:
+            leases = [lease for lease in list(self.cell_leases.values()) if lease.path == relative_path]
+            sessions = {session_id: record.payload() for session_id, record in self.session_records.items()}
         items: list[dict[str, Any]] = []
-        for lease in self.cell_leases.values():
-            if lease.path != relative_path:
-                continue
+        for lease in leases:
             payload = lease.payload()
-            session = self.session_records.get(lease.session_id)
-            payload["session"] = session.payload() if session is not None else None
+            payload["session"] = sessions.get(lease.session_id)
             items.append(payload)
         items.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
         return items
@@ -495,7 +500,8 @@ class CoreState:
         kinds: set[str] | None = None,
     ) -> CellLeaseRecord | None:
         self._reap_expired_cell_leases()
-        lease = self.cell_leases.get(self._lease_key(relative_path, cell_id))
+        with self._lock:
+            lease = self.cell_leases.get(self._lease_key(relative_path, cell_id))
         if lease is None:
             return None
         if owner_session_id is not None and lease.session_id == owner_session_id:
@@ -506,12 +512,13 @@ class CoreState:
 
     def _active_structure_leases(self, relative_path: str, owner_session_id: str | None) -> list[CellLeaseRecord]:
         self._reap_expired_cell_leases()
-        return [
-            lease
-            for lease in self.cell_leases.values()
-            if lease.path == relative_path and lease.kind == "structure"
-            and not (owner_session_id is not None and lease.session_id == owner_session_id)
-        ]
+        with self._lock:
+            return [
+                lease
+                for lease in list(self.cell_leases.values())
+                if lease.path == relative_path and lease.kind == "structure"
+                and not (owner_session_id is not None and lease.session_id == owner_session_id)
+            ]
 
     def _assert_structure_not_leased(
         self,
@@ -542,11 +549,12 @@ class CoreState:
         operation: str,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        session = self.session_records.get(lease.session_id)
-        document = next(
-            (record for record in self.document_records.values() if record.relative_path == relative_path),
-            None,
-        )
+        with self._lock:
+            session = self.session_records.get(lease.session_id)
+            document = next(
+                (record for record in list(self.document_records.values()) if record.relative_path == relative_path),
+                None,
+            )
         suggested_branch = None
         if owner_session_id is not None and document is not None:
             suggested_branch = {
@@ -606,17 +614,19 @@ class CoreState:
     ) -> tuple[dict[str, Any], HTTPStatus]:
         if kind not in {"edit", "structure"}:
             return {"error": f"Invalid lease kind: {kind}"}, HTTPStatus.BAD_REQUEST
-        session = self.session_records.get(session_id)
+        with self._lock:
+            session = self.session_records.get(session_id)
         if session is None:
             return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
         real_path, relative_path = self._resolve_document_path(path)
-        notebook, changed = self._load_notebook(real_path)
-        if changed:
-            self._save_notebook(real_path, notebook)
-        resolved_cell_id = cell_id
-        if resolved_cell_id is None and cell_index is not None:
-            index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
-            resolved_cell_id = self._cell_id(notebook.cells[index], index)
+        with self._notebook_lock(real_path):
+            notebook, changed = self._load_notebook(real_path)
+            if changed:
+                self._save_notebook(real_path, notebook)
+            resolved_cell_id = cell_id
+            if resolved_cell_id is None and cell_index is not None:
+                index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
+                resolved_cell_id = self._cell_id(notebook.cells[index], index)
         if not resolved_cell_id:
             return {"error": "Missing cell_id or cell_index"}, HTTPStatus.BAD_REQUEST
         conflict = self._conflicting_lease(
@@ -634,26 +644,27 @@ class CoreState:
         key = self._lease_key(relative_path, resolved_cell_id)
         now = time.time()
         expires_at = now + (ttl_seconds if ttl_seconds is not None else CELL_LEASE_TTL_SECONDS)
-        existing = self.cell_leases.get(key)
-        created = existing is None
-        if existing is None:
-            lease = CellLeaseRecord(
-                lease_id=str(uuid.uuid4()),
-                session_id=session_id,
-                path=relative_path,
-                cell_id=resolved_cell_id,
-                kind=kind,
-                created_at=now,
-                updated_at=now,
-                expires_at=expires_at,
-            )
-            self.cell_leases[key] = lease
-        else:
-            existing.session_id = session_id
-            existing.kind = kind
-            existing.updated_at = now
-            existing.expires_at = expires_at
-            lease = existing
+        with self._lock:
+            existing = self.cell_leases.get(key)
+            created = existing is None
+            if existing is None:
+                lease = CellLeaseRecord(
+                    lease_id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    path=relative_path,
+                    cell_id=resolved_cell_id,
+                    kind=kind,
+                    created_at=now,
+                    updated_at=now,
+                    expires_at=expires_at,
+                )
+                self.cell_leases[key] = lease
+            else:
+                existing.session_id = session_id
+                existing.kind = kind
+                existing.updated_at = now
+                existing.expires_at = expires_at
+                lease = existing
         self._append_activity_event(
             path=relative_path,
             event_type="lease-acquired",
@@ -676,24 +687,27 @@ class CoreState:
         cell_id: str | None = None,
         cell_index: int | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        session = self.session_records.get(session_id)
+        with self._lock:
+            session = self.session_records.get(session_id)
         if session is None:
             return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
         real_path, relative_path = self._resolve_document_path(path)
-        notebook, changed = self._load_notebook(real_path)
-        if changed:
-            self._save_notebook(real_path, notebook)
-        resolved_cell_id = cell_id
-        if resolved_cell_id is None and cell_index is not None:
-            index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
-            resolved_cell_id = self._cell_id(notebook.cells[index], index)
+        with self._notebook_lock(real_path):
+            notebook, changed = self._load_notebook(real_path)
+            if changed:
+                self._save_notebook(real_path, notebook)
+            resolved_cell_id = cell_id
+            if resolved_cell_id is None and cell_index is not None:
+                index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
+                resolved_cell_id = self._cell_id(notebook.cells[index], index)
         if not resolved_cell_id:
             return {"error": "Missing cell_id or cell_index"}, HTTPStatus.BAD_REQUEST
         key = self._lease_key(relative_path, resolved_cell_id)
-        lease = self.cell_leases.get(key)
-        if lease is None or lease.session_id != session_id:
-            return {"status": "ok", "released": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-        removed = self.cell_leases.pop(key)
+        with self._lock:
+            lease = self.cell_leases.get(key)
+            if lease is None or lease.session_id != session_id:
+                return {"status": "ok", "released": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
+            removed = self.cell_leases.pop(key)
         self._append_activity_event(
             path=relative_path,
             event_type="lease-released",
@@ -707,13 +721,12 @@ class CoreState:
         return {"status": "ok", "released": True, "workspace_root": self.workspace_root}, HTTPStatus.OK
 
     def _presence_payload_for_path(self, relative_path: str) -> list[dict[str, Any]]:
+        with self._lock:
+            presence_records = [record.payload() for record in self.notebook_presence.values() if record.path == relative_path]
+            session_payloads = {session_id: record.payload() for session_id, record in self.session_records.items()}
         items: list[dict[str, Any]] = []
-        for record in self.notebook_presence.values():
-            if record.path != relative_path:
-                continue
-            session = self.session_records.get(record.session_id)
-            payload = record.payload()
-            payload["session"] = session.payload() if session is not None else None
+        for payload in presence_records:
+            payload["session"] = session_payloads.get(payload["session_id"])
             items.append(payload)
         items.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
         return items
@@ -763,12 +776,13 @@ class CoreState:
         }
 
     def _refresh_session_liveness(self) -> None:
-        now = time.time()
-        changed = False
-        for record in self.session_records.values():
-            if record.status == "attached" and (now - record.last_seen_at) > SESSION_STALE_AFTER_SECONDS:
-                record.status = "stale"
-                changed = True
+        with self._lock:
+            now = time.time()
+            changed = False
+            for record in self.session_records.values():
+                if record.status == "attached" and (now - record.last_seen_at) > SESSION_STALE_AFTER_SECONDS:
+                    record.status = "stale"
+                    changed = True
         if changed:
             self.persist()
 
@@ -1066,11 +1080,12 @@ class CoreState:
         real_path, relative_path = self._resolve_document_path(path)
         runtime = self.headless_runtimes.get(real_path)
         runtime_record = self._runtime_record_for_notebook(relative_path)
-        events = [
-            record.payload()
-            for record in self.activity_records
-            if record.path == relative_path and (since is None or record.timestamp > since)
-        ]
+        with self._lock:
+            events = [
+                record.payload()
+                for record in self.activity_records
+                if record.path == relative_path and (since is None or record.timestamp > since)
+            ]
         cursor = max((event["timestamp"] for event in events), default=since or 0.0)
         return {
             "status": "ok",
@@ -1093,37 +1108,39 @@ class CoreState:
         cell_id: str | None = None,
         cell_index: int | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        session = self.session_records.get(session_id)
+        with self._lock:
+            session = self.session_records.get(session_id)
         if session is None:
             return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
         _real_path, relative_path = self._resolve_document_path(path)
         now = time.time()
-        existing = self.notebook_presence.get(session_id)
-        changed = (
-            existing is None
-            or existing.path != relative_path
-            or existing.activity != activity
-            or existing.cell_id != cell_id
-            or existing.cell_index != cell_index
-        )
-        if existing is None:
-            record = NotebookPresenceRecord(
-                session_id=session_id,
-                path=relative_path,
-                activity=activity,
-                cell_id=cell_id,
-                cell_index=cell_index,
-                created_at=now,
-                updated_at=now,
+        with self._lock:
+            existing = self.notebook_presence.get(session_id)
+            changed = (
+                existing is None
+                or existing.path != relative_path
+                or existing.activity != activity
+                or existing.cell_id != cell_id
+                or existing.cell_index != cell_index
             )
-            self.notebook_presence[session_id] = record
-        else:
-            existing.path = relative_path
-            existing.activity = activity
-            existing.cell_id = cell_id
-            existing.cell_index = cell_index
-            existing.updated_at = now
-            record = existing
+            if existing is None:
+                record = NotebookPresenceRecord(
+                    session_id=session_id,
+                    path=relative_path,
+                    activity=activity,
+                    cell_id=cell_id,
+                    cell_index=cell_index,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self.notebook_presence[session_id] = record
+            else:
+                existing.path = relative_path
+                existing.activity = activity
+                existing.cell_id = cell_id
+                existing.cell_index = cell_index
+                existing.updated_at = now
+                record = existing
         if changed:
             self._append_activity_event(
                 path=relative_path,
@@ -1144,15 +1161,19 @@ class CoreState:
         }, HTTPStatus.OK
 
     def clear_notebook_presence(self, *, session_id: str, path: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
-        session = self.session_records.get(session_id)
-        existing = self.notebook_presence.get(session_id)
+        with self._lock:
+            session = self.session_records.get(session_id)
+            existing = self.notebook_presence.get(session_id)
         if existing is None:
             return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
         if path is not None:
             _real_path, relative_path = self._resolve_document_path(path)
             if existing.path != relative_path:
                 return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-        removed = self.notebook_presence.pop(session_id)
+        with self._lock:
+            removed = self.notebook_presence.pop(session_id, None)
+        if removed is None:
+            return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
         self._append_activity_event(
             path=removed.path,
             event_type="presence-cleared",

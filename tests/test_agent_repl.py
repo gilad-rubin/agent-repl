@@ -11,8 +11,10 @@ import threading
 import time
 import tomllib
 import unittest
+from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import requests
@@ -1166,6 +1168,90 @@ class TestCoreState(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(result_holder["status"], 200)
             self.assertEqual(result_holder["body"]["status"], "ok")
+
+    def test_cell_leases_resolve_cells_under_notebook_lock(self):
+        import nbformat
+
+        notebook_path = "notebooks/lease-locking.ipynb"
+        real_path = os.path.realpath(str(self.workspace_root / notebook_path))
+        notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell(source="x = 1")])
+        lock_state = {"entered": False}
+
+        @contextmanager
+        def guarded_notebook_lock(path: str):
+            self.assertEqual(path, real_path)
+            lock_state["entered"] = True
+            try:
+                yield
+            finally:
+                lock_state["entered"] = False
+
+        def load_notebook(path: str):
+            self.assertTrue(lock_state["entered"])
+            self.assertEqual(path, real_path)
+            return notebook, False
+
+        with (
+            mock.patch.object(self.state, "_notebook_lock", side_effect=guarded_notebook_lock),
+            mock.patch.object(self.state, "_load_notebook", side_effect=load_notebook),
+            mock.patch.object(self.state, "_save_notebook"),
+        ):
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+
+            lease_body, lease_status = self.state.acquire_cell_lease(
+                session_id="sess-human",
+                path=notebook_path,
+                cell_index=0,
+            )
+            self.assertEqual(lease_status, 200)
+            self.assertEqual(lease_body["lease"]["session_id"], "sess-human")
+
+            release_body, release_status = self.state.release_cell_lease(
+                session_id="sess-human",
+                path=notebook_path,
+                cell_index=0,
+            )
+            self.assertEqual(release_status, 200)
+            self.assertTrue(release_body["released"])
+
+    def test_notebook_activity_tolerates_live_presence_updates(self):
+        notebook_path = "notebooks/presence-race.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(notebook_path, cells=[], kernel_id=kernel_python)
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            self.state.start_session("agent", "cli", "worker", "sess-agent")
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+            failures: list[Exception] = []
+            stop_event = threading.Event()
+
+            def churn_presence() -> None:
+                try:
+                    while not stop_event.is_set():
+                        self.state.upsert_notebook_presence(session_id="sess-agent", path=notebook_path, activity="executing")
+                        self.state.upsert_notebook_presence(session_id="sess-human", path=notebook_path, activity="observing")
+                        self.state.clear_notebook_presence(session_id="sess-human", path=notebook_path)
+                except Exception as err:  # pragma: no cover - defensive concurrency test
+                    failures.append(err)
+
+            thread = threading.Thread(target=churn_presence)
+            thread.start()
+            try:
+                deadline = time.time() + 1.0
+                while time.time() < deadline:
+                    body, status = self.state.notebook_activity(notebook_path)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body["status"], "ok")
+                    time.sleep(0.01)
+            finally:
+                stop_event.set()
+                thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
 
     def test_cell_lease_blocks_cross_session_execution_until_it_expires(self):
         notebook_path = "notebooks/leased-cell.ipynb"
