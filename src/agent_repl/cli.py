@@ -154,7 +154,11 @@ def cmd_edit(args: argparse.Namespace) -> int:
             op["cell_index"] = args.index
 
     if hasattr(client, "notebook_edit"):
-        result = client.notebook_edit(args.path, [op])
+        session_id = getattr(args, "session_id", None)
+        if session_id:
+            result = client.notebook_edit(args.path, [op], owner_session_id=session_id)
+        else:
+            result = client.notebook_edit(args.path, [op])
     else:
         result = client.edit(args.path, [op])
     _out(result, args.pretty)
@@ -167,12 +171,20 @@ def cmd_exec(args: argparse.Namespace) -> int:
     timeout = getattr(args, "timeout", 30)
     if args.code:
         if hasattr(client, "notebook_insert_execute"):
-            result = client.notebook_insert_execute(args.path, args.code, wait=wait, timeout=timeout)
+            session_id = getattr(args, "session_id", None)
+            kwargs: dict[str, Any] = {"wait": wait, "timeout": timeout}
+            if session_id:
+                kwargs["owner_session_id"] = session_id
+            result = client.notebook_insert_execute(args.path, args.code, **kwargs)
         else:
             result = client.insert_and_execute(args.path, args.code, wait=wait, timeout=timeout)
     elif args.cell_id:
         if hasattr(client, "notebook_execute_cell"):
-            result = client.notebook_execute_cell(args.path, cell_id=args.cell_id, wait=wait, timeout=timeout)
+            session_id = getattr(args, "session_id", None)
+            kwargs = {"cell_id": args.cell_id, "wait": wait, "timeout": timeout}
+            if session_id:
+                kwargs["owner_session_id"] = session_id
+            result = client.notebook_execute_cell(args.path, **kwargs)
         else:
             result = client.execute_cell(args.path, cell_id=args.cell_id, wait=wait, timeout=timeout)
     else:
@@ -189,7 +201,11 @@ def cmd_ix(args: argparse.Namespace) -> int:
     at_index = getattr(args, "at_index", -1)
     client = _notebook_client(args.path)
     if hasattr(client, "notebook_insert_execute"):
-        result = client.notebook_insert_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
+        session_id = getattr(args, "session_id", None)
+        kwargs = {"at_index": at_index, "wait": wait, "timeout": timeout}
+        if session_id:
+            kwargs["owner_session_id"] = session_id
+        result = client.notebook_insert_execute(args.path, source, **kwargs)
     else:
         result = client.insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
     _out(result, args.pretty)
@@ -359,6 +375,25 @@ def cmd_core(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.core_command == "session-presence-upsert":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).session_presence_upsert(
+            args.session_id,
+            path=args.path,
+            activity=args.activity,
+            cell_id=getattr(args, "cell_id", None),
+            cell_index=getattr(args, "cell_index", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "session-presence-clear":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).session_presence_clear(
+            args.session_id,
+            path=getattr(args, "path", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
     if args.core_command == "session-end":
         result = _core_client(workspace_root, runtime_dir=runtime_dir).end_session(args.session_id)
         _out(result, args.pretty)
@@ -394,19 +429,48 @@ def cmd_core(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.core_command == "project-visible-notebook":
-        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_project_visible(
+    if args.core_command == "notebook-activity":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_activity(
             args.path,
-            cells=_read_json_payload(args, field_name="cells"),
+            since=getattr(args, "since", None),
         )
         _out(result, args.pretty)
         return 0
 
+    if args.core_command == "project-visible-notebook":
+        kwargs: dict[str, Any] = {"cells": _read_json_payload(args, field_name="cells")}
+        if getattr(args, "session_id", None):
+            kwargs["owner_session_id"] = args.session_id
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_project_visible(args.path, **kwargs)
+        _out(result, args.pretty)
+        return 0
+
     if args.core_command == "execute-visible-cell":
-        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_execute_visible_cell(
+        kwargs = {"cell_index": args.cell_index, "source": _read_source(args)}
+        if getattr(args, "session_id", None):
+            kwargs["owner_session_id"] = args.session_id
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_execute_visible_cell(args.path, **kwargs)
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "cell-lease-acquire":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).acquire_cell_lease(
             args.path,
-            cell_index=args.cell_index,
-            source=_read_source(args),
+            session_id=args.session_id,
+            cell_id=getattr(args, "cell_id", None),
+            cell_index=getattr(args, "cell_index", None),
+            kind=getattr(args, "kind", "edit"),
+            ttl_seconds=getattr(args, "ttl_seconds", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "cell-lease-release":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).release_cell_lease(
+            args.path,
+            session_id=args.session_id,
+            cell_id=getattr(args, "cell_id", None),
+            cell_index=getattr(args, "cell_index", None),
         )
         _out(result, args.pretty)
         return 0
@@ -436,6 +500,25 @@ def cmd_core(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.core_command == "branch-review-request":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).request_branch_review(
+            args.branch_id,
+            requested_by_session_id=args.requested_by_session_id,
+            note=getattr(args, "note", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "branch-review-resolve":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).resolve_branch_review(
+            args.branch_id,
+            resolved_by_session_id=args.resolved_by_session_id,
+            resolution=args.resolution,
+            note=getattr(args, "note", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
     if args.core_command == "runtimes":
         result = _core_client(workspace_root, runtime_dir=runtime_dir).list_runtimes()
         _out(result, args.pretty)
@@ -447,12 +530,32 @@ def cmd_core(args: argparse.Namespace) -> int:
             label=getattr(args, "label", None),
             runtime_id=getattr(args, "runtime_id", None),
             environment=getattr(args, "environment", None),
+            document_path=getattr(args, "document_path", None),
+            ttl_seconds=getattr(args, "ttl_seconds", None),
         )
         _out(result, args.pretty)
         return 0
 
     if args.core_command == "runtime-stop":
         result = _core_client(workspace_root, runtime_dir=runtime_dir).stop_runtime(args.runtime_id)
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "runtime-recover":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).recover_runtime(args.runtime_id)
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "runtime-promote":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).promote_runtime(
+            args.runtime_id,
+            mode=args.mode,
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "runtime-discard":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).discard_runtime(args.runtime_id)
         _out(result, args.pretty)
         return 0
 
@@ -545,6 +648,7 @@ def build_parser() -> argparse.ArgumentParser:
     # edit
     p = sub.add_parser("edit", help="Edit notebook cells")
     p.add_argument("path")
+    p.add_argument("--session-id", help="Collaboration session to attribute the edit to")
     esub = p.add_subparsers(dest="edit_command")
 
     ep = esub.add_parser("replace-source")
@@ -576,6 +680,7 @@ def build_parser() -> argparse.ArgumentParser:
     # exec
     p = sub.add_parser("exec", help="Execute a cell by ID or run code")
     p.add_argument("path")
+    p.add_argument("--session-id", help="Collaboration session to attribute the execution to")
     p.add_argument("--cell-id", help="ID of cell to execute")
     p.add_argument("-c", "--code", help="Code to insert and execute")
     p.add_argument("--no-wait", action="store_true", help="Return immediately without waiting for output")
@@ -584,6 +689,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ix
     p = sub.add_parser("ix", help="Insert and execute code")
     p.add_argument("path")
+    p.add_argument("--session-id", help="Collaboration session to attribute the insert/execute to")
     p.add_argument("-s", "--source")
     p.add_argument("--source-file")
     p.add_argument("--at-index", type=int, default=-1, help="Insert at this cell index (-1 = end)")
@@ -679,6 +785,21 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--session-id", required=True)
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
+    vp = coresub.add_parser("session-presence-upsert", help="Update notebook presence for an attached session")
+    vp.add_argument("path")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--session-id", required=True)
+    vp.add_argument("--activity", required=True)
+    vp.add_argument("--cell-id")
+    vp.add_argument("--cell-index", type=int)
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("session-presence-clear", help="Clear notebook presence for an attached session")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--session-id", required=True)
+    vp.add_argument("--path")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
     vp = coresub.add_parser("session-end", help="End a core session for this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--session-id", required=True)
@@ -713,10 +834,17 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
+    vp = coresub.add_parser("notebook-activity", help="Fetch live presence and recent activity for a notebook")
+    vp.add_argument("path")
+    vp.add_argument("--since", type=float)
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
     vp = coresub.add_parser("project-visible-notebook", help=argparse.SUPPRESS)
     vp.add_argument("path")
     vp.add_argument("--cells-json")
     vp.add_argument("--cells-file")
+    vp.add_argument("--session-id")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
@@ -725,7 +853,26 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--cell-index", type=int, required=True)
     vp.add_argument("-s", "--source")
     vp.add_argument("--source-file")
+    vp.add_argument("--session-id")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("cell-lease-acquire", help="Acquire or refresh a short-lived lease on a notebook cell")
+    vp.add_argument("path")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--session-id", required=True)
+    vp.add_argument("--cell-id")
+    vp.add_argument("--cell-index", type=int)
+    vp.add_argument("--kind", choices=["edit", "structure"], default="edit")
+    vp.add_argument("--ttl-seconds", type=float)
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("cell-lease-release", help="Release a notebook cell lease for a session")
+    vp.add_argument("path")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--session-id", required=True)
+    vp.add_argument("--cell-id")
+    vp.add_argument("--cell-index", type=int)
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = coresub.add_parser("branches", help="List collaboration branches for this workspace")
@@ -748,6 +895,21 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--status-value", required=True, choices=["merged", "rejected", "abandoned"])
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
+    vp = coresub.add_parser("branch-review-request", help="Request review for a collaboration branch")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--branch-id", required=True)
+    vp.add_argument("--requested-by-session-id", required=True)
+    vp.add_argument("--note")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("branch-review-resolve", help="Resolve a pending branch review")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--branch-id", required=True)
+    vp.add_argument("--resolved-by-session-id", required=True)
+    vp.add_argument("--resolution", required=True, choices=["approved", "changes-requested", "rejected"])
+    vp.add_argument("--note")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
     vp = coresub.add_parser("runtimes", help="List runtimes registered in this workspace")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
@@ -757,10 +919,28 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--mode", required=True, choices=["interactive", "shared", "headless", "pinned", "ephemeral"])
     vp.add_argument("--label")
     vp.add_argument("--environment")
+    vp.add_argument("--document-path")
+    vp.add_argument("--ttl-seconds", type=int)
     vp.add_argument("--runtime-id")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = coresub.add_parser("runtime-stop", help="Mark a core runtime as stopped")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-id", required=True)
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("runtime-recover", help="Recover a notebook-bound runtime that lost live continuity")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-id", required=True)
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("runtime-promote", help="Promote an ephemeral runtime into shared or pinned mode")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-id", required=True)
+    vp.add_argument("--mode", choices=["shared", "pinned"], default="shared")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("runtime-discard", help="Discard an ephemeral runtime and mark it terminal")
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--runtime-id", required=True)
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)

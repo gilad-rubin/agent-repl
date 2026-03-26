@@ -1064,9 +1064,7 @@ export function buildRoutes(maxQueue: number): Routes {
 
         // --- Activity ---
         'POST /api/notebook/activity': async (body) => {
-            activityEvents.push(body);
-            if (activityEvents.length > 500) { activityEvents.splice(0, activityEvents.length - 500); }
-            for (const l of activityListeners) { l(body); }
+            pushActivityEvent(body);
             return { status: 'ok' };
         }
     };
@@ -1120,6 +1118,12 @@ async function restartKernelQuietly(
 // Activity event bus
 const activityEvents: any[] = [];
 const activityListeners: Array<(e: any) => void> = [];
+
+export function pushActivityEvent(event: any): void {
+    activityEvents.push(event);
+    if (activityEvents.length > 500) { activityEvents.splice(0, activityEvents.length - 500); }
+    for (const listener of activityListeners) { listener(event); }
+}
 
 export function onActivity(listener: (e: any) => void): vscode.Disposable {
     activityListeners.push(listener);

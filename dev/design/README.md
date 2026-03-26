@@ -8,6 +8,8 @@ These documents describe the system we want to build, the boundaries we want to 
 
 - [North Star](north-star.md) — the desired end-state architecture
 - [Interaction Contract](interaction-contract.md) — the agreed human/agent notebook behavior and UX contract
+- [Joint Canvas Spec](joint-canvas-spec.md) — concrete product behavior for live human-agent collaboration, reopen, continuity, and ephemeral work
+- [Joint Canvas Rollout](joint-canvas-rollout.md) — the concrete implementation sequence and ClickUp-backed rollout plan for the joint-canvas work
 - [Interaction Implementation Plan](interaction-implementation-plan.md) — the workstreams and acceptance gates needed to satisfy that contract
 - [Core Authority and Sessions](core-authority.md) — what the core owns, how actors connect, and how continuity works
 - [Runtime and Execution](runtime-and-execution.md) — runtime ownership, run state, and zombie-kernel philosophy

@@ -233,6 +233,28 @@ class CoreClient:
     def detach_session(self, session_id: str) -> dict[str, Any]:
         return self._post("/api/sessions/detach", {"session_id": session_id})
 
+    def session_presence_upsert(
+        self,
+        session_id: str,
+        *,
+        path: str,
+        activity: str,
+        cell_id: str | None = None,
+        cell_index: int | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"session_id": session_id, "path": path, "activity": activity}
+        if cell_id is not None:
+            body["cell_id"] = cell_id
+        if cell_index is not None:
+            body["cell_index"] = cell_index
+        return self._post("/api/sessions/presence/upsert", body)
+
+    def session_presence_clear(self, session_id: str, *, path: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"session_id": session_id}
+        if path is not None:
+            body["path"] = path
+        return self._post("/api/sessions/presence/clear", body)
+
     def end_session(self, session_id: str) -> dict[str, Any]:
         return self._post("/api/sessions/end", {"session_id": session_id})
 
@@ -279,8 +301,17 @@ class CoreClient:
             body["kernel_id"] = kernel_id
         return self._post("/api/notebooks/select-kernel", body, timeout=60)
 
-    def notebook_edit(self, path: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
-        return self._post("/api/notebooks/edit", {"path": path, "operations": operations})
+    def notebook_edit(
+        self,
+        path: str,
+        operations: list[dict[str, Any]],
+        *,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path, "operations": operations}
+        if owner_session_id is not None:
+            body["owner_session_id"] = owner_session_id
+        return self._post("/api/notebooks/edit", body)
 
     def notebook_execute_cell(
         self,
@@ -290,12 +321,15 @@ class CoreClient:
         cell_index: int | None = None,
         wait: bool = True,
         timeout: float = 30,
+        owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"path": path}
         if cell_id is not None:
             body["cell_id"] = cell_id
         if cell_index is not None:
             body["cell_index"] = cell_index
+        if owner_session_id is not None:
+            body["owner_session_id"] = owner_session_id
         result = self._post("/api/notebooks/execute-cell", body, timeout=30)
         if wait and result.get("execution_id"):
             return self._poll_execution(result, timeout)
@@ -310,15 +344,19 @@ class CoreClient:
         at_index: int = -1,
         wait: bool = True,
         timeout: float = 30,
+        owner_session_id: str | None = None,
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "path": path,
+            "source": source,
+            "cell_type": cell_type,
+            "at_index": at_index,
+        }
+        if owner_session_id is not None:
+            body["owner_session_id"] = owner_session_id
         result = self._post(
             "/api/notebooks/insert-and-execute",
-            {
-                "path": path,
-                "source": source,
-                "cell_type": cell_type,
-                "at_index": at_index,
-            },
+            body,
             timeout=30,
         )
         if wait and result.get("execution_id"):
@@ -337,19 +375,70 @@ class CoreClient:
     def notebook_projection(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/projection", {"path": path}, timeout=120)
 
-    def notebook_project_visible(self, path: str, *, cells: list[dict[str, Any]]) -> dict[str, Any]:
-        return self._post(
-            "/api/notebooks/project-visible",
-            {"path": path, "cells": cells},
-            timeout=120,
-        )
+    def notebook_activity(self, path: str, *, since: float | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path}
+        if since is not None:
+            body["since"] = since
+        return self._post("/api/notebooks/activity", body, timeout=120)
 
-    def notebook_execute_visible_cell(self, path: str, *, cell_index: int, source: str) -> dict[str, Any]:
-        return self._post(
-            "/api/notebooks/execute-visible-cell",
-            {"path": path, "cell_index": cell_index, "source": source},
-            timeout=120,
-        )
+    def notebook_project_visible(
+        self,
+        path: str,
+        *,
+        cells: list[dict[str, Any]],
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path, "cells": cells}
+        if owner_session_id is not None:
+            body["owner_session_id"] = owner_session_id
+        return self._post("/api/notebooks/project-visible", body, timeout=120)
+
+    def notebook_execute_visible_cell(
+        self,
+        path: str,
+        *,
+        cell_index: int,
+        source: str,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path, "cell_index": cell_index, "source": source}
+        if owner_session_id is not None:
+            body["owner_session_id"] = owner_session_id
+        return self._post("/api/notebooks/execute-visible-cell", body, timeout=120)
+
+    def acquire_cell_lease(
+        self,
+        path: str,
+        *,
+        session_id: str,
+        cell_id: str | None = None,
+        cell_index: int | None = None,
+        kind: str = "edit",
+        ttl_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path, "session_id": session_id, "kind": kind}
+        if cell_id is not None:
+            body["cell_id"] = cell_id
+        if cell_index is not None:
+            body["cell_index"] = cell_index
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
+        return self._post("/api/notebooks/lease/acquire", body, timeout=120)
+
+    def release_cell_lease(
+        self,
+        path: str,
+        *,
+        session_id: str,
+        cell_id: str | None = None,
+        cell_index: int | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path, "session_id": session_id}
+        if cell_id is not None:
+            body["cell_id"] = cell_id
+        if cell_index is not None:
+            body["cell_index"] = cell_index
+        return self._post("/api/notebooks/lease/release", body, timeout=120)
 
     def notebook_restart(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/restart", {"path": path}, timeout=120)
@@ -387,6 +476,38 @@ class CoreClient:
     def finish_branch(self, branch_id: str, *, status: str) -> dict[str, Any]:
         return self._post("/api/branches/finish", {"branch_id": branch_id, "status": status})
 
+    def request_branch_review(
+        self,
+        branch_id: str,
+        *,
+        requested_by_session_id: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "branch_id": branch_id,
+            "requested_by_session_id": requested_by_session_id,
+        }
+        if note:
+            body["note"] = note
+        return self._post("/api/branches/review-request", body)
+
+    def resolve_branch_review(
+        self,
+        branch_id: str,
+        *,
+        resolved_by_session_id: str,
+        resolution: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "branch_id": branch_id,
+            "resolved_by_session_id": resolved_by_session_id,
+            "resolution": resolution,
+        }
+        if note:
+            body["note"] = note
+        return self._post("/api/branches/review-resolve", body)
+
     def list_runtimes(self) -> dict[str, Any]:
         return self._get("/api/runtimes")
 
@@ -397,6 +518,8 @@ class CoreClient:
         label: str | None = None,
         runtime_id: str | None = None,
         environment: str | None = None,
+        document_path: str | None = None,
+        ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "mode": mode,
@@ -406,10 +529,23 @@ class CoreClient:
             body["label"] = label
         if environment:
             body["environment"] = environment
+        if document_path:
+            body["document_path"] = document_path
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
         return self._post("/api/runtimes/start", body)
 
     def stop_runtime(self, runtime_id: str) -> dict[str, Any]:
         return self._post("/api/runtimes/stop", {"runtime_id": runtime_id})
+
+    def recover_runtime(self, runtime_id: str) -> dict[str, Any]:
+        return self._post("/api/runtimes/recover", {"runtime_id": runtime_id})
+
+    def promote_runtime(self, runtime_id: str, *, mode: str = "shared") -> dict[str, Any]:
+        return self._post("/api/runtimes/promote", {"runtime_id": runtime_id, "mode": mode})
+
+    def discard_runtime(self, runtime_id: str) -> dict[str, Any]:
+        return self._post("/api/runtimes/discard", {"runtime_id": runtime_id})
 
     def list_runs(self) -> dict[str, Any]:
         return self._get("/api/runs")

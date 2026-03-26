@@ -8,10 +8,13 @@ import subprocess
 import tempfile
 import sys
 import threading
+import time
 import tomllib
 import unittest
+from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import requests
@@ -623,7 +626,220 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(runtime_status, 200)
             self.assertTrue(runtime_body["active"])
             self.assertEqual(runtime_body["mode"], "headless")
+            self.assertEqual(runtime_body["reattach_policy"]["action"], "attach-live")
             self.assertEqual(runtime_body["runtime"]["python_path"], os.path.abspath(kernel_python))
+            self.assertEqual(runtime_body["runtime_record"]["status"], "idle")
+            self.assertEqual(runtime_body["runtime_record"]["document_path"], notebook_path)
+
+    def test_headless_notebook_runtime_reports_resume_policy_after_runtime_shutdown(self):
+        notebook_path = "notebooks/headless-resume.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "x = 5\nx"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+
+            real_path = os.path.realpath(os.path.join(str(self.workspace_root), notebook_path))
+            self.state._shutdown_headless_runtime(real_path)
+
+            runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+            self.assertEqual(runtime_status, 200)
+            self.assertFalse(runtime_body["active"])
+            self.assertEqual(runtime_body["mode"], "headless")
+            self.assertEqual(runtime_body["reattach_policy"]["action"], "create-runtime")
+            self.assertEqual(runtime_body["runtime_record"]["status"], "stopped")
+
+    def test_headless_notebook_runtime_reports_ambiguous_runtime_candidates(self):
+        notebook_path = "notebooks/ambiguous-runtime.ipynb"
+        relative_path = notebook_path
+        self.state._upsert_runtime_record(
+            runtime_id="rt-a",
+            mode="shared",
+            label="A",
+            environment="/tmp/python-a",
+            status="idle",
+            document_path=relative_path,
+        )
+        self.state._upsert_runtime_record(
+            runtime_id="rt-b",
+            mode="shared",
+            label="B",
+            environment="/tmp/python-b",
+            status="idle",
+            document_path=relative_path,
+        )
+
+        runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+        self.assertEqual(runtime_status, 200)
+        self.assertFalse(runtime_body["active"])
+        self.assertEqual(runtime_body["mode"], "headless")
+        self.assertEqual(runtime_body["reattach_policy"]["action"], "select-runtime")
+        self.assertEqual(set(runtime_body["reattach_policy"]["candidate_runtime_ids"]), {"rt-a", "rt-b"})
+
+    def test_ephemeral_runtime_can_bind_to_notebook_and_expires(self):
+        notebook_path = "notebooks/ephemeral.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        runtime = self.state.start_runtime(
+            runtime_id="rt-ephemeral",
+            mode="ephemeral",
+            label="Ephemeral notebook",
+            environment=kernel_python,
+            document_path=notebook_path,
+            ttl_seconds=60,
+        )
+        self.assertEqual(runtime["runtime"]["mode"], "ephemeral")
+        self.assertEqual(runtime["runtime"]["status"], "idle")
+        self.assertIsNotNone(runtime["runtime"]["expires_at"])
+
+        runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+        self.assertEqual(runtime_status, 200)
+        self.assertTrue(runtime_body["active"])
+        self.assertEqual(runtime_body["runtime_record"]["mode"], "ephemeral")
+        self.assertEqual(runtime_body["reattach_policy"]["action"], "attach-live")
+
+        self.state.stop_runtime("rt-ephemeral")
+        stopped_body, stopped_status = self.state.notebook_runtime(notebook_path)
+        self.assertEqual(stopped_status, 200)
+        self.assertFalse(stopped_body["active"])
+        self.assertEqual(stopped_body["runtime_record"]["mode"], "ephemeral")
+        self.assertEqual(stopped_body["reattach_policy"]["action"], "none")
+        self.assertEqual(stopped_body["reattach_policy"]["reason"], "stopped-ephemeral-runtime")
+
+        self.state.runtime_records["rt-ephemeral"].status = "idle"
+        self.state.runtime_records["rt-ephemeral"].expires_at = time.time() - 5
+        reaped_payload = self.state.list_runtimes_payload()
+        reaped = next(item for item in reaped_payload["runtimes"] if item["runtime_id"] == "rt-ephemeral")
+        self.assertEqual(reaped["status"], "reaped")
+
+    def test_notebook_bound_runtime_start_reuses_existing_document_identity(self):
+        notebook_path = "tmp/existing-runtime.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        create_body, create_status = self.state.notebook_create(notebook_path, cells=[], kernel_id=kernel_python)
+        self.assertEqual(create_status, 200)
+        self.assertTrue(create_body["ready"])
+
+        self.state.stop_runtime(f"headless:{notebook_path}")
+        runtime = self.state.start_runtime(
+            runtime_id="rt-ephemeral-alias",
+            mode="ephemeral",
+            label="Ephemeral alias",
+            environment=kernel_python,
+            document_path=notebook_path,
+            ttl_seconds=60,
+        )
+        self.assertEqual(runtime["runtime"]["runtime_id"], f"headless:{notebook_path}")
+        candidates = self.state._notebook_runtime_candidates(notebook_path)
+        self.assertEqual([record.runtime_id for record in candidates], [f"headless:{notebook_path}"])
+
+    def test_recover_runtime_restores_notebook_bound_runtime(self):
+        notebook_path = "notebooks/recoverable.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        runtime = self.state.start_runtime(
+            runtime_id="rt-recoverable",
+            mode="shared",
+            label="Recover me",
+            environment=kernel_python,
+            document_path=notebook_path,
+        )
+        self.assertEqual(runtime["runtime"]["status"], "idle")
+        self.state.stop_runtime("rt-recoverable")
+        record = self.state.runtime_records["rt-recoverable"]
+        record.status = "recovery-needed"
+        record.health = "degraded"
+
+        body, status = self.state.recover_runtime("rt-recoverable")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["recovered_from"], "recovery-needed")
+        self.assertEqual(body["runtime"]["status"], "idle")
+        self.assertEqual(body["runtime"]["health"], "healthy")
+        self.assertGreaterEqual(body["runtime"]["kernel_generation"], 2)
+
+        runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+        self.assertEqual(runtime_status, 200)
+        self.assertTrue(runtime_body["active"])
+        self.assertEqual(runtime_body["reattach_policy"]["action"], "attach-live")
+
+    def test_recover_runtime_rejects_discarded_ephemeral_runtime(self):
+        notebook_path = "notebooks/ephemeral-discarded.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        self.state.start_runtime(
+            runtime_id="rt-ephemeral-discarded",
+            mode="ephemeral",
+            label="Ephemeral",
+            environment=kernel_python,
+            document_path=notebook_path,
+            ttl_seconds=60,
+        )
+        self.state.stop_runtime("rt-ephemeral-discarded")
+
+        body, status = self.state.recover_runtime("rt-ephemeral-discarded")
+        self.assertEqual(status, 400)
+        self.assertIn("Ephemeral runtime was discarded", body["error"])
+
+    def test_promote_runtime_converts_ephemeral_runtime_to_shared(self):
+        notebook_path = "notebooks/ephemeral-promote.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            runtime = self.state.start_runtime(
+                runtime_id="rt-ephemeral-promote",
+                mode="ephemeral",
+                label="Ephemeral promotion candidate",
+                environment=kernel_python,
+                document_path=notebook_path,
+                ttl_seconds=60,
+            )
+            self.assertEqual(runtime["runtime"]["mode"], "ephemeral")
+            self.assertIsNotNone(runtime["runtime"]["expires_at"])
+
+            promoted_body, promoted_status = self.state.promote_runtime("rt-ephemeral-promote", mode="shared")
+            self.assertEqual(promoted_status, 200)
+            self.assertEqual(promoted_body["runtime"]["mode"], "shared")
+            self.assertIsNone(promoted_body["runtime"]["expires_at"])
+
+            activity_body, activity_status = self.state.notebook_activity(notebook_path)
+            self.assertEqual(activity_status, 200)
+            promoted_event = next(event for event in activity_body["recent_events"] if event["type"] == "runtime-promoted")
+            self.assertEqual(promoted_event["data"]["from_mode"], "ephemeral")
+            self.assertEqual(promoted_event["data"]["to_mode"], "shared")
+
+    def test_discard_runtime_marks_ephemeral_runtime_terminal(self):
+        notebook_path = "notebooks/ephemeral-discard.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            runtime = self.state.start_runtime(
+                runtime_id="rt-ephemeral-discard",
+                mode="ephemeral",
+                label="Disposable runtime",
+                environment=kernel_python,
+                document_path=notebook_path,
+                ttl_seconds=60,
+            )
+            self.assertEqual(runtime["runtime"]["mode"], "ephemeral")
+
+            discarded_body, discarded_status = self.state.discard_runtime("rt-ephemeral-discard")
+            self.assertEqual(discarded_status, 200)
+            self.assertTrue(discarded_body["discarded"])
+            self.assertEqual(discarded_body["runtime"]["status"], "reaped")
+
+            runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+            self.assertEqual(runtime_status, 200)
+            self.assertFalse(runtime_body["active"])
+            self.assertEqual(runtime_body["runtime_record"]["status"], "reaped")
+            self.assertEqual(runtime_body["reattach_policy"]["action"], "none")
+
+            recover_body, recover_status = self.state.recover_runtime("rt-ephemeral-discard")
+            self.assertEqual(recover_status, 400)
+            self.assertIn("Ephemeral runtime was discarded", recover_body["error"])
 
     def test_headless_notebook_projection_returns_runtime_and_contents(self):
         notebook_path = "notebooks/headless-projection.ipynb"
@@ -683,6 +899,42 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(contents_status, 200)
             self.assertEqual(contents_body["cells"][0]["source"], "x = 9\nx")
             self.assertEqual(contents_body["cells"][0]["outputs"][0]["data"]["text/plain"], "9")
+
+    def test_project_visible_and_execute_visible_cell_create_runtime_when_missing(self):
+        notebook_path = "notebooks/lazy-runtime.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "x = 2\nx"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+
+            real_path = os.path.realpath(os.path.join(str(self.workspace_root), notebook_path))
+            self.state._shutdown_headless_runtime(real_path)
+
+            project_body, project_status = self.state.notebook_project_visible(
+                notebook_path,
+                cells=[{"cell_type": "code", "source": "x = 11\nx", "metadata": {}}],
+            )
+            self.assertEqual(project_status, 200)
+            self.assertEqual(project_body["status"], "ok")
+
+            exec_body, exec_status = self.state.notebook_execute_visible_cell(
+                notebook_path,
+                cell_index=0,
+                source="x = 11\nx",
+            )
+            self.assertEqual(exec_status, 200)
+            self.assertEqual(exec_body["status"], "ok")
+            self.assertEqual(exec_body["outputs"][0]["data"]["text/plain"], "11")
+
+            runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+            self.assertEqual(runtime_status, 200)
+            self.assertTrue(runtime_body["active"])
+            self.assertEqual(runtime_body["reattach_policy"]["action"], "attach-live")
 
     def test_headless_runtime_keeps_live_memory_for_next_visible_cell_execution(self):
         notebook_path = "notebooks/headless-continuity.ipynb"
@@ -774,6 +1026,374 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(contents_body["cells"][0]["outputs"][0]["data"]["text/plain"], "9")
             self.assertEqual(contents_body["cells"][1]["source"], "x + 1")
             self.assertEqual(contents_body["cells"][1]["outputs"][0]["data"]["text/plain"], "10")
+
+    def test_notebook_activity_reports_multiplayer_live_execution(self):
+        notebook_path = "notebooks/live-activity.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(notebook_path, cells=[], kernel_id=kernel_python)
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            self.state.start_session("agent", "cli", "worker", "sess-agent")
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+            self.state.upsert_notebook_presence(session_id="sess-agent", path=notebook_path, activity="executing")
+            self.state.upsert_notebook_presence(session_id="sess-human", path=notebook_path, activity="observing")
+
+            result_holder: dict[str, Any] = {}
+
+            def run_insert_execute() -> None:
+                body, status = self.state.notebook_insert_execute(
+                    notebook_path,
+                    source="import time\ntime.sleep(0.4)\n21 * 2",
+                    cell_type="code",
+                    at_index=-1,
+                )
+                result_holder["body"] = body
+                result_holder["status"] = status
+
+            thread = threading.Thread(target=run_insert_execute)
+            thread.start()
+            live_body: dict[str, Any] | None = None
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                body, status = self.state.notebook_activity(notebook_path)
+                self.assertEqual(status, 200)
+                if body["current_execution"] and any(event["type"] == "execution-started" for event in body["recent_events"]):
+                    live_body = body
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(live_body)
+            self.assertEqual({item["session_id"] for item in live_body["presence"]}, {"sess-agent", "sess-human"})
+            self.assertEqual(live_body["current_execution"]["owner"], "agent")
+            live_cursor = live_body["cursor"]
+
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result_holder["status"], 200)
+            self.assertEqual(result_holder["body"]["outputs"][0]["data"]["text/plain"], "42")
+
+            finished_body, finished_status = self.state.notebook_activity(notebook_path, since=live_cursor)
+            self.assertEqual(finished_status, 200)
+            self.assertTrue(any(event["type"] == "execution-finished" for event in finished_body["recent_events"]))
+
+    def test_notebook_edit_emits_cell_source_update_event_with_payload(self):
+        notebook_path = "notebooks/source-update-event.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "x = 1\nx"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            cell_id = contents_body["cells"][0]["cell_id"]
+
+            activity_before, activity_status = self.state.notebook_activity(notebook_path)
+            self.assertEqual(activity_status, 200)
+
+            edit_body, edit_status = self.state.notebook_edit(
+                notebook_path,
+                [{"op": "replace-source", "cell_id": cell_id, "source": "x = 2\nx"}],
+                owner_session_id="sess-human",
+            )
+            self.assertEqual(edit_status, 200)
+            self.assertEqual(edit_body["results"][0]["cell_id"], cell_id)
+
+            activity_body, activity_status = self.state.notebook_activity(notebook_path, since=activity_before["cursor"])
+            self.assertEqual(activity_status, 200)
+            source_event = next(event for event in activity_body["recent_events"] if event["type"] == "cell-source-updated")
+            self.assertEqual(source_event["session_id"], "sess-human")
+            self.assertEqual(source_event["cell_id"], cell_id)
+            self.assertEqual(source_event["data"]["cell"]["source"], "x = 2\nx")
+
+    def test_notebook_activity_streams_output_append_events_while_running(self):
+        notebook_path = "notebooks/live-output-stream.ipynb"
+        kernel_python = _python_with_ipykernel()
+        source = "import time\nprint('start', flush=True)\ntime.sleep(0.4)\nprint('done', flush=True)"
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": source}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            self.state.start_session("agent", "cli", "worker", "sess-agent", ["projection", "ops", "automation"])
+            start_activity, start_status = self.state.notebook_activity(notebook_path)
+            self.assertEqual(start_status, 200)
+
+            result_holder: dict[str, Any] = {}
+
+            def run_execution() -> None:
+                body, status = self.state.notebook_execute_cell(
+                    notebook_path,
+                    cell_id=None,
+                    cell_index=0,
+                    owner_session_id="sess-agent",
+                )
+                result_holder["body"] = body
+                result_holder["status"] = status
+
+            thread = threading.Thread(target=run_execution)
+            thread.start()
+
+            stream_event: dict[str, Any] | None = None
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                body, status = self.state.notebook_activity(notebook_path, since=start_activity["cursor"])
+                self.assertEqual(status, 200)
+                stream_event = next((event for event in body["recent_events"] if event["type"] == "cell-output-appended"), None)
+                if stream_event is not None:
+                    self.assertEqual(body["current_execution"]["owner"], "agent")
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(stream_event)
+            self.assertEqual(stream_event["session_id"], "sess-agent")
+            self.assertEqual(stream_event["data"]["output"]["output_type"], "stream")
+            self.assertIn("start", stream_event["data"]["output"]["text"])
+            self.assertEqual(stream_event["data"]["cell"]["source"], source)
+
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result_holder["status"], 200)
+            self.assertEqual(result_holder["body"]["status"], "ok")
+
+    def test_cell_leases_resolve_cells_under_notebook_lock(self):
+        import nbformat
+
+        notebook_path = "notebooks/lease-locking.ipynb"
+        real_path = os.path.realpath(str(self.workspace_root / notebook_path))
+        notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell(source="x = 1")])
+        lock_state = {"entered": False}
+
+        @contextmanager
+        def guarded_notebook_lock(path: str):
+            self.assertEqual(path, real_path)
+            lock_state["entered"] = True
+            try:
+                yield
+            finally:
+                lock_state["entered"] = False
+
+        def load_notebook(path: str):
+            self.assertTrue(lock_state["entered"])
+            self.assertEqual(path, real_path)
+            return notebook, False
+
+        with (
+            mock.patch.object(self.state, "_notebook_lock", side_effect=guarded_notebook_lock),
+            mock.patch.object(self.state, "_load_notebook", side_effect=load_notebook),
+            mock.patch.object(self.state, "_save_notebook"),
+        ):
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+
+            lease_body, lease_status = self.state.acquire_cell_lease(
+                session_id="sess-human",
+                path=notebook_path,
+                cell_index=0,
+            )
+            self.assertEqual(lease_status, 200)
+            self.assertEqual(lease_body["lease"]["session_id"], "sess-human")
+
+            release_body, release_status = self.state.release_cell_lease(
+                session_id="sess-human",
+                path=notebook_path,
+                cell_index=0,
+            )
+            self.assertEqual(release_status, 200)
+            self.assertTrue(release_body["released"])
+
+    def test_notebook_activity_tolerates_live_presence_updates(self):
+        notebook_path = "notebooks/presence-race.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(notebook_path, cells=[], kernel_id=kernel_python)
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            self.state.start_session("agent", "cli", "worker", "sess-agent")
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+            failures: list[Exception] = []
+            stop_event = threading.Event()
+
+            def churn_presence() -> None:
+                try:
+                    while not stop_event.is_set():
+                        self.state.upsert_notebook_presence(session_id="sess-agent", path=notebook_path, activity="executing")
+                        self.state.upsert_notebook_presence(session_id="sess-human", path=notebook_path, activity="observing")
+                        self.state.clear_notebook_presence(session_id="sess-human", path=notebook_path)
+                except Exception as err:  # pragma: no cover - defensive concurrency test
+                    failures.append(err)
+
+            thread = threading.Thread(target=churn_presence)
+            thread.start()
+            try:
+                deadline = time.time() + 1.0
+                while time.time() < deadline:
+                    body, status = self.state.notebook_activity(notebook_path)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body["status"], "ok")
+                    time.sleep(0.01)
+            finally:
+                stop_event.set()
+                thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
+
+    def test_cell_lease_blocks_cross_session_execution_until_it_expires(self):
+        notebook_path = "notebooks/leased-cell.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "21 * 2"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+            self.state.start_session("agent", "cli", "worker", "sess-agent")
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            cell_id = contents_body["cells"][0]["cell_id"]
+
+            lease_body, lease_status = self.state.acquire_cell_lease(
+                session_id="sess-human",
+                path=notebook_path,
+                cell_id=cell_id,
+            )
+            self.assertEqual(lease_status, 200)
+            self.assertEqual(lease_body["lease"]["session_id"], "sess-human")
+
+            activity_body, activity_status = self.state.notebook_activity(notebook_path)
+            self.assertEqual(activity_status, 200)
+            self.assertEqual(len(activity_body["leases"]), 1)
+            self.assertEqual(activity_body["leases"][0]["cell_id"], cell_id)
+
+            conflict_body, conflict_status = self.state.notebook_execute_visible_cell(
+                notebook_path,
+                cell_index=0,
+                source="84 // 2",
+                owner_session_id="sess-agent",
+            )
+            self.assertEqual(conflict_status, 409)
+            self.assertEqual(conflict_body["conflict"]["lease"]["session_id"], "sess-human")
+
+            allowed_body, allowed_status = self.state.notebook_execute_visible_cell(
+                notebook_path,
+                cell_index=0,
+                source="84 // 2",
+                owner_session_id="sess-human",
+            )
+            self.assertEqual(allowed_status, 200)
+            self.assertEqual(allowed_body["outputs"][0]["data"]["text/plain"], "42")
+
+            lease_key = self.state._lease_key("notebooks/leased-cell.ipynb", cell_id)
+            self.state.cell_leases[lease_key].expires_at = time.time() - 1
+
+            retry_body, retry_status = self.state.notebook_execute_visible_cell(
+                notebook_path,
+                cell_index=0,
+                source="6 * 7",
+                owner_session_id="sess-agent",
+            )
+            self.assertEqual(retry_status, 200)
+            self.assertEqual(retry_body["outputs"][0]["data"]["text/plain"], "42")
+
+    def test_structure_lease_blocks_cross_session_insert_and_projection(self):
+        notebook_path = "notebooks/structure-lease.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "x = 1\nx"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+            self.state.start_session("agent", "cli", "worker", "sess-agent")
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            cell_id = contents_body["cells"][0]["cell_id"]
+
+            lease_body, lease_status = self.state.acquire_cell_lease(
+                session_id="sess-human",
+                path=notebook_path,
+                cell_id=cell_id,
+                kind="structure",
+            )
+            self.assertEqual(lease_status, 200)
+            self.assertEqual(lease_body["lease"]["kind"], "structure")
+
+            insert_body, insert_status = self.state.notebook_insert_execute(
+                notebook_path,
+                source="x + 1",
+                cell_type="code",
+                at_index=-1,
+                owner_session_id="sess-agent",
+            )
+            self.assertEqual(insert_status, 409)
+            self.assertEqual(insert_body["conflict"]["lease"]["kind"], "structure")
+
+            project_body, project_status = self.state.notebook_project_visible(
+                notebook_path,
+                cells=[
+                    {
+                        "cell_type": "code",
+                        "source": "x = 1\nx",
+                        "cell_id": cell_id,
+                        "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
+                    },
+                    {
+                        "cell_type": "markdown",
+                        "source": "blocked",
+                        "metadata": {},
+                    },
+                ],
+                owner_session_id="sess-agent",
+            )
+            self.assertEqual(project_status, 409)
+            self.assertEqual(project_body["conflict"]["operation"], "project-visible-notebook")
+
+            own_project_body, own_project_status = self.state.notebook_project_visible(
+                notebook_path,
+                cells=[
+                    {
+                        "cell_type": "code",
+                        "source": "x = 1\nx",
+                        "cell_id": cell_id,
+                        "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
+                    },
+                    {
+                        "cell_type": "markdown",
+                        "source": "allowed",
+                        "metadata": {},
+                    },
+                ],
+                owner_session_id="sess-human",
+            )
+            self.assertEqual(own_project_status, 200)
+            self.assertEqual(own_project_body["cell_count"], 2)
 
     def test_headless_edit_delete_and_move_update_structure(self):
         notebook_path = "notebooks/headless-structure.ipynb"
@@ -901,12 +1521,93 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(finished_status, 200)
         self.assertEqual(finished_body["branch"]["status"], "merged")
 
+    def test_branch_review_can_be_requested_and_resolved(self):
+        requester = self.state.start_session("agent", "cli", "worker", "sess-agent")
+        reviewer = self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+        opened, status = self.state.open_document("notebooks/reviewable.ipynb")
+        self.assertEqual(status, 200)
+
+        branch_body, branch_status = self.state.start_branch(
+            branch_id="branch-review",
+            document_id=opened["document"]["document_id"],
+            owner_session_id=requester["session"]["session_id"],
+            parent_branch_id=None,
+            title="Review me",
+            purpose="Draft risky edit",
+        )
+        self.assertEqual(branch_status, 200)
+
+        review_body, review_status = self.state.request_branch_review(
+            branch_id="branch-review",
+            requested_by_session_id="sess-agent",
+            note="Please review the draft",
+        )
+        self.assertEqual(review_status, 200)
+        self.assertEqual(review_body["branch"]["review_status"], "requested")
+        self.assertEqual(review_body["branch"]["review_requested_by_session_id"], "sess-agent")
+
+        activity_body, activity_status = self.state.notebook_activity("notebooks/reviewable.ipynb")
+        self.assertEqual(activity_status, 200)
+        self.assertTrue(any(event["type"] == "review-requested" for event in activity_body["recent_events"]))
+
+        resolved_body, resolved_status = self.state.resolve_branch_review(
+            branch_id="branch-review",
+            resolved_by_session_id="sess-human",
+            resolution="approved",
+            note="Looks good",
+        )
+        self.assertEqual(resolved_status, 200)
+        self.assertEqual(resolved_body["branch"]["review_status"], "resolved")
+        self.assertEqual(resolved_body["branch"]["review_resolution"], "approved")
+        self.assertEqual(resolved_body["branch"]["review_resolved_by_session_id"], "sess-human")
+
+        resolved_activity, resolved_activity_status = self.state.notebook_activity("notebooks/reviewable.ipynb")
+        self.assertEqual(resolved_activity_status, 200)
+        self.assertTrue(any(event["type"] == "review-resolved" for event in resolved_activity["recent_events"]))
+
+    def test_lease_conflict_payload_suggests_branch_handoff(self):
+        notebook_path = "notebooks/conflict-handoff.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "21 * 2"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+            opened, opened_status = self.state.open_document(notebook_path)
+            self.assertEqual(opened_status, 200)
+
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+            self.state.start_session("agent", "cli", "worker", "sess-agent")
+
+            lease_body, lease_status = self.state.acquire_cell_lease(
+                session_id="sess-human",
+                path=notebook_path,
+                cell_index=0,
+            )
+            self.assertEqual(lease_status, 200)
+
+            conflict_body, conflict_status = self.state.notebook_execute_visible_cell(
+                notebook_path,
+                cell_index=0,
+                source="84 // 2",
+                owner_session_id="sess-agent",
+            )
+            self.assertEqual(conflict_status, 409)
+            suggested_branch = conflict_body["conflict"]["suggested_branch"]
+            self.assertEqual(suggested_branch["action"], "branch-start")
+            self.assertEqual(suggested_branch["document_id"], opened["document"]["document_id"])
+            self.assertEqual(suggested_branch["owner_session_id"], "sess-agent")
+
     def test_finish_run_keeps_runtime_busy_while_another_run_is_active(self):
         opened, status = self.state.open_document("notebooks/demo.ipynb")
         self.assertEqual(status, 200)
         document_id = opened["document"]["document_id"]
         runtime = self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
-        self.assertEqual(runtime["runtime"]["status"], "ready")
+        self.assertEqual(runtime["runtime"]["status"], "idle")
 
         first_body, first_status = self.state.start_run(
             run_id="run-1",
@@ -931,7 +1632,7 @@ class TestCoreState(unittest.TestCase):
 
         final_body, final_status = self.state.finish_run(second_body["run"]["run_id"], "completed")
         self.assertEqual(final_status, 200)
-        self.assertEqual(self.state.runtime_records["rt-1"].status, "ready")
+        self.assertEqual(self.state.runtime_records["rt-1"].status, "idle")
 
     def test_start_run_rejects_unknown_document_and_branch_targets(self):
         self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
@@ -955,6 +1656,45 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(bad_branch_status, 400)
         self.assertIn("Unknown branch target_ref", bad_branch_body["error"])
 
+    def test_start_run_rejects_reaped_runtime(self):
+        self.state.start_runtime(runtime_id="rt-ephemeral", mode="ephemeral", label=None, environment=None, ttl_seconds=1)
+        self.state.runtime_records["rt-ephemeral"].expires_at = time.time() - 5
+        body, status = self.state.start_run(
+            run_id="run-expired",
+            runtime_id="rt-ephemeral",
+            target_type="document",
+            target_ref="doc-missing",
+            kind="execute",
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("Runtime is not runnable", body["error"])
+
+    def test_start_run_rejects_runtime_that_requires_recovery(self):
+        self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
+        self.state.runtime_records["rt-1"].status = "recovery-needed"
+        body, status = self.state.start_run(
+            run_id="run-recover",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref="doc-missing",
+            kind="execute",
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("Runtime requires recovery", body["error"])
+
+    def test_start_run_rejects_degraded_runtime(self):
+        self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
+        self.state.runtime_records["rt-1"].status = "degraded"
+        body, status = self.state.start_run(
+            run_id="run-degraded",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref="doc-missing",
+            kind="execute",
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("must be recovered", body["error"])
+
     def test_load_or_create_state_restores_persisted_records_with_recovery_normalization(self):
         session = self.state.start_session("agent", "cli", "worker", "sess-1")
         opened, status = self.state.open_document("notebooks/demo.ipynb")
@@ -977,6 +1717,14 @@ class TestCoreState(unittest.TestCase):
             kind="execute",
         )
         self.assertEqual(run_status, 200)
+        self.state._append_activity_event(
+            path="notebooks/demo.ipynb",
+            event_type="runtime-state-changed",
+            detail="Runtime rt-1 transitioned idle -> busy",
+            runtime_id="rt-1",
+            data={"from_status": "idle", "to_status": "busy"},
+        )
+        self.state.persist()
 
         restored = _load_or_create_state(
             workspace_root=str(self.workspace_root),
@@ -991,7 +1739,42 @@ class TestCoreState(unittest.TestCase):
         self.assertIn(branch_body["branch"]["branch_id"], restored.branch_records)
         self.assertEqual(restored.runtime_records["rt-1"].status, "recovery-needed")
         self.assertEqual(restored.run_records[run_body["run"]["run_id"]].status, "interrupted")
+        self.assertTrue(any(event.type == "runtime-state-changed" for event in restored.activity_records))
         self.assertTrue(Path(restored.state_file).exists())
+
+    def test_runtime_state_changes_are_visible_in_notebook_activity(self):
+        notebook_path = "notebooks/runtime-transitions.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "21 * 2"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            runtime_body, runtime_status = self.state.notebook_runtime(notebook_path)
+            self.assertEqual(runtime_status, 200)
+            runtime_id = runtime_body["runtime"]["runtime_id"]
+
+            activity_before, activity_status = self.state.notebook_activity(notebook_path)
+            self.assertEqual(activity_status, 200)
+
+            stopped_body, stopped_status = self.state.stop_runtime(runtime_id)
+            self.assertEqual(stopped_status, 200)
+            self.assertEqual(stopped_body["runtime"]["status"], "stopped")
+
+            activity_after, activity_status = self.state.notebook_activity(notebook_path, since=activity_before["cursor"])
+            self.assertEqual(activity_status, 200)
+            transitions = [
+                event["data"]["to_status"]
+                for event in activity_after["recent_events"]
+                if event["type"] == "runtime-state-changed"
+            ]
+            self.assertIn("draining", transitions)
+            self.assertIn("stopped", transitions)
 
     def test_select_kernel_changes_headless_runtime(self):
         notebook_path = "notebooks/select-kernel.ipynb"
@@ -1365,6 +2148,21 @@ class TestCoreEndpoints(unittest.TestCase):
         self.assertIn("/api/sessions/detach", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"session_id": "sess-1"})
 
+    def test_session_presence_upsert_calls_post(self):
+        self.client.session_presence_upsert("sess-1", path="nb.ipynb", activity="observing", cell_index=2)
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/sessions/presence/upsert", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"session_id": "sess-1", "path": "nb.ipynb", "activity": "observing", "cell_index": 2},
+        )
+
+    def test_session_presence_clear_calls_post(self):
+        self.client.session_presence_clear("sess-1", path="nb.ipynb")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/sessions/presence/clear", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"session_id": "sess-1", "path": "nb.ipynb"})
+
     def test_end_session_calls_post(self):
         self.client.end_session("sess-1")
         url = self.mock_post.call_args[0][0]
@@ -1439,6 +2237,21 @@ class TestCoreEndpoints(unittest.TestCase):
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/notebooks/edit", url)
 
+    def test_notebook_edit_calls_post_with_owner_session(self):
+        self.client.notebook_edit(
+            "nb.ipynb",
+            [{"op": "replace-source", "cell_id": "cell-1", "source": "x = 2"}],
+            owner_session_id="sess-1",
+        )
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {
+                "path": "nb.ipynb",
+                "operations": [{"op": "replace-source", "cell_id": "cell-1", "source": "x = 2"}],
+                "owner_session_id": "sess-1",
+            },
+        )
+
     def test_notebook_execute_cell_polls(self):
         self.client.notebook_execution = mock.Mock(return_value={"status": "ok", "outputs": []})
         with mock.patch.object(self.client, "_post", return_value={"status": "started", "execution_id": "exec-1", "cell_id": "cell-1"}) as post:
@@ -1454,6 +2267,26 @@ class TestCoreEndpoints(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         post.assert_called_once()
         self.client.notebook_execution.assert_called_once_with("exec-2")
+
+    def test_notebook_execute_cell_calls_post_with_owner_session(self):
+        self.client.notebook_execute_cell("nb.ipynb", cell_id="cell-1", owner_session_id="sess-1", wait=False)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "cell_id": "cell-1", "owner_session_id": "sess-1"},
+        )
+
+    def test_notebook_insert_execute_calls_post_with_owner_session(self):
+        self.client.notebook_insert_execute("nb.ipynb", "x = 1", owner_session_id="sess-1", wait=False)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {
+                "path": "nb.ipynb",
+                "source": "x = 1",
+                "cell_type": "code",
+                "at_index": -1,
+                "owner_session_id": "sess-1",
+            },
+        )
 
     def test_notebook_execution_calls_post(self):
         self.client.notebook_execution("exec-1")
@@ -1472,6 +2305,12 @@ class TestCoreEndpoints(unittest.TestCase):
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/notebooks/runtime", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "nb.ipynb"})
+
+    def test_notebook_activity_calls_post(self):
+        self.client.notebook_activity("nb.ipynb", since=10.5)
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/activity", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "nb.ipynb", "since": 10.5})
 
     def test_notebook_project_visible_calls_post(self):
         self.client.notebook_project_visible(
@@ -1492,6 +2331,30 @@ class TestCoreEndpoints(unittest.TestCase):
         self.assertEqual(
             self.mock_post.call_args.kwargs["json"],
             {"path": "nb.ipynb", "cell_index": 2, "source": "x = 9\nx"},
+        )
+
+    def test_acquire_cell_lease_calls_post(self):
+        self.client.acquire_cell_lease("nb.ipynb", session_id="sess-1", cell_id="cell-1", kind="structure", ttl_seconds=12)
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/lease/acquire", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {
+                "path": "nb.ipynb",
+                "session_id": "sess-1",
+                "cell_id": "cell-1",
+                "kind": "structure",
+                "ttl_seconds": 12,
+            },
+        )
+
+    def test_release_cell_lease_calls_post(self):
+        self.client.release_cell_lease("nb.ipynb", session_id="sess-1", cell_index=2)
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/lease/release", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "session_id": "sess-1", "cell_index": 2},
         )
 
     def test_list_branches_calls_get(self):
@@ -1515,6 +2378,24 @@ class TestCoreEndpoints(unittest.TestCase):
         self.assertIn("/api/branches/finish", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"branch_id": "branch-1", "status": "merged"})
 
+    def test_request_branch_review_calls_post(self):
+        self.client.request_branch_review("branch-1", requested_by_session_id="sess-1", note="Please review")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/branches/review-request", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"branch_id": "branch-1", "requested_by_session_id": "sess-1", "note": "Please review"},
+        )
+
+    def test_resolve_branch_review_calls_post(self):
+        self.client.resolve_branch_review("branch-1", resolved_by_session_id="sess-2", resolution="approved", note="Ship it")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/branches/review-resolve", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"branch_id": "branch-1", "resolved_by_session_id": "sess-2", "resolution": "approved", "note": "Ship it"},
+        )
+
     def test_list_runtimes_calls_get(self):
         self.client.list_runtimes()
         url = self.mock_get.call_args[0][0]
@@ -1534,6 +2415,24 @@ class TestCoreEndpoints(unittest.TestCase):
         self.client.stop_runtime("rt-1")
         url = self.mock_post.call_args[0][0]
         self.assertIn("/api/runtimes/stop", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"runtime_id": "rt-1"})
+
+    def test_recover_runtime_calls_post(self):
+        self.client.recover_runtime("rt-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/runtimes/recover", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"runtime_id": "rt-1"})
+
+    def test_promote_runtime_calls_post(self):
+        self.client.promote_runtime("rt-1", mode="shared")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/runtimes/promote", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"runtime_id": "rt-1", "mode": "shared"})
+
+    def test_discard_runtime_calls_post(self):
+        self.client.discard_runtime("rt-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/runtimes/discard", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"runtime_id": "rt-1"})
 
     def test_list_runs_calls_get(self):
@@ -1586,14 +2485,25 @@ class TestParser(unittest.TestCase):
     def test_exec_with_cell_id(self):
         args = build_parser().parse_args(["exec", "nb.ipynb", "--cell-id", "abc"])
         self.assertEqual(args.cell_id, "abc")
+        self.assertIsNone(args.session_id)
 
     def test_ix(self):
         args = build_parser().parse_args(["ix", "nb.ipynb", "-s", "print(1)"])
         self.assertEqual(args.source, "print(1)")
+        self.assertIsNone(args.session_id)
+
+    def test_ix_with_session_id(self):
+        args = build_parser().parse_args(["ix", "nb.ipynb", "--session-id", "sess-1", "-s", "print(1)"])
+        self.assertEqual(args.session_id, "sess-1")
 
     def test_edit_replace_source(self):
         args = build_parser().parse_args(["edit", "nb.ipynb", "replace-source", "-s", "x=1", "--cell-id", "c1"])
         self.assertEqual(args.edit_command, "replace-source")
+        self.assertIsNone(args.session_id)
+
+    def test_edit_replace_source_with_session_id(self):
+        args = build_parser().parse_args(["edit", "nb.ipynb", "--session-id", "sess-1", "replace-source", "-s", "x=1", "--cell-id", "c1"])
+        self.assertEqual(args.session_id, "sess-1")
 
     def test_edit_insert(self):
         args = build_parser().parse_args(["edit", "nb.ipynb", "insert", "-s", "# hi", "--cell-type", "markdown"])
@@ -1723,10 +2633,40 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.core_command, "branch-finish")
         self.assertEqual(args.branch_id, "branch-1")
 
+    def test_core_branch_review_request(self):
+        args = build_parser().parse_args([
+            "core", "branch-review-request",
+            "--branch-id", "branch-1",
+            "--requested-by-session-id", "sess-1",
+        ])
+        self.assertEqual(args.core_command, "branch-review-request")
+        self.assertEqual(args.branch_id, "branch-1")
+
+    def test_core_branch_review_resolve(self):
+        args = build_parser().parse_args([
+            "core", "branch-review-resolve",
+            "--branch-id", "branch-1",
+            "--resolved-by-session-id", "sess-2",
+            "--resolution", "approved",
+        ])
+        self.assertEqual(args.core_command, "branch-review-resolve")
+        self.assertEqual(args.resolution, "approved")
+
     def test_core_runtime_start(self):
         args = build_parser().parse_args(["core", "runtime-start", "--mode", "shared"])
         self.assertEqual(args.core_command, "runtime-start")
         self.assertEqual(args.mode, "shared")
+
+    def test_core_runtime_promote(self):
+        args = build_parser().parse_args(["core", "runtime-promote", "--runtime-id", "rt-1", "--mode", "pinned"])
+        self.assertEqual(args.core_command, "runtime-promote")
+        self.assertEqual(args.runtime_id, "rt-1")
+        self.assertEqual(args.mode, "pinned")
+
+    def test_core_runtime_discard(self):
+        args = build_parser().parse_args(["core", "runtime-discard", "--runtime-id", "rt-1"])
+        self.assertEqual(args.core_command, "runtime-discard")
+        self.assertEqual(args.runtime_id, "rt-1")
 
     def test_core_run_start(self):
         args = build_parser().parse_args(["core", "run-start", "--runtime-id", "rt-1", "--target-type", "document", "--target-ref", "doc-1"])
@@ -1791,6 +2731,8 @@ class TestCommands(unittest.TestCase):
         client.start_session.return_value = {"status": "ok", "session": {"session_id": "sess-1"}}
         client.touch_session.return_value = {"status": "ok", "session": {"session_id": "sess-1", "status": "attached"}}
         client.detach_session.return_value = {"status": "ok", "session": {"session_id": "sess-1", "status": "detached"}}
+        client.session_presence_upsert.return_value = {"status": "ok", "presence": {"session_id": "sess-1", "activity": "observing"}}
+        client.session_presence_clear.return_value = {"status": "ok", "cleared": True}
         client.end_session.return_value = {"status": "ok", "ended": True}
         client.list_documents.return_value = {"status": "ok", "documents": []}
         client.open_document.return_value = {"status": "ok", "document": {"document_id": "doc-1"}}
@@ -1808,14 +2750,22 @@ class TestCommands(unittest.TestCase):
         client.notebook_restart_and_run_all.return_value = {"status": "ok"}
         client.notebook_runtime.return_value = {"status": "ok", "active": True}
         client.notebook_projection.return_value = {"status": "ok", "active": True, "contents": {"path": "nb.ipynb", "cells": []}}
+        client.notebook_activity.return_value = {"status": "ok", "path": "nb.ipynb", "presence": [], "recent_events": []}
         client.notebook_project_visible.return_value = {"status": "ok", "path": "nb.ipynb", "cell_count": 1}
         client.notebook_execute_visible_cell.return_value = {"status": "ok"}
+        client.acquire_cell_lease.return_value = {"status": "ok", "lease": {"lease_id": "lease-1"}}
+        client.release_cell_lease.return_value = {"status": "ok", "released": True}
         client.list_branches.return_value = {"status": "ok", "branches": []}
         client.start_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "active"}}
         client.finish_branch.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "status": "merged"}}
+        client.request_branch_review.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "review_status": "requested"}}
+        client.resolve_branch_review.return_value = {"status": "ok", "branch": {"branch_id": "branch-1", "review_status": "resolved"}}
         client.list_runtimes.return_value = {"status": "ok", "runtimes": []}
         client.start_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1"}}
         client.stop_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1", "status": "stopped"}}
+        client.recover_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1", "status": "idle"}}
+        client.promote_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1", "mode": "shared"}}
+        client.discard_runtime.return_value = {"status": "ok", "runtime": {"runtime_id": "rt-1", "status": "reaped"}}
         client.list_runs.return_value = {"status": "ok", "runs": []}
         client.start_run.return_value = {"status": "ok", "run": {"run_id": "run-1"}}
         client.finish_run.return_value = {"status": "ok", "run": {"run_id": "run-1", "status": "completed"}}
@@ -1918,6 +2868,31 @@ class TestCommands(unittest.TestCase):
         core.notebook_insert_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30)
         bridge.insert_and_execute.assert_not_called()
 
+    def test_ix_passes_session_id_to_core_execution_surface(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["ix", "nb.ipynb", "--session-id", "sess-1", "-s", "x=1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_insert_execute.assert_called_once_with(
+            "nb.ipynb",
+            "x=1",
+            at_index=-1,
+            wait=True,
+            timeout=30,
+            owner_session_id="sess-1",
+        )
+        bridge.insert_and_execute.assert_not_called()
+
     def test_ix_no_wait(self):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1", "--no-wait"], client)
@@ -1952,6 +2927,30 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         core.notebook_execute_cell.assert_called_once_with("nb.ipynb", cell_id="abc", wait=True, timeout=30)
+        bridge.execute_cell.assert_not_called()
+
+    def test_exec_passes_session_id_to_core_execution_surface(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["exec", "nb.ipynb", "--session-id", "sess-1", "--cell-id", "abc"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_execute_cell.assert_called_once_with(
+            "nb.ipynb",
+            cell_id="abc",
+            wait=True,
+            timeout=30,
+            owner_session_id="sess-1",
+        )
         bridge.execute_cell.assert_not_called()
 
     def test_respond(self):
@@ -2171,7 +3170,7 @@ class TestCommands(unittest.TestCase):
             code = main(["core", "attach", "--actor", "agent", "--client-type", "cli", "--label", "worker"])
         self.assertEqual(code, 0)
         mock_attach.assert_called_once_with(
-            "/Users/giladrubin/python_workspace/agent-repl",
+            os.getcwd(),
             actor="agent",
             client="cli",
             label="worker",
@@ -2284,6 +3283,47 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         client.end_session.assert_called_once_with("sess-1")
 
+    def test_core_session_presence_upsert(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main([
+                    "core", "session-presence-upsert", "notebooks/demo.ipynb",
+                    "--session-id", "sess-1",
+                    "--activity", "observing",
+                    "--cell-index", "2",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.session_presence_upsert.assert_called_once_with(
+            "sess-1",
+            path="notebooks/demo.ipynb",
+            activity="observing",
+            cell_id=None,
+            cell_index=2,
+        )
+
+    def test_core_session_presence_clear(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main([
+                    "core", "session-presence-clear",
+                    "--session-id", "sess-1",
+                    "--path", "notebooks/demo.ipynb",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.session_presence_clear.assert_called_once_with("sess-1", path="notebooks/demo.ipynb")
+
     def test_core_documents(self):
         client = self._mock_core_client()
         buf = StringIO()
@@ -2362,6 +3402,19 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         client.notebook_projection.assert_called_once_with("notebooks/demo.ipynb")
 
+    def test_core_notebook_activity(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "notebook-activity", "notebooks/demo.ipynb", "--since", "12.5"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.notebook_activity.assert_called_once_with("notebooks/demo.ipynb", since=12.5)
+
     def test_core_project_visible_notebook(self):
         client = self._mock_core_client()
         buf = StringIO()
@@ -2381,6 +3434,30 @@ class TestCommands(unittest.TestCase):
             cells=[{"cell_type": "code", "source": "x = 1"}],
         )
 
+    def test_core_project_visible_notebook_with_session_id(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            cells_file = Path(tmp) / "cells.json"
+            cells_file.write_text(json.dumps([{"cell_type": "code", "source": "x = 1"}]))
+            sys.stdout = buf
+            try:
+                with mock.patch("agent_repl.cli._core_client", return_value=client):
+                    code = main([
+                        "core", "project-visible-notebook", "notebooks/demo.ipynb",
+                        "--cells-file", str(cells_file),
+                        "--session-id", "sess-1",
+                    ])
+            finally:
+                sys.stdout = old
+        self.assertEqual(code, 0)
+        client.notebook_project_visible.assert_called_once_with(
+            "notebooks/demo.ipynb",
+            cells=[{"cell_type": "code", "source": "x = 1"}],
+            owner_session_id="sess-1",
+        )
+
     def test_core_execute_visible_cell(self):
         client = self._mock_core_client()
         buf = StringIO()
@@ -2396,6 +3473,77 @@ class TestCommands(unittest.TestCase):
             "notebooks/demo.ipynb",
             cell_index=2,
             source="x = 1",
+        )
+
+    def test_core_execute_visible_cell_with_session_id(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main([
+                    "core", "execute-visible-cell", "notebooks/demo.ipynb",
+                    "--session-id", "sess-1",
+                    "--cell-index", "2",
+                    "-s", "x = 1",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.notebook_execute_visible_cell.assert_called_once_with(
+            "notebooks/demo.ipynb",
+            cell_index=2,
+            source="x = 1",
+            owner_session_id="sess-1",
+        )
+
+    def test_core_cell_lease_acquire(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main([
+                    "core", "cell-lease-acquire", "notebooks/demo.ipynb",
+                    "--session-id", "sess-1",
+                    "--cell-id", "cell-1",
+                    "--kind", "structure",
+                    "--ttl-seconds", "12",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.acquire_cell_lease.assert_called_once_with(
+            "notebooks/demo.ipynb",
+            session_id="sess-1",
+            cell_id="cell-1",
+            cell_index=None,
+            kind="structure",
+            ttl_seconds=12.0,
+        )
+
+    def test_core_cell_lease_release(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main([
+                    "core", "cell-lease-release", "notebooks/demo.ipynb",
+                    "--session-id", "sess-1",
+                    "--cell-index", "2",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.release_cell_lease.assert_called_once_with(
+            "notebooks/demo.ipynb",
+            session_id="sess-1",
+            cell_id=None,
+            cell_index=2,
         )
 
     def test_core_branches(self):
@@ -2450,6 +3598,52 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         client.finish_branch.assert_called_once_with("branch-1", status="merged")
 
+    def test_core_branch_review_request(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main([
+                    "core", "branch-review-request",
+                    "--branch-id", "branch-1",
+                    "--requested-by-session-id", "sess-1",
+                    "--note", "Please review",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.request_branch_review.assert_called_once_with(
+            "branch-1",
+            requested_by_session_id="sess-1",
+            note="Please review",
+        )
+
+    def test_core_branch_review_resolve(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main([
+                    "core", "branch-review-resolve",
+                    "--branch-id", "branch-1",
+                    "--resolved-by-session-id", "sess-2",
+                    "--resolution", "approved",
+                    "--note", "Ship it",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.resolve_branch_review.assert_called_once_with(
+            "branch-1",
+            resolved_by_session_id="sess-2",
+            resolution="approved",
+            note="Ship it",
+        )
+
     def test_core_runtimes(self):
         client = self._mock_core_client()
         buf = StringIO()
@@ -2479,6 +3673,8 @@ class TestCommands(unittest.TestCase):
             label="primary",
             runtime_id=None,
             environment=".venv",
+            document_path=None,
+            ttl_seconds=None,
         )
 
     def test_core_runtime_stop(self):
@@ -2493,6 +3689,45 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         client.stop_runtime.assert_called_once_with("rt-1")
+
+    def test_core_runtime_recover(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "runtime-recover", "--runtime-id", "rt-1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.recover_runtime.assert_called_once_with("rt-1")
+
+    def test_core_runtime_promote(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "runtime-promote", "--runtime-id", "rt-1", "--mode", "pinned"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.promote_runtime.assert_called_once_with("rt-1", mode="pinned")
+
+    def test_core_runtime_discard(self):
+        client = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "runtime-discard", "--runtime-id", "rt-1"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.discard_runtime.assert_called_once_with("rt-1")
 
     def test_core_runs(self):
         client = self._mock_core_client()
