@@ -8,6 +8,7 @@ import { insertPromptCell } from './prompts/commands';
 import { ActivityPanelProvider } from './activity/panel';
 import { initExecutionMonitor } from './execution/queue';
 import { HeadlessNotebookProjection, SessionAutoAttach } from './session';
+import { CanvasEditorProvider } from './editor/provider';
 
 let server: BridgeServer | undefined;
 let statusBarItem: vscode.StatusBarItem;
@@ -45,6 +46,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Activity panel
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider('agent-repl.activity', new ActivityPanelProvider())
+    );
+
+    // Canvas editor for .ipynb files
+    context.subscriptions.push(
+        vscode.window.registerCustomEditorProvider(
+            CanvasEditorProvider.viewType,
+            new CanvasEditorProvider(context),
+            { webviewOptions: { retainContextWhenHidden: true } }
+        )
     );
 
     // Commands
