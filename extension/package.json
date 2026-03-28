@@ -56,7 +56,17 @@
       "agent-repl": [
         { "type": "webview", "id": "agent-repl.activity", "name": "Activity" }
       ]
-    }
+    },
+    "customEditors": [
+      {
+        "viewType": "agent-repl.canvasEditor",
+        "displayName": "Agent REPL Canvas",
+        "selector": [
+          { "filenamePattern": "*.ipynb" }
+        ],
+        "priority": "option"
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
