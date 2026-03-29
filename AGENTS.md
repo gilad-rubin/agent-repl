@@ -67,6 +67,8 @@ Notebook files + headless kernels
 - Presence and cell leases are intentionally transient collaboration state. Keep them out of persisted core state unless the product decision explicitly changes.
 - Add direct service-level tests for collaboration edge cases when extracting them: preferred-session ranking, lease TTL refresh on touch, and branch review activity should not rely only on broader end-to-end coverage.
 - Keep adapters thin. CLI, browser preview, VS Code, and future MCP surfaces should reuse shared contracts and core services rather than re-encoding notebook semantics locally.
+- For the core daemon HTTP surface, prefer small route modules by domain (`notebook`, `collaboration`, `runtime`, `document`) over one giant handler with repeated validation branches.
+- When extracting route modules, give each one its own focused tests so request validation and dispatch behavior stay locked without relying only on end-to-end daemon tests.
 - Before deleting an old helper, search tests for direct patching or mocking of that helper. Some internal methods are part of the regression harness even if they are not public APIs.
 - If a refactor touches run-all, restart-and-run-all, save/flush, notebook switching, or trailing-cell reuse, update the matching behavior-lock docs under `dev/behavior-locks/` in the same change.
 

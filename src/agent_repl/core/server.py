@@ -24,11 +24,17 @@ from jupyter_client.kernelspec import KernelSpec
 from agent_repl.client import BridgeClient
 from agent_repl.core.collaboration import CollaborationConflictError
 from agent_repl.core.collaboration_service import CollaborationService
+from agent_repl.core.collaboration_http_routes import (
+    handle_collaboration_get,
+    handle_collaboration_post,
+)
+from agent_repl.core.document_http_routes import handle_document_get, handle_document_post
 from agent_repl.core.notebook_http_routes import handle_notebook_post
 from agent_repl.core.notebook_execution_service import NotebookExecutionService
 from agent_repl.core.notebook_mutation_service import NotebookMutationService
 from agent_repl.core.notebook_read_service import NotebookReadService
 from agent_repl.core.notebook_write_service import NotebookWriteService
+from agent_repl.core.runtime_http_routes import handle_runtime_get, handle_runtime_post
 
 
 CORE_VERSION = "0.1.0"
@@ -2105,20 +2111,20 @@ def _handler_factory(state: CoreState):
                 if self.path == "/api/status":
                     self._json(HTTPStatus.OK, state.status_payload())
                     return
-                if self.path == "/api/sessions":
-                    self._json(HTTPStatus.OK, state.list_sessions_payload())
+                document_route = handle_document_get(state, self.path)
+                if document_route is not None:
+                    status, body = document_route
+                    self._json(status, body)
                     return
-                if self.path == "/api/documents":
-                    self._json(HTTPStatus.OK, state.list_documents_payload())
+                collaboration_route = handle_collaboration_get(state, self.path)
+                if collaboration_route is not None:
+                    status, body = collaboration_route
+                    self._json(status, body)
                     return
-                if self.path == "/api/branches":
-                    self._json(HTTPStatus.OK, state.list_branches_payload())
-                    return
-                if self.path == "/api/runtimes":
-                    self._json(HTTPStatus.OK, state.list_runtimes_payload())
-                    return
-                if self.path == "/api/runs":
-                    self._json(HTTPStatus.OK, state.list_runs_payload())
+                runtime_route = handle_runtime_get(state, self.path)
+                if runtime_route is not None:
+                    status, body = runtime_route
+                    self._json(status, body)
                     return
 
                 self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -2137,117 +2143,9 @@ def _handler_factory(state: CoreState):
                     self._json(HTTPStatus.OK, {"status": "ok", "stopping": True, "pid": state.pid})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
-                if self.path == "/api/sessions/start":
-                    actor = payload.get("actor")
-                    client = payload.get("client")
-                    session_id = payload.get("session_id")
-                    label = payload.get("label")
-                    capabilities = payload.get("capabilities")
-                    if not isinstance(actor, str) or not actor:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing actor"})
-                        return
-                    if not isinstance(client, str) or not client:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing client"})
-                        return
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    resolved_capabilities = (
-                        [item for item in capabilities if isinstance(item, str) and item]
-                        if isinstance(capabilities, list)
-                        else None
-                    )
-                    self._json(HTTPStatus.OK, state.start_session(actor, client, label, session_id, resolved_capabilities))
-                    return
-                if self.path == "/api/sessions/resolve":
-                    actor = payload.get("actor", "human")
-                    if not isinstance(actor, str) or not actor:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing actor"})
-                        return
-                    self._json(HTTPStatus.OK, state.resolve_preferred_session(actor))
-                    return
-                if self.path == "/api/sessions/touch":
-                    session_id = payload.get("session_id")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.touch_session(session_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/sessions/detach":
-                    session_id = payload.get("session_id")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.detach_session(session_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/sessions/presence/upsert":
-                    session_id = payload.get("session_id")
-                    path = payload.get("path")
-                    activity = payload.get("activity")
-                    cell_id = payload.get("cell_id")
-                    cell_index = payload.get("cell_index")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    if not isinstance(activity, str) or not activity:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing activity"})
-                        return
-                    body, status = state.upsert_notebook_presence(
-                        session_id=session_id,
-                        path=path,
-                        activity=activity,
-                        cell_id=cell_id if isinstance(cell_id, str) else None,
-                        cell_index=cell_index if isinstance(cell_index, int) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/sessions/presence/clear":
-                    session_id = payload.get("session_id")
-                    path = payload.get("path")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.clear_notebook_presence(
-                        session_id=session_id,
-                        path=path if isinstance(path, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/sessions/end":
-                    session_id = payload.get("session_id")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.end_session(session_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/documents/open":
-                    path = payload.get("path")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.open_document(path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/documents/refresh":
-                    document_id = payload.get("document_id")
-                    if not isinstance(document_id, str) or not document_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
-                        return
-                    body, status = state.refresh_document(document_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/documents/rebind":
-                    document_id = payload.get("document_id")
-                    if not isinstance(document_id, str) or not document_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
-                        return
-                    body, status = state.rebind_document(document_id)
+                document_route = handle_document_post(state, self.path, payload)
+                if document_route is not None:
+                    status, body = document_route
                     self._json(status, body)
                     return
                 notebook_route = handle_notebook_post(state, self.path, payload)
@@ -2255,184 +2153,14 @@ def _handler_factory(state: CoreState):
                     status, body = notebook_route
                     self._json(status, body)
                     return
-                if self.path == "/api/branches/start":
-                    branch_id = payload.get("branch_id")
-                    document_id = payload.get("document_id")
-                    owner_session_id = payload.get("owner_session_id")
-                    parent_branch_id = payload.get("parent_branch_id")
-                    title = payload.get("title")
-                    purpose = payload.get("purpose")
-                    if not isinstance(branch_id, str) or not branch_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
-                        return
-                    if not isinstance(document_id, str) or not document_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
-                        return
-                    body, status = state.start_branch(
-                        branch_id=branch_id,
-                        document_id=document_id,
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                        parent_branch_id=parent_branch_id if isinstance(parent_branch_id, str) else None,
-                        title=title if isinstance(title, str) else None,
-                        purpose=purpose if isinstance(purpose, str) else None,
-                    )
+                collaboration_route = handle_collaboration_post(state, self.path, payload)
+                if collaboration_route is not None:
+                    status, body = collaboration_route
                     self._json(status, body)
                     return
-                if self.path == "/api/branches/finish":
-                    branch_id = payload.get("branch_id")
-                    branch_status = payload.get("status")
-                    if not isinstance(branch_id, str) or not branch_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
-                        return
-                    if not isinstance(branch_status, str) or not branch_status:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing status"})
-                        return
-                    body, status = state.finish_branch(branch_id, branch_status)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/branches/review-request":
-                    branch_id = payload.get("branch_id")
-                    requested_by_session_id = payload.get("requested_by_session_id")
-                    note = payload.get("note")
-                    if not isinstance(branch_id, str) or not branch_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
-                        return
-                    if not isinstance(requested_by_session_id, str) or not requested_by_session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing requested_by_session_id"})
-                        return
-                    body, status = state.request_branch_review(
-                        branch_id=branch_id,
-                        requested_by_session_id=requested_by_session_id,
-                        note=note if isinstance(note, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/branches/review-resolve":
-                    branch_id = payload.get("branch_id")
-                    resolved_by_session_id = payload.get("resolved_by_session_id")
-                    resolution = payload.get("resolution")
-                    note = payload.get("note")
-                    if not isinstance(branch_id, str) or not branch_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
-                        return
-                    if not isinstance(resolved_by_session_id, str) or not resolved_by_session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing resolved_by_session_id"})
-                        return
-                    if not isinstance(resolution, str) or not resolution:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing resolution"})
-                        return
-                    body, status = state.resolve_branch_review(
-                        branch_id=branch_id,
-                        resolved_by_session_id=resolved_by_session_id,
-                        resolution=resolution,
-                        note=note if isinstance(note, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runtimes/start":
-                    runtime_id = payload.get("runtime_id")
-                    mode = payload.get("mode")
-                    label = payload.get("label")
-                    environment = payload.get("environment")
-                    document_path = payload.get("document_path")
-                    ttl_seconds = payload.get("ttl_seconds")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    if not isinstance(mode, str) or mode not in {"interactive", "shared", "headless", "pinned", "ephemeral"}:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid mode"})
-                        return
-                    if document_path is not None and not isinstance(document_path, str):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid document_path"})
-                        return
-                    if ttl_seconds is not None and not isinstance(ttl_seconds, int):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid ttl_seconds"})
-                        return
-                    self._json(HTTPStatus.OK, state.start_runtime(
-                        runtime_id=runtime_id,
-                        mode=mode,
-                        label=label if isinstance(label, str) else None,
-                        environment=environment if isinstance(environment, str) else None,
-                        document_path=document_path if isinstance(document_path, str) else None,
-                        ttl_seconds=ttl_seconds if isinstance(ttl_seconds, int) else None,
-                    ))
-                    return
-                if self.path == "/api/runtimes/stop":
-                    runtime_id = payload.get("runtime_id")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    body, status = state.stop_runtime(runtime_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runtimes/recover":
-                    runtime_id = payload.get("runtime_id")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    body, status = state.recover_runtime(runtime_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runtimes/promote":
-                    runtime_id = payload.get("runtime_id")
-                    mode = payload.get("mode", "shared")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    if not isinstance(mode, str) or mode not in {"shared", "pinned"}:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid mode"})
-                        return
-                    body, status = state.promote_runtime(runtime_id, mode=mode)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runtimes/discard":
-                    runtime_id = payload.get("runtime_id")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    body, status = state.discard_runtime(runtime_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runs/start":
-                    run_id = payload.get("run_id")
-                    runtime_id = payload.get("runtime_id")
-                    target_type = payload.get("target_type")
-                    target_ref = payload.get("target_ref")
-                    kind = payload.get("kind")
-                    if not isinstance(run_id, str) or not run_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing run_id"})
-                        return
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    if not isinstance(target_type, str) or target_type not in {"document", "node", "branch"}:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid target_type"})
-                        return
-                    if not isinstance(target_ref, str) or not target_ref:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing target_ref"})
-                        return
-                    if not isinstance(kind, str) or not kind:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing kind"})
-                        return
-                    body, status = state.start_run(
-                        run_id=run_id,
-                        runtime_id=runtime_id,
-                        target_type=target_type,
-                        target_ref=target_ref,
-                        kind=kind,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runs/finish":
-                    run_id = payload.get("run_id")
-                    run_status = payload.get("status")
-                    if not isinstance(run_id, str) or not run_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing run_id"})
-                        return
-                    if not isinstance(run_status, str) or not run_status:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing status"})
-                        return
-                    body, status = state.finish_run(run_id, run_status)
+                runtime_route = handle_runtime_post(state, self.path, payload)
+                if runtime_route is not None:
+                    status, body = runtime_route
                     self._json(status, body)
                     return
 
