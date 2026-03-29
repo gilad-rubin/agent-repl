@@ -13,7 +13,12 @@ from typing import Any
 from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
 from agent_repl.core.server import serve_forever
-from agent_repl.notebook_runtime_client import BridgeNotebookRuntimeAdapter, NotebookRuntimeClient
+from agent_repl.notebook_runtime_client import (
+    BridgeNotebookRuntimeAdapter,
+    NotebookRuntimeClient,
+    call_with_owner_session,
+    resolve_owner_session_id,
+)
 
 
 def _out(data: Any, pretty: bool = False) -> None:
@@ -62,42 +67,6 @@ def _notebook_client(path: str) -> NotebookRuntimeClient:
             file=sys.stderr,
         )
     return CoreClient.discover(workspace_hint=path)
-
-def _default_owner_session_id(
-    client: NotebookRuntimeClient,
-    *,
-    client_type: str = "cli",
-    label: str = "CLI",
-) -> str | None:
-    try:
-        existing = client.resolve_preferred_session(actor="human")
-    except Exception:
-        existing = {"session": None}
-    session = existing.get("session")
-    session_id = session.get("session_id") if isinstance(session, dict) else None
-    if isinstance(session_id, str) and session_id:
-        return session_id
-    try:
-        payload = client.start_session(actor="human", client=client_type, label=label)
-    except Exception:
-        return None
-    session = payload.get("session")
-    session_id = session.get("session_id") if isinstance(session, dict) else None
-    return session_id if isinstance(session_id, str) and session_id else None
-
-
-def _owner_session_id_from_args(
-    client: NotebookRuntimeClient,
-    args: argparse.Namespace,
-    *,
-    client_type: str = "cli",
-    label: str = "CLI",
-) -> str | None:
-    explicit_session_id = getattr(args, "session_id", None)
-    if explicit_session_id:
-        return explicit_session_id
-    return _default_owner_session_id(client, client_type=client_type, label=label)
-
 
 # ------------------------------------------------------------------
 # Subcommand handlers
@@ -190,11 +159,13 @@ def cmd_edit(args: argparse.Namespace) -> int:
             op["cell_index"] = args.index
         ops.append(op)
 
-    session_id = _owner_session_id_from_args(client, args)
-    if session_id:
-        result = client.notebook_edit(args.path, ops, owner_session_id=session_id)
-    else:
-        result = client.notebook_edit(args.path, ops)
+    result = call_with_owner_session(
+        client,
+        client.notebook_edit,
+        explicit_session_id=getattr(args, "session_id", None),
+        path=args.path,
+        operations=ops,
+    )
     _out(result, args.pretty)
     return 0
 
@@ -204,17 +175,25 @@ def cmd_exec(args: argparse.Namespace) -> int:
     wait = not getattr(args, "no_wait", False)
     timeout = getattr(args, "timeout", 30)
     if args.code:
-        session_id = _owner_session_id_from_args(client, args)
-        kwargs: dict[str, Any] = {"wait": wait, "timeout": timeout}
-        if session_id:
-            kwargs["owner_session_id"] = session_id
-        result = client.notebook_insert_execute(args.path, args.code, **kwargs)
+        result = call_with_owner_session(
+            client,
+            client.notebook_insert_execute,
+            explicit_session_id=getattr(args, "session_id", None),
+            path=args.path,
+            source=args.code,
+            wait=wait,
+            timeout=timeout,
+        )
     elif args.cell_id:
-        session_id = _owner_session_id_from_args(client, args)
-        kwargs = {"cell_id": args.cell_id, "wait": wait, "timeout": timeout}
-        if session_id:
-            kwargs["owner_session_id"] = session_id
-        result = client.notebook_execute_cell(args.path, **kwargs)
+        result = call_with_owner_session(
+            client,
+            client.notebook_execute_cell,
+            explicit_session_id=getattr(args, "session_id", None),
+            path=args.path,
+            cell_id=args.cell_id,
+            wait=wait,
+            timeout=timeout,
+        )
     else:
         print(json.dumps({"error": "Provide --cell-id or -c/--code"}, indent=2), file=sys.stderr)
         return 1
@@ -228,20 +207,26 @@ def cmd_ix(args: argparse.Namespace) -> int:
     at_index = getattr(args, "at_index", -1)
     client = _notebook_client(args.path)
     cells = _read_cells(args, default_cell_type="code")
+    explicit_session_id = getattr(args, "session_id", None)
     if len(cells) == 1 and not _has_cells_payload(args):
         source = cells[0]["source"]
-        session_id = _owner_session_id_from_args(client, args)
-        kwargs = {"at_index": at_index, "wait": wait, "timeout": timeout}
-        if session_id:
-            kwargs["owner_session_id"] = session_id
-        result = client.notebook_insert_execute(args.path, source, **kwargs)
+        result = call_with_owner_session(
+            client,
+            client.notebook_insert_execute,
+            explicit_session_id=explicit_session_id,
+            path=args.path,
+            source=source,
+            at_index=at_index,
+            wait=wait,
+            timeout=timeout,
+        )
         _out(result, args.pretty)
         return 0
 
     if getattr(args, "no_wait", False):
         raise SystemExit("Error: batch ix does not support --no-wait")
 
-    session_id = _owner_session_id_from_args(client, args)
+    session_id = resolve_owner_session_id(client, explicit_session_id=explicit_session_id)
     results: list[dict[str, Any]] = []
     current_index = at_index
     stopped_on_error = False
@@ -288,11 +273,12 @@ def cmd_ix(args: argparse.Namespace) -> int:
 
 def cmd_run_all(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    session_id = _default_owner_session_id(client)
-    if session_id:
-        result = client.notebook_execute_all(args.path, owner_session_id=session_id)
-    else:
-        result = client.notebook_execute_all(args.path)
+    result = call_with_owner_session(
+        client,
+        client.notebook_execute_all,
+        explicit_session_id=getattr(args, "session_id", None),
+        path=args.path,
+    )
     _out(result, args.pretty)
     return 0
 
@@ -306,11 +292,12 @@ def cmd_restart(args: argparse.Namespace) -> int:
 
 def cmd_restart_run_all(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    session_id = _default_owner_session_id(client)
-    if session_id:
-        result = client.notebook_restart_and_run_all(args.path, owner_session_id=session_id)
-    else:
-        result = client.notebook_restart_and_run_all(args.path)
+    result = call_with_owner_session(
+        client,
+        client.notebook_restart_and_run_all,
+        explicit_session_id=getattr(args, "session_id", None),
+        path=args.path,
+    )
     _out(result, args.pretty)
     return 0
 
@@ -530,21 +517,26 @@ def cmd_core(args: argparse.Namespace) -> int:
 
     if args.core_command == "project-visible-notebook":
         client = _core_client(workspace_root, runtime_dir=runtime_dir)
-        kwargs: dict[str, Any] = {"cells": _read_json_payload(args, field_name="cells")}
-        session_id = _owner_session_id_from_args(client, args)
-        if session_id:
-            kwargs["owner_session_id"] = session_id
-        result = client.notebook_project_visible(args.path, **kwargs)
+        result = call_with_owner_session(
+            client,
+            client.notebook_project_visible,
+            explicit_session_id=getattr(args, "session_id", None),
+            path=args.path,
+            cells=_read_json_payload(args, field_name="cells"),
+        )
         _out(result, args.pretty)
         return 0
 
     if args.core_command == "execute-visible-cell":
         client = _core_client(workspace_root, runtime_dir=runtime_dir)
-        kwargs = {"cell_index": args.cell_index, "source": _read_source(args)}
-        session_id = _owner_session_id_from_args(client, args)
-        if session_id:
-            kwargs["owner_session_id"] = session_id
-        result = client.notebook_execute_visible_cell(args.path, **kwargs)
+        result = call_with_owner_session(
+            client,
+            client.notebook_execute_visible_cell,
+            explicit_session_id=getattr(args, "session_id", None),
+            path=args.path,
+            cell_index=args.cell_index,
+            source=_read_source(args),
+        )
         _out(result, args.pretty)
         return 0
 

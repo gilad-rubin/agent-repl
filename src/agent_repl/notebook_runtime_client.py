@@ -1,6 +1,7 @@
 """Shared notebook runtime client contracts and adapters."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from agent_repl.client import BridgeClient
@@ -157,3 +158,54 @@ class BridgeNotebookRuntimeAdapter:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         return {"status": "ok", "session": None}
+
+
+def resolve_owner_session_id(
+    client: NotebookRuntimeClient,
+    *,
+    explicit_session_id: str | None = None,
+    client_type: str = "cli",
+    label: str = "CLI",
+) -> str | None:
+    """Resolve an owner session once so notebook mutations share a single policy."""
+
+    if explicit_session_id:
+        return explicit_session_id
+    try:
+        existing = client.resolve_preferred_session(actor="human")
+    except Exception:
+        existing = {"session": None}
+    session = existing.get("session")
+    session_id = session.get("session_id") if isinstance(session, dict) else None
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    try:
+        payload = client.start_session(actor="human", client=client_type, label=label)
+    except Exception:
+        return None
+    session = payload.get("session")
+    session_id = session.get("session_id") if isinstance(session, dict) else None
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def call_with_owner_session(
+    client: NotebookRuntimeClient,
+    operation: Callable[..., dict[str, Any]],
+    *args: Any,
+    *,
+    explicit_session_id: str | None = None,
+    client_type: str = "cli",
+    label: str = "CLI",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Invoke a notebook runtime operation with the shared owner-session policy."""
+
+    session_id = resolve_owner_session_id(
+        client,
+        explicit_session_id=explicit_session_id,
+        client_type=client_type,
+        label=label,
+    )
+    if session_id:
+        kwargs["owner_session_id"] = session_id
+    return operation(*args, **kwargs)

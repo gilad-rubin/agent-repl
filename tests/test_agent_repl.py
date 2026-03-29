@@ -24,7 +24,11 @@ from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
 from agent_repl.core.server import CoreState, _handler_factory, _load_or_create_state
 from agent_repl.http_api import poll_execution_until_complete
-from agent_repl.notebook_runtime_client import BridgeNotebookRuntimeAdapter
+from agent_repl.notebook_runtime_client import (
+    BridgeNotebookRuntimeAdapter,
+    call_with_owner_session,
+    resolve_owner_session_id,
+)
 
 
 def _python_with_ipykernel() -> str:
@@ -99,6 +103,59 @@ class TestHttpApiHelpers(unittest.TestCase):
             },
         )
         self.assertEqual(fetch_execution.call_count, 2)
+
+
+class TestNotebookRuntimeClientHelpers(unittest.TestCase):
+    """Shared notebook runtime helper behavior."""
+
+    def test_resolve_owner_session_id_prefers_explicit_session(self):
+        client = mock.Mock()
+
+        session_id = resolve_owner_session_id(client, explicit_session_id="sess-explicit")
+
+        self.assertEqual(session_id, "sess-explicit")
+        client.resolve_preferred_session.assert_not_called()
+        client.start_session.assert_not_called()
+
+    def test_call_with_owner_session_injects_reused_session_id(self):
+        client = mock.Mock()
+        client.resolve_preferred_session.return_value = {
+            "status": "ok",
+            "session": {"session_id": "sess-vscode"},
+        }
+        operation = mock.Mock(return_value={"status": "ok"})
+
+        result = call_with_owner_session(
+            client,
+            operation,
+            path="nb.ipynb",
+            wait=True,
+        )
+
+        self.assertEqual(result, {"status": "ok"})
+        operation.assert_called_once_with(path="nb.ipynb", wait=True, owner_session_id="sess-vscode")
+        client.start_session.assert_not_called()
+
+    def test_resolve_owner_session_id_starts_session_when_no_preferred_session_exists(self):
+        client = mock.Mock()
+        client.resolve_preferred_session.return_value = {"status": "ok", "session": None}
+        client.start_session.return_value = {"status": "ok", "session": {"session_id": "sess-started"}}
+
+        session_id = resolve_owner_session_id(client, client_type="browser", label="Browser Preview")
+
+        self.assertEqual(session_id, "sess-started")
+        client.start_session.assert_called_once_with(actor="human", client="browser", label="Browser Preview")
+
+    def test_call_with_owner_session_omits_owner_when_resolution_fails(self):
+        client = mock.Mock()
+        client.resolve_preferred_session.side_effect = RuntimeError("boom")
+        client.start_session.side_effect = RuntimeError("still-boom")
+        operation = mock.Mock(return_value={"status": "ok"})
+
+        result = call_with_owner_session(client, operation, path="nb.ipynb")
+
+        self.assertEqual(result, {"status": "ok"})
+        operation.assert_called_once_with(path="nb.ipynb")
 
 
 # ---------------------------------------------------------------------------
