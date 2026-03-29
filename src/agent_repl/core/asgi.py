@@ -7,7 +7,7 @@ from typing import Any, Callable
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from agent_repl.core.collaboration_http_routes import (
@@ -127,6 +127,15 @@ def create_app(
             return JSONResponse({"error": str(err)}, status_code=500)
 
     # ------------------------------------------------------------------
+    # MCP adapter
+    # ------------------------------------------------------------------
+
+    from agent_repl.core.mcp_adapter import create_mcp_server
+
+    mcp_server = create_mcp_server(state)
+    mcp_app = mcp_server.http_app(path="/mcp")
+
+    # ------------------------------------------------------------------
     # Route table
     # ------------------------------------------------------------------
 
@@ -135,9 +144,10 @@ def create_app(
         Route("/api/status", status, methods=["GET"]),
         Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/{rest:path}", domain_dispatch, methods=["GET", "POST"]),
+        Mount("/mcp", app=mcp_app),
     ]
 
-    app = Starlette(routes=routes)
+    app = Starlette(routes=routes, lifespan=mcp_app.lifespan)
     app.add_middleware(TokenAuthMiddleware, token=state.token)
 
     return app

@@ -4,6 +4,7 @@ version = "0.3.0"
 description = "CLI for AI agents to work with Jupyter notebooks via the VS Code bridge"
 requires-python = ">=3.10"
 dependencies = [
+    "fastmcp>=2.3.2",
     "jupyter-client>=8",
     "nbformat>=5",
     "requests>=2",
