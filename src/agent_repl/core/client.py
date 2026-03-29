@@ -13,6 +13,21 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from agent_repl.core.notebook_requests import (
+    NotebookActivityRequest,
+    NotebookCreateRequest,
+    NotebookEditRequest,
+    NotebookExecuteCellRequest,
+    NotebookExecuteVisibleCellRequest,
+    NotebookExecutionLookupRequest,
+    NotebookInsertExecuteRequest,
+    NotebookLeaseAcquireRequest,
+    NotebookLeaseReleaseRequest,
+    NotebookPathRequest,
+    NotebookProjectVisibleRequest,
+    NotebookSelectKernelRequest,
+    NotebookSessionPathRequest,
+)
 from agent_repl.http_api import JsonApiClient, poll_execution_until_complete
 
 
@@ -266,10 +281,10 @@ class CoreClient(JsonApiClient):
         return self._post("/api/documents/rebind", {"document_id": document_id})
 
     def notebook_contents(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/contents", {"path": path})
+        return self._post("/api/notebooks/contents", NotebookPathRequest(path=path).to_payload())
 
     def notebook_status(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/status", {"path": path})
+        return self._post("/api/notebooks/status", NotebookPathRequest(path=path).to_payload())
 
     def notebook_create(
         self,
@@ -278,11 +293,7 @@ class CoreClient(JsonApiClient):
         cells: list[dict[str, Any]] | None = None,
         kernel_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if cells is not None:
-            body["cells"] = cells
-        if kernel_id is not None:
-            body["kernel_id"] = kernel_id
+        body = NotebookCreateRequest(path=path, cells=cells, kernel_id=kernel_id).to_payload()
         return self._post("/api/notebooks/create", body, timeout=60)
 
     def notebook_select_kernel(
@@ -291,9 +302,7 @@ class CoreClient(JsonApiClient):
         *,
         kernel_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if kernel_id is not None:
-            body["kernel_id"] = kernel_id
+        body = NotebookSelectKernelRequest(path=path, kernel_id=kernel_id).to_payload()
         return self._post("/api/notebooks/select-kernel", body, timeout=60)
 
     def notebook_edit(
@@ -303,9 +312,7 @@ class CoreClient(JsonApiClient):
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "operations": operations}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookEditRequest(path=path, operations=operations, owner_session_id=owner_session_id).to_payload()
         return self._post("/api/notebooks/edit", body)
 
     def notebook_execute_cell(
@@ -318,13 +325,12 @@ class CoreClient(JsonApiClient):
         timeout: float = 30,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if cell_id is not None:
-            body["cell_id"] = cell_id
-        if cell_index is not None:
-            body["cell_index"] = cell_index
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookExecuteCellRequest(
+            path=path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            owner_session_id=owner_session_id,
+        ).to_payload()
         result = self._post("/api/notebooks/execute-cell", body, timeout=30)
         if wait and result.get("execution_id"):
             return self._poll_execution(result, timeout)
@@ -341,14 +347,13 @@ class CoreClient(JsonApiClient):
         timeout: float = 30,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {
-            "path": path,
-            "source": source,
-            "cell_type": cell_type,
-            "at_index": at_index,
-        }
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookInsertExecuteRequest(
+            path=path,
+            source=source,
+            cell_type=cell_type,
+            at_index=at_index,
+            owner_session_id=owner_session_id,
+        ).to_payload()
         result = self._post(
             "/api/notebooks/insert-and-execute",
             body,
@@ -359,7 +364,7 @@ class CoreClient(JsonApiClient):
         return result
 
     def notebook_execution(self, execution_id: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/execution", {"execution_id": execution_id})
+        return self._post("/api/notebooks/execution", NotebookExecutionLookupRequest(execution_id=execution_id).to_payload())
 
     def notebook_execute_all(
         self,
@@ -367,24 +372,20 @@ class CoreClient(JsonApiClient):
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookSessionPathRequest(path=path, owner_session_id=owner_session_id).to_payload()
         return self._post("/api/notebooks/execute-all", body, timeout=120)
 
     def notebook_interrupt(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/interrupt", {"path": path}, timeout=30)
+        return self._post("/api/notebooks/interrupt", NotebookPathRequest(path=path).to_payload(), timeout=30)
 
     def notebook_runtime(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/runtime", {"path": path}, timeout=120)
+        return self._post("/api/notebooks/runtime", NotebookPathRequest(path=path).to_payload(), timeout=120)
 
     def notebook_projection(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/projection", {"path": path}, timeout=120)
+        return self._post("/api/notebooks/projection", NotebookPathRequest(path=path).to_payload(), timeout=120)
 
     def notebook_activity(self, path: str, *, since: float | None = None) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if since is not None:
-            body["since"] = since
+        body = NotebookActivityRequest(path=path, since=since).to_payload()
         return self._post("/api/notebooks/activity", body, timeout=120)
 
     def notebook_project_visible(
@@ -394,9 +395,7 @@ class CoreClient(JsonApiClient):
         cells: list[dict[str, Any]],
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "cells": cells}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookProjectVisibleRequest(path=path, cells=cells, owner_session_id=owner_session_id).to_payload()
         return self._post("/api/notebooks/project-visible", body, timeout=120)
 
     def notebook_execute_visible_cell(
@@ -407,9 +406,12 @@ class CoreClient(JsonApiClient):
         source: str,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "cell_index": cell_index, "source": source}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookExecuteVisibleCellRequest(
+            path=path,
+            cell_index=cell_index,
+            source=source,
+            owner_session_id=owner_session_id,
+        ).to_payload()
         return self._post("/api/notebooks/execute-visible-cell", body, timeout=120)
 
     def acquire_cell_lease(
@@ -422,13 +424,14 @@ class CoreClient(JsonApiClient):
         kind: str = "edit",
         ttl_seconds: float | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "session_id": session_id, "kind": kind}
-        if cell_id is not None:
-            body["cell_id"] = cell_id
-        if cell_index is not None:
-            body["cell_index"] = cell_index
-        if ttl_seconds is not None:
-            body["ttl_seconds"] = ttl_seconds
+        body = NotebookLeaseAcquireRequest(
+            path=path,
+            session_id=session_id,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            kind=kind,
+            ttl_seconds=ttl_seconds,
+        ).to_payload()
         return self._post("/api/notebooks/lease/acquire", body, timeout=120)
 
     def release_cell_lease(
@@ -439,15 +442,16 @@ class CoreClient(JsonApiClient):
         cell_id: str | None = None,
         cell_index: int | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "session_id": session_id}
-        if cell_id is not None:
-            body["cell_id"] = cell_id
-        if cell_index is not None:
-            body["cell_index"] = cell_index
+        body = NotebookLeaseReleaseRequest(
+            path=path,
+            session_id=session_id,
+            cell_id=cell_id,
+            cell_index=cell_index,
+        ).to_payload()
         return self._post("/api/notebooks/lease/release", body, timeout=120)
 
     def notebook_restart(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/restart", {"path": path}, timeout=120)
+        return self._post("/api/notebooks/restart", NotebookPathRequest(path=path).to_payload(), timeout=120)
 
     def notebook_restart_and_run_all(
         self,
@@ -455,9 +459,7 @@ class CoreClient(JsonApiClient):
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookSessionPathRequest(path=path, owner_session_id=owner_session_id).to_payload()
         return self._post("/api/notebooks/restart-and-run-all", body, timeout=120)
 
     def list_branches(self) -> dict[str, Any]:
