@@ -23,7 +23,23 @@ from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
 from agent_repl.core.collaboration import CollaborationConflictError
+from agent_repl.core.notebook_execution_service import NotebookExecutionService
 from agent_repl.core.notebook_read_service import NotebookReadService
+from agent_repl.core.notebook_requests import (
+    NotebookActivityRequest,
+    NotebookCreateRequest,
+    NotebookEditRequest,
+    NotebookExecuteCellRequest,
+    NotebookExecuteVisibleCellRequest,
+    NotebookExecutionLookupRequest,
+    NotebookInsertExecuteRequest,
+    NotebookLeaseAcquireRequest,
+    NotebookLeaseReleaseRequest,
+    NotebookPathRequest,
+    NotebookProjectVisibleRequest,
+    NotebookSelectKernelRequest,
+    NotebookSessionPathRequest,
+)
 from agent_repl.core.notebook_write_service import NotebookWriteService
 
 
@@ -338,6 +354,7 @@ class CoreState:
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _notebook_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _notebook_locks_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _notebook_execution_service: NotebookExecutionService = field(init=False, repr=False)
     _notebook_read_service: NotebookReadService = field(init=False, repr=False)
     _notebook_write_service: NotebookWriteService = field(init=False, repr=False)
 
@@ -352,6 +369,7 @@ class CoreState:
             (record.timestamp for record in self.activity_records),
             default=self.started_at,
         )
+        self._notebook_execution_service = NotebookExecutionService(self)
         self._notebook_read_service = NotebookReadService(self)
         self._notebook_write_service = NotebookWriteService(self)
         self._recompute_counts()
@@ -2153,193 +2171,13 @@ class CoreState:
         cell_index: int,
         owner_session_id: str | None = None,
     ) -> tuple[list[Any], int | None, str | None]:
-        with runtime.lock:
-            relative_path = os.path.relpath(runtime.path, self.workspace_root)
-            actor = self._session_actor(owner_session_id, "agent")
-            runtime.busy = True
-            runtime.current_execution = {
-                "cell_id": cell_id,
-                "cell_index": cell_index,
-                "source_preview": source.splitlines()[0][:80] if source else "",
-                "owner": actor,
-            }
-            runtime.last_used_at = time.time()
-            self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime, status="busy")
-            self._append_activity_event(
-                path=relative_path,
-                event_type="execution-started",
-                detail=f"Executing cell {cell_index + 1}",
-                actor=actor,
-                session_id=owner_session_id,
-                runtime_id=runtime.runtime_id,
-                cell_id=cell_id,
-                cell_index=cell_index,
-            )
-            self.persist()
-            try:
-                msg_id = runtime.client.execute(source, store_history=True, allow_stdin=False, stop_on_error=True)
-                outputs: list[Any] = []
-                execution_count: int | None = None
-                error_text: str | None = None
-                idle_seen = False
-                while not idle_seen:
-                    message = runtime.client.get_iopub_msg(timeout=60)
-                    if message.get("parent_header", {}).get("msg_id") != msg_id:
-                        continue
-                    msg_type = message.get("msg_type") or message.get("header", {}).get("msg_type")
-                    content = message.get("content", {})
-                    if msg_type == "status" and content.get("execution_state") == "idle":
-                        idle_seen = True
-                        continue
-                    if msg_type == "execute_input":
-                        execution_count = content.get("execution_count")
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-execution-updated",
-                            detail=f"Execution count advanced for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={"execution_count": execution_count},
-                        )
-                        continue
-                    if msg_type == "stream":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="stream",
-                            name=content.get("name", "stdout"),
-                            text=content.get("text", ""),
-                        )
-                        outputs.append(output_payload)
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-output-appended",
-                            detail=f"Stream output for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={
-                                "output": json.loads(json.dumps(output_payload)),
-                                "cell": {
-                                    "index": cell_index,
-                                    "display_number": cell_index + 1,
-                                    "cell_id": cell_id,
-                                    "cell_type": "code",
-                                    "source": source,
-                                    "outputs": self._canonical_outputs(outputs),
-                                    "execution_count": execution_count,
-                                    "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
-                                },
-                            },
-                        )
-                        continue
-                    if msg_type == "execute_result":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="execute_result",
-                            data=content.get("data", {}),
-                            metadata=content.get("metadata", {}),
-                            execution_count=content.get("execution_count"),
-                        )
-                        outputs.append(output_payload)
-                        execution_count = content.get("execution_count", execution_count)
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-output-appended",
-                            detail=f"Execution result for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={
-                                "output": json.loads(json.dumps(output_payload)),
-                                "cell": {
-                                    "index": cell_index,
-                                    "display_number": cell_index + 1,
-                                    "cell_id": cell_id,
-                                    "cell_type": "code",
-                                    "source": source,
-                                    "outputs": self._canonical_outputs(outputs),
-                                    "execution_count": execution_count,
-                                    "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
-                                },
-                            },
-                        )
-                        continue
-                    if msg_type == "display_data":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="display_data",
-                            data=content.get("data", {}),
-                            metadata=content.get("metadata", {}),
-                        )
-                        outputs.append(output_payload)
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-output-appended",
-                            detail=f"Display output for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={
-                                "output": json.loads(json.dumps(output_payload)),
-                                "cell": {
-                                    "index": cell_index,
-                                    "display_number": cell_index + 1,
-                                    "cell_id": cell_id,
-                                    "cell_type": "code",
-                                    "source": source,
-                                    "outputs": self._canonical_outputs(outputs),
-                                    "execution_count": execution_count,
-                                    "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
-                                },
-                            },
-                        )
-                        continue
-                    if msg_type == "error":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="error",
-                            ename=content.get("ename"),
-                            evalue=content.get("evalue"),
-                            traceback=content.get("traceback", []),
-                        )
-                        outputs.append(output_payload)
-                        error_text = content.get("evalue") or content.get("ename") or "Execution failed"
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-output-appended",
-                            detail=f"Error output for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={
-                                "output": json.loads(json.dumps(output_payload)),
-                                "cell": {
-                                    "index": cell_index,
-                                    "display_number": cell_index + 1,
-                                    "cell_id": cell_id,
-                                    "cell_type": "code",
-                                    "source": source,
-                                    "outputs": self._canonical_outputs(outputs),
-                                    "execution_count": execution_count,
-                                    "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
-                                },
-                            },
-                        )
-                runtime.client.get_shell_msg(timeout=60)
-                return outputs, execution_count, error_text
-            finally:
-                runtime.busy = False
-                runtime.current_execution = None
-                runtime.last_used_at = time.time()
-                self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime, status="idle")
-                self.persist()
+        return self._notebook_execution_service.execute_source(
+            runtime,
+            source,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            owner_session_id=owner_session_id,
+        )
 
     def _headless_notebook_execute_cell(
         self,
@@ -2350,78 +2188,13 @@ class CoreState:
         cell_index: int | None,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, changed = self._load_notebook(real_path)
-        index = self._find_cell_index(notebook, cell_id=cell_id, cell_index=cell_index)
-        cell = notebook.cells[index]
-        if cell.cell_type != "code":
-            raise RuntimeError("Only code cells can be executed")
-        runtime = self._ensure_headless_runtime(real_path)
-        stable_cell_id = self._cell_id(cell, index)
-        self._assert_cell_not_leased(
-            relative_path=relative_path,
-            cell_id=stable_cell_id,
-            owner_session_id=owner_session_id,
-            operation="execute-cell",
-        )
-        if owner_session_id is not None:
-            self.acquire_cell_lease(
-                session_id=owner_session_id,
-                path=relative_path,
-                cell_id=stable_cell_id,
-                kind="edit",
-        )
-        outputs, execution_count, error_text = self._execute_source(
-            runtime,
-            cell.source,
-            cell_id=stable_cell_id,
-            cell_index=index,
+        return self._notebook_execution_service.execute_cell(
+            real_path,
+            relative_path,
+            cell_id=cell_id,
+            cell_index=cell_index,
             owner_session_id=owner_session_id,
         )
-        actor = self._session_actor(owner_session_id, "agent")
-        try:
-            cell.outputs = outputs
-            cell.execution_count = execution_count
-            self._set_cell_runtime_provenance(
-                cell,
-                runtime_id=runtime.runtime_id,
-                kernel_generation=runtime.kernel_generation,
-                status="error" if error_text else "ok",
-            )
-            self._save_notebook(real_path, notebook)
-            self._append_activity_event(
-                path=relative_path,
-                event_type="cell-outputs-updated",
-                detail=f"Updated outputs for cell {index + 1}",
-                actor=actor,
-                session_id=owner_session_id,
-                runtime_id=runtime.runtime_id,
-                cell_id=stable_cell_id,
-                cell_index=index,
-                data={"cell": self._cell_payload(cell, index)},
-            )
-        finally:
-            self._append_activity_event(
-                path=relative_path,
-                event_type="execution-finished",
-                detail=f"Finished cell {index + 1}",
-                actor=actor,
-                session_id=owner_session_id,
-                runtime_id=runtime.runtime_id,
-                cell_id=stable_cell_id,
-                cell_index=index,
-            )
-            self.persist()
-        return {
-            "status": "error" if error_text else "ok",
-            "path": relative_path,
-            "cell_id": stable_cell_id,
-            "cell_index": index,
-            "outputs": outputs,
-            "execution_count": execution_count,
-            "execution_mode": "headless-runtime",
-            "execution_preference": "headless",
-            **({"error": error_text} if error_text else {}),
-        }
 
     def _headless_notebook_insert_execute(
         self,
@@ -2433,73 +2206,14 @@ class CoreState:
         at_index: int,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        # For code cells, resolve the runtime BEFORE inserting the cell.
-        # This ensures failed kernel resolution doesn't leave orphan cells.
-        self._assert_structure_not_leased(
-            relative_path=relative_path,
+        return self._notebook_execution_service.insert_execute(
+            real_path,
+            relative_path,
+            source=source,
+            cell_type=cell_type,
+            at_index=at_index,
             owner_session_id=owner_session_id,
-            operation="insert-execute",
         )
-        if cell_type == "code":
-            self._ensure_headless_runtime(real_path)
-
-        notebook, _ = self._load_notebook(real_path)
-        index = self._normalize_insert_index(notebook, at_index)
-        cell = nbformat.v4.new_code_cell(source=source) if cell_type == "code" else nbformat.v4.new_markdown_cell(source=source)
-        notebook.cells.insert(index, cell)
-        for position, current in enumerate(notebook.cells):
-            self._ensure_cell_identity(current, position)
-        self._save_notebook(real_path, notebook)
-        self._append_activity_event(
-            path=relative_path,
-            event_type="cell-inserted",
-            detail=f"Inserted {cell_type} cell at index {index}",
-            actor=self._session_actor(owner_session_id, "agent"),
-            session_id=owner_session_id,
-            runtime_id=self._selected_runtime_record_for_notebook(relative_path).runtime_id
-            if self._selected_runtime_record_for_notebook(relative_path) is not None else None,
-            cell_id=self._cell_id(cell, index),
-            cell_index=index,
-            data={"cell": self._cell_payload(cell, index)},
-        )
-        if cell_type != "code":
-            return {
-                "status": "ok",
-                "path": relative_path,
-                "cell_id": self._cell_id(cell, index),
-                "cell_index": index,
-                "operation": "insert-execute",
-                "outputs": [],
-                "execution_mode": "headless-runtime",
-                "execution_preference": "headless",
-            }
-        cell_id = self._cell_id(cell, index)
-        if owner_session_id is not None:
-            self.acquire_cell_lease(
-                session_id=owner_session_id,
-                path=relative_path,
-                cell_id=cell_id,
-                kind="edit",
-            )
-        try:
-            result = self._headless_notebook_execute_cell(
-                real_path,
-                relative_path,
-                cell_id=cell_id,
-                cell_index=None,
-                owner_session_id=owner_session_id,
-            )
-        except Exception as exc:
-            # Agent-repl infrastructure error (kernel crash, timeout, connection
-            # lost) — roll back the inserted cell so ix doesn't leave orphans.
-            # Python exceptions in user code don't reach here; they're captured
-            # as error outputs by _execute_source and returned normally.
-            self._rollback_inserted_cell(real_path, cell_id)
-            raise RuntimeError(
-                f"ix failed and the inserted cell was rolled back (notebook unchanged). "
-                f"Cause: {exc}"
-            ) from exc
-        return {**result, "operation": "insert-execute"}
 
     def _headless_notebook_execute_all(
         self,
@@ -2508,36 +2222,11 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, _ = self._load_notebook(real_path)
-        executions = []
-        stopped_on_error = False
-        failed_cell_id: str | None = None
-        for index, cell in enumerate(notebook.cells):
-            if cell.cell_type != "code":
-                continue
-            result = self._headless_notebook_execute_cell(
-                real_path,
-                relative_path,
-                cell_id=self._cell_id(cell, index),
-                cell_index=None,
-                owner_session_id=owner_session_id,
-            )
-            executions.append(result)
-            if result.get("status") == "error":
-                stopped_on_error = True
-                failed_cell_id = result.get("cell_id")
-                break
-        payload = {
-            "status": "error" if stopped_on_error else "ok",
-            "path": relative_path,
-            "executions": executions,
-            "mode": "headless",
-        }
-        if stopped_on_error:
-            payload["stopped_on_error"] = True
-            if failed_cell_id is not None:
-                payload["failed_cell_id"] = failed_cell_id
-        return payload
+        return self._notebook_execution_service.execute_all(
+            real_path,
+            relative_path,
+            owner_session_id=owner_session_id,
+        )
 
     def _headless_notebook_execute_visible_cell(
         self,
@@ -2548,77 +2237,16 @@ class CoreState:
         source: str,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, changed = self._load_notebook(real_path)
-        index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
-        cell = notebook.cells[index]
-        if cell.cell_type != "code":
-            raise RuntimeError("Only code cells can be executed")
-        stable_cell_id = self._cell_id(cell, index)
-        self._assert_cell_not_leased(
-            relative_path=relative_path,
-            cell_id=stable_cell_id,
-            owner_session_id=owner_session_id,
-            operation="execute-visible-cell",
-        )
-        if owner_session_id is not None:
-            self.acquire_cell_lease(
-                session_id=owner_session_id,
-                path=relative_path,
-                cell_id=stable_cell_id,
-                kind="edit",
-            )
-        if cell.source != source:
-            cell.source = source
-            cell.outputs = []
-            cell.execution_count = None
-            self._clear_cell_runtime_provenance(cell)
-            changed = True
-        if changed:
-            self._save_notebook(real_path, notebook)
-            self._append_activity_event(
-                path=relative_path,
-                event_type="cell-source-updated",
-                detail=f"Updated source for cell {index + 1}",
-                actor=self._session_actor(owner_session_id, "human"),
-                session_id=owner_session_id,
-                runtime_id=self._selected_runtime_record_for_notebook(relative_path).runtime_id
-                if self._selected_runtime_record_for_notebook(relative_path) is not None else None,
-                cell_id=stable_cell_id,
-                cell_index=index,
-                data={"cell": self._cell_payload(cell, index)},
-            )
-        return self._headless_notebook_execute_cell(
+        return self._notebook_execution_service.execute_visible_cell(
             real_path,
             relative_path,
-            cell_id=self._cell_id(cell, index),
-            cell_index=None,
+            cell_index=cell_index,
+            source=source,
             owner_session_id=owner_session_id,
         )
 
     def _headless_notebook_restart(self, real_path: str, relative_path: str) -> dict[str, Any]:
-        runtime = self.headless_runtimes.get(real_path)
-        kernel_id = runtime.python_path if runtime is not None else None
-        next_generation = (runtime.kernel_generation + 1) if runtime is not None else 1
-        if runtime is not None:
-            self._shutdown_headless_runtime(real_path)
-        restarted = self._ensure_headless_runtime(real_path, kernel_id=kernel_id)
-        restarted.kernel_generation = max(restarted.kernel_generation, next_generation)
-        self._sync_headless_runtime_record(relative_path=relative_path, runtime=restarted, status="idle")
-        self._append_activity_event(
-            path=relative_path,
-            event_type="kernel-restarted",
-            detail=f"Restarted kernel generation {restarted.kernel_generation}",
-            runtime_id=restarted.runtime_id,
-        )
-        self.persist()
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "kernel_state": "idle",
-            "busy": False,
-            "mode": "headless",
-            "kernel_generation": restarted.kernel_generation,
-        }
+        return self._notebook_execution_service.restart(real_path, relative_path)
 
     def _headless_notebook_restart_and_run_all(
         self,
@@ -2627,16 +2255,11 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        restarted = self._headless_notebook_restart(real_path, relative_path)
-        executed = self._headless_notebook_execute_all(
+        return self._notebook_execution_service.restart_and_run_all(
             real_path,
             relative_path,
             owner_session_id=owner_session_id,
         )
-        return {
-            **executed,
-            "restart": restarted,
-        }
 
     def _sync_document_record(self, real_path: str, relative_path: str) -> None:
         now = time.time()
@@ -3778,6 +3401,13 @@ def _handler_factory(state: CoreState):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except Exception as err:  # pragma: no cover - exercised via integration test
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
+
+        def _parse_request(self, payload: dict[str, Any], request_type: Any) -> Any | None:
+            try:
+                return request_type.from_payload(payload)
+            except ValueError as err:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(err)})
+                return None
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
             # Keep the daemon quiet unless we decide to surface structured logs later.
