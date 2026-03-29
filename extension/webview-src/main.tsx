@@ -39,6 +39,7 @@ import { createStandaloneHost, readStandaloneConfig } from './standalone-host';
 import { deriveCellStatusKind, type CellStatusKind } from '../src/shared/cellStatus';
 import {
   queueExecutionBuckets,
+  reduceActivityExecution,
   resolveIdleExecutionTransition,
   startExecutionBuckets,
   syncExecutionBuckets,
@@ -3432,11 +3433,7 @@ function App() {
       if (message.type === 'activity-update') {
         const current = stateRef.current;
         const nextCells = [...current.cells];
-        const nextQueued = new Set(current.queuedIds);
-        const nextExecuting = new Set(current.executingIds);
-        const nextPaused = new Set(current.pausedCellIds);
         let cellsChanged = false;
-        let needsFullReload = false;
 
         for (const eventItem of (message.events ?? []) as ActivityEvent[]) {
           const eventType = eventItem.event_type ?? eventItem.type;
@@ -3460,40 +3457,30 @@ function App() {
               outputs: cell.outputs ?? nextCells[cellIndex].outputs,
             };
             cellsChanged = true;
-            if (eventItem.cell_id) {
-              nextQueued.delete(eventItem.cell_id);
-              nextExecuting.add(eventItem.cell_id);
-              nextPaused.delete(eventItem.cell_id);
-              executionStartRef.current.set(
-                eventItem.cell_id,
-                executionStartRef.current.get(eventItem.cell_id) ?? Date.now(),
-              );
-            }
-          } else if (eventType === 'execution-started' && eventItem.cell_id) {
-            executionStartRef.current.set(eventItem.cell_id, Date.now());
-            nextQueued.delete(eventItem.cell_id);
-            nextExecuting.add(eventItem.cell_id);
-            nextPaused.delete(eventItem.cell_id);
-          } else if (
-            eventType === 'execution-finished' &&
-            eventItem.cell_id
-          ) {
-            nextQueued.delete(eventItem.cell_id);
-            nextExecuting.delete(eventItem.cell_id);
-            nextPaused.delete(eventItem.cell_id);
-            const startTime = executionStartRef.current.get(eventItem.cell_id);
-            if (startTime != null || current.executingIds.includes(eventItem.cell_id) || current.queuedIds.includes(eventItem.cell_id)) {
-              const elapsed = startTime != null ? Date.now() - startTime : 0;
-              executionStartRef.current.delete(eventItem.cell_id);
-              setCompletedTimes((prev) => ({ ...prev, [eventItem.cell_id!]: elapsed }));
-            }
-          } else if (
-            eventType === 'cell-inserted' ||
-            eventType === 'cell-removed' ||
-            eventType === 'notebook-reset-needed'
-          ) {
-            needsFullReload = true;
           }
+        }
+
+        const activityExecution = reduceActivityExecution(current, (message.events ?? []) as ActivityEvent[]);
+        const finishedAt = Date.now();
+        for (const cellId of activityExecution.startedIds) {
+          executionStartRef.current.set(
+            cellId,
+            executionStartRef.current.get(cellId) ?? finishedAt,
+          );
+        }
+        if (activityExecution.finishedIds.length > 0) {
+          setCompletedTimes((prev) => {
+            const next = { ...prev };
+            for (const cellId of activityExecution.finishedIds) {
+              const startTime = executionStartRef.current.get(cellId);
+              if (startTime != null || current.executingIds.includes(cellId) || current.queuedIds.includes(cellId)) {
+                const elapsed = startTime != null ? finishedAt - startTime : 0;
+                executionStartRef.current.delete(cellId);
+                next[cellId] = elapsed;
+              }
+            }
+            return next;
+          });
         }
 
         if (message.runtime) {
@@ -3519,15 +3506,15 @@ function App() {
           });
         }
 
-        if (needsFullReload) {
+        if (activityExecution.needsFullReload) {
           sendRequest({ type: 'load-contents' });
         } else {
           if (cellsChanged) {
             applyCells(nextCells);
           }
-          setQueuedIds([...nextQueued]);
-          setExecutingIds([...nextExecuting]);
-          setPausedCellIds([...nextPaused]);
+          setQueuedIds(activityExecution.buckets.queuedIds);
+          setExecutingIds(activityExecution.buckets.executingIds);
+          setPausedCellIds(activityExecution.buckets.pausedCellIds);
         }
         return;
       }

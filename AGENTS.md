@@ -76,6 +76,7 @@ Notebook files + headless kernels
 - When the daemon already owns execution truth, carry that same queued/running state through notebook activity payloads too. Runtime refresh and activity polling should not drift into two different notions of execution state.
 - In the legacy extension queue path, collapse duplicate "inspect running state / decide immediate vs queued / build queue payload" code into shared helpers before attempting larger behavioral changes. That keeps the older compatibility path readable while we gradually retire duplicated truth.
 - In the canvas renderer, prefer extracting pure execution-bucket helpers (`queued`, `executing`, `failed`, `paused`) into shared modules before editing event handlers in place. That makes queue/running refactors easier to verify and reduces accidental drift between runtime updates, activity updates, and local command starts.
+- For canvas activity polling, prefer a pure reducer-style helper for execution event transitions (`execution-started`, output-appended, finished, structural reload triggers) instead of mutating queued/executing/paused sets inline inside `main.tsx`.
 - Before deleting an old helper, search tests for direct patching or mocking of that helper. Some internal methods are part of the regression harness even if they are not public APIs.
 - If a refactor touches run-all, restart-and-run-all, save/flush, notebook switching, or trailing-cell reuse, update the matching behavior-lock docs under `dev/behavior-locks/` in the same change.
 

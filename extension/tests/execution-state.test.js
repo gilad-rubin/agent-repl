@@ -95,3 +95,57 @@ test('syncExecutionBuckets keeps server-owned queued and running ids while clear
         pausedCellIds: ['cell-paused'],
     });
 });
+
+test('reduceActivityExecution promotes output and started events into executing and flags structural reloads', () => {
+    const { reduceActivityExecution } = loadExecutionStateModule();
+
+    const result = reduceActivityExecution({
+        queuedIds: ['cell-queued', 'cell-waiting'],
+        executingIds: [],
+        failedCellIds: ['cell-failed'],
+        pausedCellIds: ['cell-paused'],
+    }, [
+        { event_type: 'cell-output-appended', cell_id: 'cell-queued' },
+        { event_type: 'execution-started', cell_id: 'cell-paused' },
+        { event_type: 'cell-inserted' },
+    ]);
+
+    assert.deepEqual(result, {
+        buckets: {
+            queuedIds: ['cell-waiting'],
+            executingIds: ['cell-queued', 'cell-paused'],
+            failedCellIds: ['cell-failed'],
+            pausedCellIds: [],
+        },
+        startedIds: ['cell-queued', 'cell-paused'],
+        finishedIds: [],
+        needsFullReload: true,
+    });
+});
+
+test('reduceActivityExecution clears execution buckets on finished events', () => {
+    const { reduceActivityExecution } = loadExecutionStateModule();
+
+    const result = reduceActivityExecution({
+        queuedIds: ['cell-1'],
+        executingIds: ['cell-2'],
+        failedCellIds: [],
+        pausedCellIds: ['cell-3'],
+    }, [
+        { event_type: 'execution-finished', cell_id: 'cell-1' },
+        { event_type: 'execution-finished', cell_id: 'cell-2' },
+        { event_type: 'execution-finished', cell_id: 'cell-3' },
+    ]);
+
+    assert.deepEqual(result, {
+        buckets: {
+            queuedIds: [],
+            executingIds: [],
+            failedCellIds: [],
+            pausedCellIds: [],
+        },
+        startedIds: [],
+        finishedIds: ['cell-1', 'cell-2', 'cell-3'],
+        needsFullReload: false,
+    });
+});

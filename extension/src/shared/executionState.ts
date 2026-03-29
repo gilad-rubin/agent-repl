@@ -16,6 +16,19 @@ export type IdleExecutionTransition = {
     pausedIds: string[];
 };
 
+export type ActivityExecutionEventLike = {
+    event_type?: string;
+    type?: string;
+    cell_id?: string | null;
+};
+
+export type ActivityExecutionReduction = {
+    buckets: ExecutionBuckets;
+    startedIds: string[];
+    finishedIds: string[];
+    needsFullReload: boolean;
+};
+
 export function queueExecutionBuckets(
     current: ExecutionBuckets,
     cellIds: string[],
@@ -61,6 +74,66 @@ export function syncExecutionBuckets(
         executingIds: [...active.executingIds],
         failedCellIds: current.failedCellIds.filter((cellId) => !activeIds.has(cellId)),
         pausedCellIds: current.pausedCellIds.filter((cellId) => !activeIds.has(cellId)),
+    };
+}
+
+export function reduceActivityExecution(
+    current: ExecutionBuckets,
+    events: ActivityExecutionEventLike[],
+): ActivityExecutionReduction {
+    const nextQueued = new Set(current.queuedIds);
+    const nextExecuting = new Set(current.executingIds);
+    const nextPaused = new Set(current.pausedCellIds);
+    const startedIds: string[] = [];
+    const finishedIds: string[] = [];
+    let needsFullReload = false;
+
+    for (const event of events) {
+        const eventType = event.event_type ?? event.type;
+        const cellId = typeof event.cell_id === 'string' && event.cell_id ? event.cell_id : null;
+
+        if (
+            (eventType === 'cell-output-appended' || eventType === 'cell-outputs-updated' || eventType === 'execution-started') &&
+            cellId
+        ) {
+            nextQueued.delete(cellId);
+            nextExecuting.add(cellId);
+            nextPaused.delete(cellId);
+            if (!startedIds.includes(cellId)) {
+                startedIds.push(cellId);
+            }
+            continue;
+        }
+
+        if (eventType === 'execution-finished' && cellId) {
+            nextQueued.delete(cellId);
+            nextExecuting.delete(cellId);
+            nextPaused.delete(cellId);
+            if (!finishedIds.includes(cellId)) {
+                finishedIds.push(cellId);
+            }
+            continue;
+        }
+
+        if (
+            eventType === 'cell-inserted' ||
+            eventType === 'cell-removed' ||
+            eventType === 'notebook-reset-needed'
+        ) {
+            needsFullReload = true;
+        }
+    }
+
+    return {
+        buckets: {
+            queuedIds: [...nextQueued],
+            executingIds: [...nextExecuting],
+            failedCellIds: current.failedCellIds,
+            pausedCellIds: [...nextPaused],
+        },
+        startedIds,
+        finishedIds,
+        needsFullReload,
     };
 }
 
