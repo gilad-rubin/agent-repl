@@ -22,6 +22,7 @@ from jupyter_client import KernelManager
 from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
+from agent_repl.core.notebook_read_service import NotebookReadService
 
 
 CORE_VERSION = "0.1.0"
@@ -341,6 +342,7 @@ class CoreState:
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _notebook_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _notebook_locks_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _notebook_read_service: NotebookReadService = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = os.path.realpath(self.workspace_root)
@@ -353,6 +355,7 @@ class CoreState:
             (record.timestamp for record in self.activity_records),
             default=self.started_at,
         )
+        self._notebook_read_service = NotebookReadService(self)
         self._recompute_counts()
 
     def _next_activity_timestamp(self) -> float:
@@ -965,18 +968,10 @@ class CoreState:
         }, HTTPStatus.OK
 
     def notebook_contents(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        # Readers should be able to observe the last committed notebook snapshot
-        # even while a long-running execution still holds the per-notebook lock.
-        payload = self._headless_notebook_contents(real_path, relative_path)
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_read_service.contents(path)
 
     def notebook_status(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_status(real_path, relative_path)
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_read_service.status(path)
 
     def notebook_create(
         self,
@@ -1146,59 +1141,13 @@ class CoreState:
         }, HTTPStatus.OK
 
     def notebook_runtime(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self._reap_expired_runtimes()
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        reattach_policy = self._notebook_reattach_policy(real_path=real_path, relative_path=relative_path)
-        runtime_record = self._runtime_record_for_notebook(relative_path)
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "active": runtime is not None,
-            "mode": "headless" if (runtime is not None or reattach_policy.get("action") != "none") else None,
-            "runtime": runtime.payload() if runtime is not None else None,
-            "runtime_record": runtime_record.payload() if runtime_record is not None else None,
-            "reattach_policy": reattach_policy,
-        }, HTTPStatus.OK
+        return self._notebook_read_service.runtime(path)
 
     def notebook_projection(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self._reap_expired_runtimes()
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        runtime_record = self._runtime_record_for_notebook(relative_path)
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "active": runtime is not None,
-            "mode": "headless" if runtime is not None else None,
-            "runtime": runtime.payload() if runtime is not None else None,
-            "runtime_record": runtime_record.payload() if runtime_record is not None else None,
-            "contents": self._headless_notebook_contents(real_path, relative_path) if runtime is not None else None,
-        }, HTTPStatus.OK
+        return self._notebook_read_service.projection(path)
 
     def notebook_activity(self, path: str, *, since: float | None = None) -> tuple[dict[str, Any], HTTPStatus]:
-        self._refresh_session_liveness()
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        runtime_record = self._runtime_record_for_notebook(relative_path)
-        with self._lock:
-            events = [
-                record.payload()
-                for record in self.activity_records
-                if record.path == relative_path and (since is None or record.timestamp > since)
-            ]
-        cursor = max((event["timestamp"] for event in events), default=since or 0.0)
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "presence": self._presence_payload_for_path(relative_path),
-            "leases": self._leases_payload_for_path(relative_path),
-            "recent_events": events,
-            "cursor": cursor,
-            "runtime": runtime.payload() if runtime is not None else None,
-            "runtime_record": runtime_record.payload() if runtime_record is not None else None,
-            "current_execution": runtime.current_execution if runtime is not None else None,
-        }, HTTPStatus.OK
+        return self._notebook_read_service.activity(path, since=since)
 
     def upsert_notebook_presence(
         self,
