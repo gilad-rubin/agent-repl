@@ -227,6 +227,9 @@ class CoreClient:
             body["capabilities"] = capabilities
         return self._post("/api/sessions/start", body)
 
+    def resolve_preferred_session(self, *, actor: str = "human") -> dict[str, Any]:
+        return self._post("/api/sessions/resolve", {"actor": actor})
+
     def touch_session(self, session_id: str) -> dict[str, Any]:
         return self._post("/api/sessions/touch", {"session_id": session_id})
 

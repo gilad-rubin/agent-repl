@@ -8,17 +8,6 @@ import { StandaloneNotebookLspSession } from './standalone-lsp.mjs';
 
 const execFileAsync = promisify(execFile);
 const RUNTIME_FILE_PREFIX = 'agent-repl-core-';
-const SESSION_STATUS_RANK = {
-  attached: 3,
-  stale: 2,
-  detached: 1,
-};
-const SESSION_CLIENT_RANK = {
-  vscode: 3,
-  browser: 2,
-  cli: 1,
-  worker: 0,
-};
 
 function standaloneDebug(event, data = {}) {
   const record = {
@@ -36,48 +25,6 @@ function standaloneDebug(event, data = {}) {
   }
 }
 const DEFAULT_SESSION_LABEL = 'Standalone Canvas';
-
-export function chooseReusableHumanSessionId(sessions) {
-  if (!Array.isArray(sessions)) {
-    return null;
-  }
-
-  let bestSessionId = null;
-  let bestKey = null;
-  for (const session of sessions) {
-    if (!session || typeof session !== 'object') {
-      continue;
-    }
-    if (session.actor !== 'human') {
-      continue;
-    }
-    if (typeof session.session_id !== 'string' || !session.session_id) {
-      continue;
-    }
-    const statusRank = SESSION_STATUS_RANK[session.status] ?? 0;
-    if (statusRank === 0) {
-      continue;
-    }
-    const clientRank = SESSION_CLIENT_RANK[session.client] ?? 0;
-    const capabilities = Array.isArray(session.capabilities) ? session.capabilities : [];
-    const editorRank = capabilities.includes('editor') || session.client === 'vscode' ? 1 : 0;
-    const lastSeenAt = typeof session.last_seen_at === 'number' ? session.last_seen_at : 0;
-    const createdAt = typeof session.created_at === 'number' ? session.created_at : 0;
-    const sortKey = [statusRank, editorRank, clientRank, lastSeenAt, createdAt];
-    if (
-      bestKey == null
-      || sortKey[0] > bestKey[0]
-      || (sortKey[0] === bestKey[0] && sortKey[1] > bestKey[1])
-      || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] > bestKey[2])
-      || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] === bestKey[2] && sortKey[3] > bestKey[3])
-      || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] === bestKey[2] && sortKey[3] === bestKey[3] && sortKey[4] > bestKey[4])
-    ) {
-      bestKey = sortKey;
-      bestSessionId = session.session_id;
-    }
-  }
-  return bestSessionId;
-}
 
 function runtimeDir() {
   return process.env.AGENT_REPL_RUNTIME_DIR
@@ -476,12 +423,15 @@ export function createStandaloneServices({
 
     const daemon = locateDaemon();
     try {
-      const payload = await fetchJsonFn(`${daemon.baseUrl}/api/sessions`, {
+      const payload = await fetchJsonFn(`${daemon.baseUrl}/api/sessions/resolve`, {
+        method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           Authorization: `token ${daemon.token}`,
         },
+        body: JSON.stringify({ actor: 'human' }),
       });
-      const reusableSessionId = chooseReusableHumanSessionId(payload?.sessions);
+      const reusableSessionId = payload?.session?.session_id;
       if (reusableSessionId) {
         const session = {
           sessionId: reusableSessionId,

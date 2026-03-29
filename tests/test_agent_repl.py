@@ -19,7 +19,7 @@ from unittest import mock
 
 import requests
 
-from agent_repl.cli import build_parser, main
+from agent_repl.cli import BridgeNotebookRuntimeAdapter, build_parser, main
 from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
 from agent_repl.core.server import CoreState, _handler_factory, _load_or_create_state
@@ -2481,6 +2481,12 @@ class TestCoreEndpoints(unittest.TestCase):
         self.assertEqual(payload["capabilities"], ["projection"])
         self.assertIn("session_id", payload)
 
+    def test_resolve_preferred_session_calls_post(self):
+        self.client.resolve_preferred_session(actor="human")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/sessions/resolve", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"actor": "human"})
+
     def test_touch_session_calls_post(self):
         self.client.touch_session("sess-1")
         url = self.mock_post.call_args[0][0]
@@ -3093,7 +3099,7 @@ class TestCommands(unittest.TestCase):
         try:
             with (
                 mock.patch("agent_repl.cli._client", return_value=mock_client),
-                mock.patch("agent_repl.cli._notebook_client", return_value=mock_client),
+                mock.patch("agent_repl.cli._notebook_client", return_value=BridgeNotebookRuntimeAdapter(mock_client)),
             ):
                 code = main(argv)
         finally:
@@ -3134,6 +3140,7 @@ class TestCommands(unittest.TestCase):
         client.shutdown.return_value = {"status": "ok", "stopping": True}
         client.list_sessions.return_value = {"status": "ok", "sessions": []}
         client.start_session.return_value = {"status": "ok", "session": {"session_id": "sess-1"}}
+        client.resolve_preferred_session.return_value = {"status": "ok", "session": None}
         client.touch_session.return_value = {"status": "ok", "session": {"session_id": "sess-1", "status": "attached"}}
         client.detach_session.return_value = {"status": "ok", "session": {"session_id": "sess-1", "status": "detached"}}
         client.session_presence_upsert.return_value = {"status": "ok", "presence": {"session_id": "sess-1", "activity": "observing"}}
@@ -3253,7 +3260,14 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1"], client)
         self.assertEqual(code, 0)
-        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30)
+        client.insert_and_execute.assert_called_once_with(
+            "nb.ipynb",
+            "x=1",
+            cell_type="code",
+            at_index=-1,
+            wait=True,
+            timeout=30,
+        )
 
     def test_ix_prefers_core_execution_surface(self):
         bridge = self._mock_client()
@@ -3310,7 +3324,14 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1", "--no-wait"], client)
         self.assertEqual(code, 0)
-        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=False, timeout=30)
+        client.insert_and_execute.assert_called_once_with(
+            "nb.ipynb",
+            "x=1",
+            cell_type="code",
+            at_index=-1,
+            wait=False,
+            timeout=30,
+        )
 
     def test_ix_batch_uses_bridge_surface_sequentially(self):
         client = self._mock_client()
@@ -3333,8 +3354,8 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(
             client.insert_and_execute.call_args_list,
             [
-                mock.call("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30),
-                mock.call("nb.ipynb", "x+1", at_index=-1, wait=True, timeout=30),
+                mock.call("nb.ipynb", "x=1", cell_type="code", at_index=-1, wait=True, timeout=30),
+                mock.call("nb.ipynb", "x+1", cell_type="code", at_index=-1, wait=True, timeout=30),
             ],
         )
         payload = json.loads(out)
@@ -3407,7 +3428,13 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["exec", "nb.ipynb", "--cell-id", "abc"], client)
         self.assertEqual(code, 0)
-        client.execute_cell.assert_called_once_with("nb.ipynb", cell_id="abc", wait=True, timeout=30)
+        client.execute_cell.assert_called_once_with(
+            "nb.ipynb",
+            cell_id="abc",
+            cell_index=None,
+            wait=True,
+            timeout=30,
+        )
 
     def test_exec_prefers_core_execution_surface(self):
         bridge = self._mock_client()
@@ -3431,6 +3458,7 @@ class TestCommands(unittest.TestCase):
             timeout=30,
             owner_session_id="sess-1",
         )
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.execute_cell.assert_not_called()
 
@@ -3460,28 +3488,17 @@ class TestCommands(unittest.TestCase):
 
     def test_exec_reuses_preferred_human_session_when_session_id_is_omitted(self):
         bridge = self._mock_client()
-        core = self._mock_core_client(list_sessions={
+        core = self._mock_core_client(resolve_preferred_session={
             "status": "ok",
-            "sessions": [
-                {
-                    "session_id": "sess-browser",
-                    "actor": "human",
-                    "client": "browser",
-                    "status": "attached",
-                    "capabilities": ["projection", "presence"],
-                    "last_seen_at": 10,
-                    "created_at": 1,
-                },
-                {
-                    "session_id": "sess-vscode",
-                    "actor": "human",
-                    "client": "vscode",
-                    "status": "attached",
-                    "capabilities": ["projection", "editor", "presence"],
-                    "last_seen_at": 9,
-                    "created_at": 2,
-                },
-            ],
+            "session": {
+                "session_id": "sess-vscode",
+                "actor": "human",
+                "client": "vscode",
+                "status": "attached",
+                "capabilities": ["projection", "editor", "presence"],
+                "last_seen_at": 9,
+                "created_at": 2,
+            },
         })
         buf = StringIO()
         old = sys.stdout
@@ -3508,7 +3525,7 @@ class TestCommands(unittest.TestCase):
     def test_exec_starts_human_cli_session_when_no_reusable_session_exists(self):
         bridge = self._mock_client()
         core = self._mock_core_client(
-            list_sessions={"status": "ok", "sessions": []},
+            resolve_preferred_session={"status": "ok", "session": None},
             start_session={"status": "ok", "session": {"session_id": "sess-cli"}},
         )
         buf = StringIO()
@@ -3524,6 +3541,7 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.notebook_execute_cell.assert_called_once_with(
             "nb.ipynb",
             cell_id="abc",
@@ -3680,6 +3698,7 @@ class TestCommands(unittest.TestCase):
             [{"op": "replace-source", "source": "x=2", "cell_id": "abc"}],
             owner_session_id="sess-1",
         )
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.edit.assert_not_called()
 
@@ -3714,6 +3733,7 @@ class TestCommands(unittest.TestCase):
             ],
             owner_session_id="sess-1",
         )
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.edit.assert_not_called()
 
@@ -3733,24 +3753,23 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         core.notebook_execute_all.assert_called_once_with("nb.ipynb", owner_session_id="sess-1")
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.execute_all.assert_not_called()
 
     def test_run_all_reuses_preferred_human_session(self):
         bridge = self._mock_client()
-        core = self._mock_core_client(list_sessions={
+        core = self._mock_core_client(resolve_preferred_session={
             "status": "ok",
-            "sessions": [
-                {
-                    "session_id": "sess-vscode",
-                    "actor": "human",
-                    "client": "vscode",
-                    "status": "attached",
-                    "capabilities": ["projection", "editor", "presence"],
-                    "last_seen_at": 42,
-                    "created_at": 24,
-                },
-            ],
+            "session": {
+                "session_id": "sess-vscode",
+                "actor": "human",
+                "client": "vscode",
+                "status": "attached",
+                "capabilities": ["projection", "editor", "presence"],
+                "last_seen_at": 42,
+                "created_at": 24,
+            },
         })
         buf = StringIO()
         old = sys.stdout
@@ -3802,24 +3821,23 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         core.notebook_restart_and_run_all.assert_called_once_with("nb.ipynb", owner_session_id="sess-1")
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.restart_and_run_all.assert_not_called()
 
     def test_restart_run_all_reuses_preferred_human_session(self):
         bridge = self._mock_client()
-        core = self._mock_core_client(list_sessions={
+        core = self._mock_core_client(resolve_preferred_session={
             "status": "ok",
-            "sessions": [
-                {
-                    "session_id": "sess-browser",
-                    "actor": "human",
-                    "client": "browser",
-                    "status": "stale",
-                    "capabilities": ["projection", "presence"],
-                    "last_seen_at": 42,
-                    "created_at": 24,
-                },
-            ],
+            "session": {
+                "session_id": "sess-browser",
+                "actor": "human",
+                "client": "browser",
+                "status": "stale",
+                "capabilities": ["projection", "presence"],
+                "last_seen_at": 42,
+                "created_at": 24,
+            },
         })
         buf = StringIO()
         old = sys.stdout
@@ -3866,18 +3884,6 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         core.notebook_select_kernel.assert_called_once_with("nb.ipynb", kernel_id="python3")
         bridge.select_kernel.assert_not_called()
-
-    def test_select_kernel_falls_back_to_bridge_when_no_core(self):
-        client = self._mock_client()
-        code, _ = self._run(["select-kernel", "nb.ipynb"], client)
-        self.assertEqual(code, 0)
-        # BridgeClient doesn't have notebook_select_kernel, so falls through to bridge
-        client.select_kernel.assert_called_once_with(
-            "nb.ipynb",
-            kernel_id=None,
-            extension="ms-toolsai.jupyter",
-            interactive=False,
-        )
 
     def test_select_kernel_interactive_flag(self):
         client = self._mock_client()

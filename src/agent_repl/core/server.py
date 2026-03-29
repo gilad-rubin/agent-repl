@@ -26,6 +26,17 @@ from agent_repl.client import BridgeClient
 
 CORE_VERSION = "0.1.0"
 SESSION_STALE_AFTER_SECONDS = 60.0
+SESSION_STATUS_RANK = {
+    "attached": 3,
+    "stale": 2,
+    "detached": 1,
+}
+SESSION_CLIENT_RANK = {
+    "vscode": 3,
+    "browser": 2,
+    "cli": 1,
+    "worker": 0,
+}
 CELL_LEASE_TTL_SECONDS = 45.0
 STATE_DIRNAME = ".agent-repl"
 STATE_FILENAME = "core-state.json"
@@ -786,6 +797,40 @@ class CoreState:
             "status": "ok",
             "created": created,
             "session": record.payload(),
+            "workspace_root": self.workspace_root,
+        }
+
+    def resolve_preferred_session(self, actor: str = "human") -> dict[str, Any]:
+        self._refresh_session_liveness()
+        best_record: SessionRecord | None = None
+        best_key: tuple[int, int, int, float, float] | None = None
+        with self._lock:
+            sessions = list(self.session_records.values())
+
+        for record in sessions:
+            if record.actor != actor:
+                continue
+            status_rank = SESSION_STATUS_RANK.get(record.status, 0)
+            if status_rank == 0:
+                continue
+            client_rank = SESSION_CLIENT_RANK.get(record.client, 0)
+            editor_rank = 1 if (
+                "editor" in record.capabilities or record.client == "vscode"
+            ) else 0
+            sort_key = (
+                status_rank,
+                editor_rank,
+                client_rank,
+                record.last_seen_at,
+                record.created_at,
+            )
+            if best_key is None or sort_key > best_key:
+                best_key = sort_key
+                best_record = record
+
+        return {
+            "status": "ok",
+            "session": best_record.payload() if best_record else None,
             "workspace_root": self.workspace_root,
         }
 
@@ -3394,6 +3439,13 @@ def _handler_factory(state: CoreState):
                         else None
                     )
                     self._json(HTTPStatus.OK, state.start_session(actor, client, label, session_id, resolved_capabilities))
+                    return
+                if self.path == "/api/sessions/resolve":
+                    actor = payload.get("actor", "human")
+                    if not isinstance(actor, str) or not actor:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing actor"})
+                        return
+                    self._json(HTTPStatus.OK, state.resolve_preferred_session(actor))
                     return
                 if self.path == "/api/sessions/touch":
                     session_id = payload.get("session_id")

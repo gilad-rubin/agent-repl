@@ -24,19 +24,6 @@ type SessionRef = {
     sessionId: string;
 };
 
-const SESSION_STATUS_RANK: Record<string, number> = {
-    attached: 3,
-    stale: 2,
-    detached: 1,
-};
-
-const SESSION_CLIENT_RANK: Record<string, number> = {
-    vscode: 3,
-    browser: 2,
-    cli: 1,
-    worker: 0,
-};
-
 export function primaryWorkspaceRoot(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
@@ -57,52 +44,6 @@ export function sessionIdForWorkspaceState(
 ): string | undefined {
     return context.workspaceState.get<string>(sessionStorageKey(workspaceRoot))
         ?? context.workspaceState.get<string>(legacySessionStorageKey(workspaceRoot));
-}
-
-function chooseReusableHumanSessionId(payload: any): string | undefined {
-    const sessions = payload?.sessions;
-    if (!Array.isArray(sessions)) {
-        return undefined;
-    }
-
-    let bestSessionId: string | undefined;
-    let bestKey: [number, number, number, number, number] | undefined;
-    for (const session of sessions) {
-        if (!session || typeof session !== 'object') {
-            continue;
-        }
-        if (session.actor !== 'human' || typeof session.session_id !== 'string' || !session.session_id) {
-            continue;
-        }
-        const statusRank = SESSION_STATUS_RANK[String(session.status ?? '')] ?? 0;
-        if (statusRank === 0) {
-            continue;
-        }
-        const clientRank = SESSION_CLIENT_RANK[String(session.client ?? '')] ?? 0;
-        const capabilities = Array.isArray(session.capabilities) ? session.capabilities : [];
-        const editorRank = capabilities.includes('editor') || session.client === 'vscode' ? 1 : 0;
-        const lastSeenAt = typeof session.last_seen_at === 'number' ? session.last_seen_at : 0;
-        const createdAt = typeof session.created_at === 'number' ? session.created_at : 0;
-        const sortKey: [number, number, number, number, number] = [
-            statusRank,
-            editorRank,
-            clientRank,
-            lastSeenAt,
-            createdAt,
-        ];
-        if (
-            bestKey === undefined
-            || sortKey[0] > bestKey[0]
-            || (sortKey[0] === bestKey[0] && sortKey[1] > bestKey[1])
-            || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] > bestKey[2])
-            || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] === bestKey[2] && sortKey[3] > bestKey[3])
-            || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] === bestKey[2] && sortKey[3] === bestKey[3] && sortKey[4] > bestKey[4])
-        ) {
-            bestKey = sortKey;
-            bestSessionId = session.session_id;
-        }
-    }
-    return bestSessionId;
 }
 
 function workspaceExecutable(workspaceRoot: string, executable: string): string {
@@ -255,10 +196,10 @@ export class SessionAutoAttach implements vscode.Disposable {
     private async findReusableSessionId(workspaceRoot: string): Promise<string | undefined> {
         try {
             const payload = await this.runCli(workspaceRoot, [
-                'core', 'sessions',
+                'core', 'session-resolve',
                 '--workspace-root', workspaceRoot,
             ]);
-            return chooseReusableHumanSessionId(payload);
+            return typeof payload?.session?.session_id === 'string' ? payload.session.session_id : undefined;
         } catch {
             return undefined;
         }

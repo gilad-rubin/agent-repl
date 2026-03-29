@@ -8,7 +8,7 @@ import sys
 import tomllib
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
@@ -29,6 +29,159 @@ def _app_version() -> str:
 
 def _client(workspace_hint: str | None = None) -> BridgeClient:
     return BridgeClient.discover(workspace_hint=workspace_hint)
+
+
+class NotebookRuntimeClient(Protocol):
+    def notebook_contents(self, path: str) -> dict[str, Any]: ...
+    def notebook_status(self, path: str) -> dict[str, Any]: ...
+    def notebook_create(
+        self,
+        path: str,
+        cells: list[dict[str, Any]] | None = None,
+        kernel_id: str | None = None,
+    ) -> dict[str, Any]: ...
+    def notebook_select_kernel(self, path: str, kernel_id: str | None = None) -> dict[str, Any]: ...
+    def notebook_edit(
+        self,
+        path: str,
+        operations: list[dict[str, Any]],
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]: ...
+    def notebook_execute_cell(
+        self,
+        path: str,
+        *,
+        cell_id: str | None = None,
+        cell_index: int | None = None,
+        wait: bool = True,
+        timeout: float = 30,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]: ...
+    def notebook_insert_execute(
+        self,
+        path: str,
+        source: str,
+        *,
+        cell_type: str = "code",
+        at_index: int = -1,
+        wait: bool = True,
+        timeout: float = 30,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]: ...
+    def notebook_execute_all(self, path: str, owner_session_id: str | None = None) -> dict[str, Any]: ...
+    def notebook_restart(self, path: str) -> dict[str, Any]: ...
+    def notebook_restart_and_run_all(
+        self,
+        path: str,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]: ...
+    def resolve_preferred_session(self, *, actor: str = "human") -> dict[str, Any]: ...
+    def start_session(
+        self,
+        *,
+        actor: str,
+        client: str,
+        label: str | None = None,
+        capabilities: list[str] | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
+
+class BridgeNotebookRuntimeAdapter:
+    """Legacy bridge adapter for tests and explicitly bridge-backed flows."""
+
+    def __init__(self, bridge: BridgeClient):
+        self._bridge = bridge
+
+    def notebook_contents(self, path: str) -> dict[str, Any]:
+        return self._bridge.contents(path)
+
+    def notebook_status(self, path: str) -> dict[str, Any]:
+        return self._bridge.status(path)
+
+    def notebook_create(
+        self,
+        path: str,
+        cells: list[dict[str, Any]] | None = None,
+        kernel_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._bridge.create(path, cells=cells, kernel_id=kernel_id)
+
+    def notebook_select_kernel(self, path: str, kernel_id: str | None = None) -> dict[str, Any]:
+        return self._bridge.select_kernel(path, kernel_id=kernel_id)
+
+    def notebook_edit(
+        self,
+        path: str,
+        operations: list[dict[str, Any]],
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._bridge.edit(path, operations)
+
+    def notebook_execute_cell(
+        self,
+        path: str,
+        *,
+        cell_id: str | None = None,
+        cell_index: int | None = None,
+        wait: bool = True,
+        timeout: float = 30,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._bridge.execute_cell(
+            path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def notebook_insert_execute(
+        self,
+        path: str,
+        source: str,
+        *,
+        cell_type: str = "code",
+        at_index: int = -1,
+        wait: bool = True,
+        timeout: float = 30,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._bridge.insert_and_execute(
+            path,
+            source,
+            cell_type=cell_type,
+            at_index=at_index,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def notebook_execute_all(self, path: str, owner_session_id: str | None = None) -> dict[str, Any]:
+        return self._bridge.execute_all(path)
+
+    def notebook_restart(self, path: str) -> dict[str, Any]:
+        return self._bridge.restart_kernel(path)
+
+    def notebook_restart_and_run_all(
+        self,
+        path: str,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._bridge.restart_and_run_all(path)
+
+    def resolve_preferred_session(self, *, actor: str = "human") -> dict[str, Any]:
+        return {"status": "ok", "session": None}
+
+    def start_session(
+        self,
+        *,
+        actor: str,
+        client: str,
+        label: str | None = None,
+        capabilities: list[str] | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {"status": "ok", "session": None}
 
 
 def _core_client(workspace_hint: str | None = None, runtime_dir: str | None = None) -> CoreClient:
@@ -52,7 +205,7 @@ def _workspace_root() -> str:
     return os.path.realpath(os.getcwd())
 
 
-def _notebook_client(path: str) -> CoreClient | BridgeClient:
+def _notebook_client(path: str) -> NotebookRuntimeClient:
     workspace_root = _workspace_root()
     result = CoreClient.start(workspace_root)
     if result.get("stale_restart"):
@@ -62,79 +215,20 @@ def _notebook_client(path: str) -> CoreClient | BridgeClient:
         )
     return CoreClient.discover(workspace_hint=path)
 
-
-_SESSION_STATUS_RANK = {
-    "attached": 3,
-    "stale": 2,
-    "detached": 1,
-}
-_SESSION_CLIENT_RANK = {
-    "vscode": 3,
-    "browser": 2,
-    "cli": 1,
-    "worker": 0,
-}
-
-
-def _preferred_human_session_id(client: Any) -> str | None:
-    if not hasattr(client, "list_sessions"):
-        return None
-    try:
-        payload = client.list_sessions()
-    except Exception:
-        return None
-
-    sessions = payload.get("sessions")
-    if not isinstance(sessions, list):
-        return None
-
-    best_session_id: str | None = None
-    best_key: tuple[int, int, int, float, float] | None = None
-    for session in sessions:
-        if not isinstance(session, dict):
-            continue
-        session_id = session.get("session_id")
-        if not isinstance(session_id, str) or not session_id:
-            continue
-        if session.get("actor") != "human":
-            continue
-        status = session.get("status")
-        if not isinstance(status, str):
-            continue
-        status_rank = _SESSION_STATUS_RANK.get(status, 0)
-        if status_rank == 0:
-            continue
-        client_rank = _SESSION_CLIENT_RANK.get(str(session.get("client") or ""), 0)
-        capabilities = session.get("capabilities")
-        editor_rank = 1 if (
-            isinstance(capabilities, list) and "editor" in capabilities
-        ) or session.get("client") == "vscode" else 0
-        last_seen = session.get("last_seen_at")
-        created_at = session.get("created_at")
-        sort_key = (
-            status_rank,
-            editor_rank,
-            client_rank,
-            float(last_seen) if isinstance(last_seen, (int, float)) else 0.0,
-            float(created_at) if isinstance(created_at, (int, float)) else 0.0,
-        )
-        if best_key is None or sort_key > best_key:
-            best_key = sort_key
-            best_session_id = session_id
-    return best_session_id
-
-
 def _default_owner_session_id(
-    client: Any,
+    client: NotebookRuntimeClient,
     *,
     client_type: str = "cli",
     label: str = "CLI",
 ) -> str | None:
-    existing = _preferred_human_session_id(client)
-    if existing:
-        return existing
-    if not hasattr(client, "start_session"):
-        return None
+    try:
+        existing = client.resolve_preferred_session(actor="human")
+    except Exception:
+        existing = {"session": None}
+    session = existing.get("session")
+    session_id = session.get("session_id") if isinstance(session, dict) else None
+    if isinstance(session_id, str) and session_id:
+        return session_id
     try:
         payload = client.start_session(actor="human", client=client_type, label=label)
     except Exception:
@@ -145,7 +239,7 @@ def _default_owner_session_id(
 
 
 def _owner_session_id_from_args(
-    client: Any,
+    client: NotebookRuntimeClient,
     args: argparse.Namespace,
     *,
     client_type: str = "cli",
@@ -163,10 +257,7 @@ def _owner_session_id_from_args(
 
 def cmd_cat(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    if hasattr(client, "notebook_contents"):
-        result = client.notebook_contents(args.path)
-    else:
-        result = client.contents(args.path)
+    result = client.notebook_contents(args.path)
     include_outputs = not getattr(args, "no_outputs", False)
     # Clean up cells — only show what the agent needs
     clean_cells = []
@@ -206,10 +297,7 @@ def cmd_reload(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    if hasattr(client, "notebook_status"):
-        result = client.notebook_status(args.path)
-    else:
-        result = client.status(args.path)
+    result = client.notebook_status(args.path)
     _out(result, args.pretty)
     return 0
 
@@ -254,14 +342,11 @@ def cmd_edit(args: argparse.Namespace) -> int:
             op["cell_index"] = args.index
         ops.append(op)
 
-    if hasattr(client, "notebook_edit"):
-        session_id = _owner_session_id_from_args(client, args)
-        if session_id:
-            result = client.notebook_edit(args.path, ops, owner_session_id=session_id)
-        else:
-            result = client.notebook_edit(args.path, ops)
+    session_id = _owner_session_id_from_args(client, args)
+    if session_id:
+        result = client.notebook_edit(args.path, ops, owner_session_id=session_id)
     else:
-        result = client.edit(args.path, ops)
+        result = client.notebook_edit(args.path, ops)
     _out(result, args.pretty)
     return 0
 
@@ -271,23 +356,17 @@ def cmd_exec(args: argparse.Namespace) -> int:
     wait = not getattr(args, "no_wait", False)
     timeout = getattr(args, "timeout", 30)
     if args.code:
-        if hasattr(client, "notebook_insert_execute"):
-            session_id = _owner_session_id_from_args(client, args)
-            kwargs: dict[str, Any] = {"wait": wait, "timeout": timeout}
-            if session_id:
-                kwargs["owner_session_id"] = session_id
-            result = client.notebook_insert_execute(args.path, args.code, **kwargs)
-        else:
-            result = client.insert_and_execute(args.path, args.code, wait=wait, timeout=timeout)
+        session_id = _owner_session_id_from_args(client, args)
+        kwargs: dict[str, Any] = {"wait": wait, "timeout": timeout}
+        if session_id:
+            kwargs["owner_session_id"] = session_id
+        result = client.notebook_insert_execute(args.path, args.code, **kwargs)
     elif args.cell_id:
-        if hasattr(client, "notebook_execute_cell"):
-            session_id = _owner_session_id_from_args(client, args)
-            kwargs = {"cell_id": args.cell_id, "wait": wait, "timeout": timeout}
-            if session_id:
-                kwargs["owner_session_id"] = session_id
-            result = client.notebook_execute_cell(args.path, **kwargs)
-        else:
-            result = client.execute_cell(args.path, cell_id=args.cell_id, wait=wait, timeout=timeout)
+        session_id = _owner_session_id_from_args(client, args)
+        kwargs = {"cell_id": args.cell_id, "wait": wait, "timeout": timeout}
+        if session_id:
+            kwargs["owner_session_id"] = session_id
+        result = client.notebook_execute_cell(args.path, **kwargs)
     else:
         print(json.dumps({"error": "Provide --cell-id or -c/--code"}, indent=2), file=sys.stderr)
         return 1
@@ -303,14 +382,11 @@ def cmd_ix(args: argparse.Namespace) -> int:
     cells = _read_cells(args, default_cell_type="code")
     if len(cells) == 1 and not _has_cells_payload(args):
         source = cells[0]["source"]
-        if hasattr(client, "notebook_insert_execute"):
-            session_id = _owner_session_id_from_args(client, args)
-            kwargs = {"at_index": at_index, "wait": wait, "timeout": timeout}
-            if session_id:
-                kwargs["owner_session_id"] = session_id
-            result = client.notebook_insert_execute(args.path, source, **kwargs)
-        else:
-            result = client.insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
+        session_id = _owner_session_id_from_args(client, args)
+        kwargs = {"at_index": at_index, "wait": wait, "timeout": timeout}
+        if session_id:
+            kwargs["owner_session_id"] = session_id
+        result = client.notebook_insert_execute(args.path, source, **kwargs)
         _out(result, args.pretty)
         return 0
 
@@ -326,32 +402,20 @@ def cmd_ix(args: argparse.Namespace) -> int:
         cell_type = cell["cell_type"]
         source = cell["source"]
         if cell_type == "code":
-            if hasattr(client, "notebook_insert_execute"):
-                kwargs = {"at_index": current_index, "wait": wait, "timeout": timeout}
-                if session_id:
-                    kwargs["owner_session_id"] = session_id
-                item_result = client.notebook_insert_execute(args.path, source, **kwargs)
-            else:
-                item_result = client.insert_and_execute(
-                    args.path,
-                    source,
-                    at_index=current_index,
-                    wait=wait,
-                    timeout=timeout,
-                )
+            kwargs = {"at_index": current_index, "wait": wait, "timeout": timeout}
+            if session_id:
+                kwargs["owner_session_id"] = session_id
+            item_result = client.notebook_insert_execute(args.path, source, **kwargs)
             results.append({**item_result, "cell_type": cell_type})
             if item_result.get("status") == "error":
                 stopped_on_error = True
                 break
         else:
             op = _build_insert_ops([cell], at_index=current_index)[0]
-            if hasattr(client, "notebook_edit"):
-                if session_id:
-                    edit_result = client.notebook_edit(args.path, [op], owner_session_id=session_id)
-                else:
-                    edit_result = client.notebook_edit(args.path, [op])
+            if session_id:
+                edit_result = client.notebook_edit(args.path, [op], owner_session_id=session_id)
             else:
-                edit_result = client.edit(args.path, [op])
+                edit_result = client.notebook_edit(args.path, [op])
             entry = dict(edit_result.get("results", [{}])[0])
             entry["cell_type"] = cell_type
             results.append(entry)
@@ -376,38 +440,29 @@ def cmd_ix(args: argparse.Namespace) -> int:
 
 def cmd_run_all(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    if hasattr(client, "notebook_execute_all"):
-        session_id = _default_owner_session_id(client)
-        if session_id:
-            result = client.notebook_execute_all(args.path, owner_session_id=session_id)
-        else:
-            result = client.notebook_execute_all(args.path)
+    session_id = _default_owner_session_id(client)
+    if session_id:
+        result = client.notebook_execute_all(args.path, owner_session_id=session_id)
     else:
-        result = client.execute_all(args.path)
+        result = client.notebook_execute_all(args.path)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_restart(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    if hasattr(client, "notebook_restart"):
-        result = client.notebook_restart(args.path)
-    else:
-        result = client.restart_kernel(args.path)
+    result = client.notebook_restart(args.path)
     _out(result, args.pretty)
     return 0
 
 
 def cmd_restart_run_all(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    if hasattr(client, "notebook_restart_and_run_all"):
-        session_id = _default_owner_session_id(client)
-        if session_id:
-            result = client.notebook_restart_and_run_all(args.path, owner_session_id=session_id)
-        else:
-            result = client.notebook_restart_and_run_all(args.path)
+    session_id = _default_owner_session_id(client)
+    if session_id:
+        result = client.notebook_restart_and_run_all(args.path, owner_session_id=session_id)
     else:
-        result = client.restart_and_run_all(args.path)
+        result = client.notebook_restart_and_run_all(args.path)
     _out(result, args.pretty)
     return 0
 
@@ -418,10 +473,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         cells = json.loads(args.cells_json)
     kernel_id = getattr(args, "kernel", None)
     client = _notebook_client(args.path)
-    if hasattr(client, "notebook_create"):
-        result = client.notebook_create(args.path, cells=cells, kernel_id=kernel_id)
-    else:
-        result = client.create(args.path, cells=cells, kernel_id=kernel_id)
+    result = client.notebook_create(args.path, cells=cells, kernel_id=kernel_id)
     if getattr(args, "open", False):
         result["open"] = _client(args.path).open(
             args.path,
@@ -457,10 +509,9 @@ def cmd_select_kernel(args: argparse.Namespace) -> int:
     # Route through core runtime for headless kernel selection
     if not interactive:
         client = _notebook_client(args.path)
-        if hasattr(client, "notebook_select_kernel"):
-            result = client.notebook_select_kernel(args.path, kernel_id=kernel_id)
-            _out(result, args.pretty)
-            return 0
+        result = client.notebook_select_kernel(args.path, kernel_id=kernel_id)
+        _out(result, args.pretty)
+        return 0
     # Fall back to bridge for interactive picker
     result = _client(args.path).select_kernel(
         args.path,
@@ -474,10 +525,7 @@ def cmd_select_kernel(args: argparse.Namespace) -> int:
 
 def cmd_prompts(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    if hasattr(client, "notebook_contents"):
-        result = client.notebook_contents(args.path)
-    else:
-        result = client.contents(args.path)
+    result = client.notebook_contents(args.path)
     cells = result.get("cells", [])
     prompts = [
         c for c in cells
@@ -549,6 +597,13 @@ def cmd_core(args: argparse.Namespace) -> int:
             label=getattr(args, "label", None),
             capabilities=getattr(args, "capability", None),
             session_id=getattr(args, "session_id", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "session-resolve":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).resolve_preferred_session(
+            actor=args.actor,
         )
         _out(result, args.pretty)
         return 0
@@ -1017,6 +1072,11 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--label")
     vp.add_argument("--capability", action="append", dest="capability")
     vp.add_argument("--session-id")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("session-resolve", help="Resolve the preferred reusable session for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--actor", default="human", choices=["human", "agent", "system"])
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = coresub.add_parser("session-touch", help="Refresh liveness for an attached session")

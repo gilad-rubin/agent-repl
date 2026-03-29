@@ -175,12 +175,14 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
                             ? 'project-visible-notebook'
                             : args.includes('notebook-activity')
                                 ? 'notebook-activity'
-                            : args.includes('notebook-projection')
-                                ? 'notebook-projection'
+                                : args.includes('notebook-projection')
+                                    ? 'notebook-projection'
+                                : args.includes('session-resolve')
+                                    ? 'session-resolve'
                                 : args.includes('sessions')
                                     ? 'sessions'
-                                : args.includes('session-presence-upsert')
-                                    ? 'session-presence-upsert'
+                                    : args.includes('session-presence-upsert')
+                                        ? 'session-presence-upsert'
                                     : args.includes('session-presence-clear')
                                         ? 'session-presence-clear'
                                 : args.includes('notebook-runtime')
@@ -302,28 +304,17 @@ test('SessionAutoAttach reuses the preferred human session when no workspace ses
         [{ uri: { fsPath: '/workspace' } }],
         {
             execResponses: {
-                sessions: {
+                'session-resolve': {
                     status: 'ok',
-                    sessions: [
-                        {
-                            session_id: 'sess-browser',
-                            actor: 'human',
-                            client: 'browser',
-                            status: 'attached',
-                            capabilities: ['projection', 'presence'],
-                            last_seen_at: 10,
-                            created_at: 1,
-                        },
-                        {
-                            session_id: 'sess-vscode',
-                            actor: 'human',
-                            client: 'vscode',
-                            status: 'attached',
-                            capabilities: ['projection', 'editor', 'presence'],
-                            last_seen_at: 9,
-                            created_at: 2,
-                        },
-                    ],
+                    session: {
+                        session_id: 'sess-vscode',
+                        actor: 'human',
+                        client: 'vscode',
+                        status: 'attached',
+                        capabilities: ['projection', 'editor', 'presence'],
+                        last_seen_at: 9,
+                        created_at: 2,
+                    },
                 },
                 default: { status: 'ok', session: { session_id: 'sess-vscode' } },
             },
@@ -332,7 +323,7 @@ test('SessionAutoAttach reuses the preferred human session when no workspace ses
     const attach = new SessionAutoAttach(context);
     try {
         await attach.attachIfEnabled({ get: (_name, fallback) => fallback });
-        assert.deepEqual(execCalls[0][1], ['core', 'sessions', '--workspace-root', '/workspace']);
+        assert.deepEqual(execCalls[0][1], ['core', 'session-resolve', '--workspace-root', '/workspace']);
         assert.ok(execCalls[1][1].includes('--session-id'));
         assert.ok(execCalls[1][1].includes('sess-vscode'));
         assert.equal(store.get('agent-repl.session:/workspace'), 'sess-vscode');

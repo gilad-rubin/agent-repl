@@ -62,33 +62,6 @@ test('normalizeNotebookPath rejects escaping the workspace root', async () => {
   );
 });
 
-test('chooseReusableHumanSessionId prefers an attached VS Code human session', async () => {
-  const { chooseReusableHumanSessionId } = await import('../scripts/standalone-server.mjs');
-
-  const sessionId = chooseReusableHumanSessionId([
-    {
-      session_id: 'sess-browser',
-      actor: 'human',
-      client: 'browser',
-      status: 'attached',
-      capabilities: ['projection', 'presence'],
-      last_seen_at: 10,
-      created_at: 1,
-    },
-    {
-      session_id: 'sess-vscode',
-      actor: 'human',
-      client: 'vscode',
-      status: 'attached',
-      capabilities: ['projection', 'editor', 'presence'],
-      last_seen_at: 9,
-      created_at: 2,
-    },
-  ]);
-
-  assert.equal(sessionId, 'sess-vscode');
-});
-
 test('standalone attach reuses the preferred human session instead of creating a new one', async () => {
   const { createStandaloneServices } = await import('../scripts/standalone-server.mjs');
   const fetchCalls = [];
@@ -100,20 +73,18 @@ test('standalone attach reuses the preferred human session instead of creating a
     locateDaemon: () => ({ baseUrl: 'http://daemon', token: 'secret' }),
     fetchJson: async (url, init) => {
       fetchCalls.push({ url, init });
-      assert.equal(url, 'http://daemon/api/sessions');
+      assert.equal(url, 'http://daemon/api/sessions/resolve');
       return {
         status: 'ok',
-        sessions: [
-          {
-            session_id: 'sess-vscode',
-            actor: 'human',
-            client: 'vscode',
-            status: 'attached',
-            capabilities: ['projection', 'editor', 'presence'],
-            last_seen_at: 42,
-            created_at: 24,
-          },
-        ],
+        session: {
+          session_id: 'sess-vscode',
+          actor: 'human',
+          client: 'vscode',
+          status: 'attached',
+          capabilities: ['projection', 'editor', 'presence'],
+          last_seen_at: 42,
+          created_at: 24,
+        },
       };
     },
     runAgentRepl: async () => {
