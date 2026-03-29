@@ -1,6 +1,8 @@
 """Shared JSON-over-HTTP client helpers."""
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -72,3 +74,28 @@ class JsonApiClient:
                 location = f" for url: {url}" if url else ""
                 raise RuntimeError(f"{status} {reason}{location}: {detail}") from exc
             raise
+
+
+def poll_execution_until_complete(
+    initial: dict[str, Any],
+    *,
+    timeout: float,
+    fetch_execution: Callable[[str], dict[str, Any]],
+    in_progress_statuses: set[str],
+) -> dict[str, Any]:
+    """Poll an execution endpoint until it reaches a terminal state or times out."""
+
+    execution_id = initial["execution_id"]
+    deadline = time.monotonic() + timeout
+    interval = 0.2
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        result = fetch_execution(execution_id)
+        status = result.get("status")
+        if status not in in_progress_statuses:
+            for key in ("cell_id", "cell_index", "operation"):
+                if key in initial and key not in result:
+                    result[key] = initial[key]
+            return result
+        interval = min(interval * 1.5, 1.0)
+    return {**initial, "status": "timeout", "timeout_seconds": timeout}

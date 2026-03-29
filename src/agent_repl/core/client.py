@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from agent_repl.http_api import JsonApiClient
+from agent_repl.http_api import JsonApiClient, poll_execution_until_complete
 
 
 RUNTIME_FILE_PREFIX = "agent-repl-core-"
@@ -585,20 +585,12 @@ class CoreClient(JsonApiClient):
         return self._post("/api/runs/finish", {"run_id": run_id, "status": status})
 
     def _poll_execution(self, initial: dict[str, Any], timeout: float) -> dict[str, Any]:
-        execution_id = initial["execution_id"]
-        deadline = time.monotonic() + timeout
-        interval = 0.2
-        while time.monotonic() < deadline:
-            time.sleep(interval)
-            result = self.notebook_execution(execution_id)
-            status = result.get("status")
-            if status not in ("running", "queued", "started"):
-                for key in ("cell_id", "cell_index", "operation"):
-                    if key in initial and key not in result:
-                        result[key] = initial[key]
-                return result
-            interval = min(interval * 1.5, 1.0)
-        return {**initial, "status": "timeout", "timeout_seconds": timeout}
+        return poll_execution_until_complete(
+            initial,
+            timeout=timeout,
+            fetch_execution=self.notebook_execution,
+            in_progress_statuses={"running", "queued", "started"},
+        )
 
     def _get(self, endpoint: str, timeout: float = 10) -> dict[str, Any]:
         return super()._get(endpoint, timeout=timeout)

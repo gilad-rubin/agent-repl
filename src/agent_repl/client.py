@@ -4,15 +4,10 @@ from __future__ import annotations
 import glob
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any
 
-from agent_repl.http_api import JsonApiClient, json_error_message
-
-
-def _bridge_error_message(response) -> str | None:
-    return json_error_message(response)
+from agent_repl.http_api import JsonApiClient, poll_execution_until_complete
 
 
 class BridgeClient(JsonApiClient):
@@ -188,25 +183,13 @@ class BridgeClient(JsonApiClient):
     # Internals
     # ------------------------------------------------------------------
 
-    def _poll_execution(
-        self, initial: dict[str, Any], timeout: float,
-    ) -> dict[str, Any]:
-        """Poll until execution completes or timeout expires."""
-        exec_id = initial["execution_id"]
-        deadline = time.monotonic() + timeout
-        interval = 0.2
-        while time.monotonic() < deadline:
-            time.sleep(interval)
-            result = self._get("/api/notebook/execution", params={"id": exec_id})
-            status = result.get("status")
-            if status not in ("running", "queued"):
-                # Carry forward cell_id and cell_index from the initial response
-                for key in ("cell_id", "cell_index", "operation"):
-                    if key in initial and key not in result:
-                        result[key] = initial[key]
-                return result
-            interval = min(interval * 1.5, 1.0)
-        return {**initial, "status": "timeout", "timeout_seconds": timeout}
+    def _poll_execution(self, initial: dict[str, Any], timeout: float) -> dict[str, Any]:
+        return poll_execution_until_complete(
+            initial,
+            timeout=timeout,
+            fetch_execution=self.execution,
+            in_progress_statuses={"running", "queued"},
+        )
 
     def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
         return super()._post(endpoint, body, timeout=30)

@@ -19,10 +19,12 @@ from unittest import mock
 
 import requests
 
-from agent_repl.cli import BridgeNotebookRuntimeAdapter, build_parser, main
+from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
 from agent_repl.core.server import CoreState, _handler_factory, _load_or_create_state
+from agent_repl.http_api import poll_execution_until_complete
+from agent_repl.notebook_runtime_client import BridgeNotebookRuntimeAdapter
 
 
 def _python_with_ipykernel() -> str:
@@ -35,6 +37,68 @@ def _python_with_ipykernel() -> str:
         if probe.returncode == 0:
             return candidate
     raise RuntimeError("No kernel-capable python executable was found for headless notebook tests")
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP helpers
+# ---------------------------------------------------------------------------
+
+class TestHttpApiHelpers(unittest.TestCase):
+    """Shared HTTP polling helpers preserve execution semantics across clients."""
+
+    def test_poll_execution_until_complete_carries_initial_metadata_forward(self):
+        fetch_execution = mock.Mock(side_effect=[
+            {"status": "running"},
+            {"status": "ok", "outputs": []},
+        ])
+
+        with (
+            mock.patch("agent_repl.http_api.time.sleep"),
+            mock.patch("agent_repl.http_api.time.monotonic", side_effect=[0.0, 0.1, 0.2]),
+        ):
+            result = poll_execution_until_complete(
+                {
+                    "execution_id": "exec-1",
+                    "status": "started",
+                    "cell_id": "cell-1",
+                    "cell_index": 3,
+                    "operation": "execute-cell",
+                },
+                timeout=5,
+                fetch_execution=fetch_execution,
+                in_progress_statuses={"running", "queued", "started"},
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["cell_id"], "cell-1")
+        self.assertEqual(result["cell_index"], 3)
+        self.assertEqual(result["operation"], "execute-cell")
+        self.assertEqual(fetch_execution.call_args_list, [mock.call("exec-1"), mock.call("exec-1")])
+
+    def test_poll_execution_until_complete_returns_timeout_payload(self):
+        fetch_execution = mock.Mock(return_value={"status": "running"})
+
+        with (
+            mock.patch("agent_repl.http_api.time.sleep"),
+            mock.patch("agent_repl.http_api.time.monotonic", side_effect=[0.0, 0.1, 0.2, 0.31]),
+        ):
+            result = poll_execution_until_complete(
+                {"execution_id": "exec-2", "status": "queued", "cell_id": "cell-2"},
+                timeout=0.3,
+                fetch_execution=fetch_execution,
+                in_progress_statuses={"running", "queued"},
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "execution_id": "exec-2",
+                "status": "timeout",
+                "cell_id": "cell-2",
+                "timeout_seconds": 0.3,
+            },
+        )
+        self.assertEqual(fetch_execution.call_count, 2)
 
 
 # ---------------------------------------------------------------------------
