@@ -192,7 +192,6 @@ def call_with_owner_session(
     client: NotebookRuntimeClient,
     operation: Callable[..., dict[str, Any]],
     *args: Any,
-    *,
     explicit_session_id: str | None = None,
     client_type: str = "cli",
     label: str = "CLI",

@@ -162,9 +162,9 @@ def cmd_edit(args: argparse.Namespace) -> int:
     result = call_with_owner_session(
         client,
         client.notebook_edit,
+        args.path,
+        ops,
         explicit_session_id=getattr(args, "session_id", None),
-        path=args.path,
-        operations=ops,
     )
     _out(result, args.pretty)
     return 0
@@ -178,9 +178,9 @@ def cmd_exec(args: argparse.Namespace) -> int:
         result = call_with_owner_session(
             client,
             client.notebook_insert_execute,
+            args.path,
+            args.code,
             explicit_session_id=getattr(args, "session_id", None),
-            path=args.path,
-            source=args.code,
             wait=wait,
             timeout=timeout,
         )
@@ -188,8 +188,8 @@ def cmd_exec(args: argparse.Namespace) -> int:
         result = call_with_owner_session(
             client,
             client.notebook_execute_cell,
+            args.path,
             explicit_session_id=getattr(args, "session_id", None),
-            path=args.path,
             cell_id=args.cell_id,
             wait=wait,
             timeout=timeout,
@@ -213,9 +213,9 @@ def cmd_ix(args: argparse.Namespace) -> int:
         result = call_with_owner_session(
             client,
             client.notebook_insert_execute,
+            args.path,
+            source,
             explicit_session_id=explicit_session_id,
-            path=args.path,
-            source=source,
             at_index=at_index,
             wait=wait,
             timeout=timeout,
@@ -276,8 +276,8 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     result = call_with_owner_session(
         client,
         client.notebook_execute_all,
+        args.path,
         explicit_session_id=getattr(args, "session_id", None),
-        path=args.path,
     )
     _out(result, args.pretty)
     return 0
@@ -295,8 +295,8 @@ def cmd_restart_run_all(args: argparse.Namespace) -> int:
     result = call_with_owner_session(
         client,
         client.notebook_restart_and_run_all,
+        args.path,
         explicit_session_id=getattr(args, "session_id", None),
-        path=args.path,
     )
     _out(result, args.pretty)
     return 0
@@ -520,8 +520,8 @@ def cmd_core(args: argparse.Namespace) -> int:
         result = call_with_owner_session(
             client,
             client.notebook_project_visible,
+            args.path,
             explicit_session_id=getattr(args, "session_id", None),
-            path=args.path,
             cells=_read_json_payload(args, field_name="cells"),
         )
         _out(result, args.pretty)
@@ -532,8 +532,8 @@ def cmd_core(args: argparse.Namespace) -> int:
         result = call_with_owner_session(
             client,
             client.notebook_execute_visible_cell,
+            args.path,
             explicit_session_id=getattr(args, "session_id", None),
-            path=args.path,
             cell_index=args.cell_index,
             source=_read_source(args),
         )

@@ -128,12 +128,12 @@ class TestNotebookRuntimeClientHelpers(unittest.TestCase):
         result = call_with_owner_session(
             client,
             operation,
-            path="nb.ipynb",
+            "nb.ipynb",
             wait=True,
         )
 
         self.assertEqual(result, {"status": "ok"})
-        operation.assert_called_once_with(path="nb.ipynb", wait=True, owner_session_id="sess-vscode")
+        operation.assert_called_once_with("nb.ipynb", wait=True, owner_session_id="sess-vscode")
         client.start_session.assert_not_called()
 
     def test_resolve_owner_session_id_starts_session_when_no_preferred_session_exists(self):
