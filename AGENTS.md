@@ -74,6 +74,7 @@ Notebook files + headless kernels
 - When extending headless execution truth, prefer daemon-owned `execution_id`s and a server-first `notebook_execution()` lookup path before adding new transport complexity. That keeps polling semantics stable while we move execution authority out of editor/projection code.
 - For extension/browser execution UI, prefer hydrating `queued`/`running` cell state from the daemon's notebook status/runtime refresh path when available, and use event-driven local inference only as a fallback. That keeps hidden queue semantics intact while shrinking client-side truth duplication.
 - When the daemon already owns execution truth, carry that same queued/running state through notebook activity payloads too. Runtime refresh and activity polling should not drift into two different notions of execution state.
+- In the legacy extension queue path, collapse duplicate "inspect running state / decide immediate vs queued / build queue payload" code into shared helpers before attempting larger behavioral changes. That keeps the older compatibility path readable while we gradually retire duplicated truth.
 - Before deleting an old helper, search tests for direct patching or mocking of that helper. Some internal methods are part of the regression harness even if they are not public APIs.
 - If a refactor touches run-all, restart-and-run-all, save/flush, notebook switching, or trailing-cell reuse, update the matching behavior-lock docs under `dev/behavior-locks/` in the same change.
 
