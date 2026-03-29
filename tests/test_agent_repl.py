@@ -2100,6 +2100,36 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(final_status, 200)
         self.assertEqual(self.state.runtime_records["rt-1"].status, "idle")
 
+    def test_queue_promotion_emits_activity_event(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
+
+        self.state.start_run(
+            run_id="run-1",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.state.start_run(
+            run_id="run-2",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        events_before = len(self.state.activity_records)
+        self.state.finish_run("run-1", "completed")
+
+        promotion_events = [
+            event for event in self.state.activity_records[events_before:]
+            if event.type == "queue-promotion"
+        ]
+        self.assertEqual(len(promotion_events), 1)
+        self.assertIn("run-2", promotion_events[0].detail)
+
     def test_start_run_recomputes_queue_positions_for_multiple_waiting_runs(self):
         opened, status = self.state.open_document("notebooks/demo.ipynb")
         self.assertEqual(status, 200)

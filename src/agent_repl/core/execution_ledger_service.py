@@ -96,7 +96,9 @@ class ExecutionLedgerService:
         record.updated_at = now
         runtime = self.state.runtime_records.get(record.runtime_id)
         if runtime is not None:
-            self._promote_next_queued_run(runtime)
+            promoted = self._promote_next_queued_run(runtime)
+            if promoted is not None:
+                self._emit_queue_promotion_event(promoted)
             active_runtime_runs = sum(
                 1
                 for item in self.state.run_records.values()
@@ -199,18 +201,29 @@ class ExecutionLedgerService:
         for index, record in enumerate(queued_runs, start=1):
             record.queue_position = index
 
-    def _promote_next_queued_run(self, runtime: Any) -> None:
+    def _promote_next_queued_run(self, runtime: Any) -> Any | None:
         runtime_id = runtime.runtime_id
         has_running = any(record.status == "running" for record in self._runs_for_runtime(runtime_id))
         if has_running or self._runtime_has_live_execution(runtime):
-            return
+            return None
         queued_runs = self._runs_for_runtime(runtime_id, status="queued")
         if not queued_runs:
-            return
+            return None
         next_run = queued_runs[0]
         next_run.status = "running"
         next_run.queue_position = None
         next_run.updated_at = time.time()
+        return next_run
+
+    def _emit_queue_promotion_event(self, promoted_run: Any) -> None:
+        path = promoted_run.target_ref if promoted_run.target_type == "document" else None
+        if path and hasattr(self.state, "_append_activity_event"):
+            self.state._append_activity_event(
+                path=path,
+                event_type="queue-promotion",
+                detail=f"Promoted run {promoted_run.run_id} from queued to running",
+                runtime_id=promoted_run.runtime_id,
+            )
 
     def _runtime_has_live_execution(self, runtime: Any) -> bool:
         document_path = getattr(runtime, "document_path", None)
