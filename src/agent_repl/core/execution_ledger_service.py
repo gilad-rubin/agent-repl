@@ -11,6 +11,7 @@ class ExecutionLedgerService:
     """Own runtime-bound run records and queue promotion rules."""
 
     ACTIVE_RUN_STATUSES = {"queued", "running"}
+    MAX_NOTEBOOK_EXECUTION_RECORDS = 200
 
     def __init__(self, state: Any, *, run_record_type: type[Any]):
         self.state = state
@@ -120,6 +121,65 @@ class ExecutionLedgerService:
         queued = [record.payload() for record in self._runs_for_runtime(runtime_record.runtime_id, status="queued")]
         return running, queued
 
+    def start_notebook_execution(
+        self,
+        *,
+        execution_id: str,
+        path: str,
+        runtime_id: str,
+        cell_id: str,
+        cell_index: int,
+        source_preview: str,
+        owner: str,
+        session_id: str | None,
+        operation: str,
+    ) -> dict[str, Any]:
+        record = {
+            "execution_id": execution_id,
+            "status": "running",
+            "path": path,
+            "runtime_id": runtime_id,
+            "cell_id": cell_id,
+            "cell_index": cell_index,
+            "source_preview": source_preview,
+            "owner": owner,
+            "session_id": session_id,
+            "operation": operation,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+        self.state.execution_records[execution_id] = record
+        self._trim_notebook_execution_records()
+        return dict(record)
+
+    def finish_notebook_execution(
+        self,
+        execution_id: str,
+        *,
+        status: str,
+        outputs: list[Any],
+        execution_count: int | None,
+        error: str | None,
+    ) -> dict[str, Any] | None:
+        record = self.state.execution_records.get(execution_id)
+        if record is None:
+            return None
+        record["status"] = status
+        record["outputs"] = self.state._canonical_outputs(outputs)
+        record["execution_count"] = execution_count
+        record["updated_at"] = time.time()
+        if error:
+            record["error"] = error
+        else:
+            record.pop("error", None)
+        return dict(record)
+
+    def notebook_execution(self, execution_id: str) -> dict[str, Any] | None:
+        record = self.state.execution_records.get(execution_id)
+        if record is None:
+            return None
+        return dict(record)
+
     def _runs_for_runtime(self, runtime_id: str, *, status: str | None = None) -> list[Any]:
         records = [
             record
@@ -167,3 +227,14 @@ class ExecutionLedgerService:
             and live_runtime.runtime_id == runtime.runtime_id
             and (live_runtime.busy or live_runtime.current_execution)
         )
+
+    def _trim_notebook_execution_records(self) -> None:
+        overflow = len(self.state.execution_records) - self.MAX_NOTEBOOK_EXECUTION_RECORDS
+        if overflow <= 0:
+            return
+        ordered = sorted(
+            self.state.execution_records.items(),
+            key=lambda item: (item[1].get("status") == "running", item[1].get("updated_at", 0.0), item[0]),
+        )
+        for execution_id, _record in ordered[:overflow]:
+            self.state.execution_records.pop(execution_id, None)

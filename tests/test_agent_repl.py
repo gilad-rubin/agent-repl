@@ -720,6 +720,12 @@ class TestCoreState(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
+        self.assertIsInstance(body["execution_id"], str)
+        lookup_body, lookup_status = self.state.notebook_execution(body["execution_id"])
+        self.assertEqual(lookup_status, 200)
+        self.assertEqual(lookup_body["status"], "ok")
+        self.assertEqual(lookup_body["cell_id"], body["cell_id"])
+        self.assertEqual(lookup_body["outputs"][0]["data"]["text/plain"], "1")
 
     def test_headless_notebook_round_trip_without_projection_client(self):
         notebook_path = "notebooks/headless.ipynb"
@@ -1388,6 +1394,12 @@ class TestCoreState(unittest.TestCase):
             self.assertIsNotNone(live_body)
             self.assertEqual({item["session_id"] for item in live_body["presence"]}, {"sess-agent", "sess-human"})
             self.assertEqual(live_body["current_execution"]["owner"], "agent")
+            execution_lookup, execution_lookup_status = self.state.notebook_execution(
+                live_body["current_execution"]["execution_id"]
+            )
+            self.assertEqual(execution_lookup_status, 200)
+            self.assertEqual(execution_lookup["status"], "running")
+            self.assertEqual(execution_lookup["cell_id"], live_body["current_execution"]["cell_id"])
             live_cursor = live_body["cursor"]
 
             thread.join(timeout=10)

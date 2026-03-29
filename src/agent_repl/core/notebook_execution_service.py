@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from typing import Any
 
 import nbformat
@@ -22,17 +23,26 @@ class NotebookExecutionService:
         cell_id: str,
         cell_index: int,
         owner_session_id: str | None = None,
+        execution_id: str | None = None,
+        operation: str = "execute-cell",
     ) -> tuple[list[Any], int | None, str | None]:
         with runtime.lock:
             relative_path = self._relative_path(runtime.path)
             actor = self.state._session_actor(owner_session_id, "agent")
+            execution_id = execution_id or str(uuid.uuid4())
+            current_execution = self.state._execution_ledger_service.start_notebook_execution(
+                execution_id=execution_id,
+                path=relative_path,
+                runtime_id=runtime.runtime_id,
+                cell_id=cell_id,
+                cell_index=cell_index,
+                source_preview=source.splitlines()[0][:80] if source else "",
+                owner=actor,
+                session_id=owner_session_id,
+                operation=operation,
+            )
             runtime.busy = True
-            runtime.current_execution = {
-                "cell_id": cell_id,
-                "cell_index": cell_index,
-                "source_preview": source.splitlines()[0][:80] if source else "",
-                "owner": actor,
-            }
+            runtime.current_execution = current_execution
             runtime.last_used_at = time.time()
             self.state._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime, status="busy")
             self.state._append_activity_event(
@@ -163,7 +173,23 @@ class NotebookExecutionService:
                             cell_index=cell_index,
                         )
                 runtime.client.get_shell_msg(timeout=60)
+                self.state._execution_ledger_service.finish_notebook_execution(
+                    execution_id,
+                    status="error" if error_text else "ok",
+                    outputs=outputs,
+                    execution_count=execution_count,
+                    error=error_text,
+                )
                 return outputs, execution_count, error_text
+            except Exception as err:
+                self.state._execution_ledger_service.finish_notebook_execution(
+                    execution_id,
+                    status="error",
+                    outputs=[],
+                    execution_count=None,
+                    error=str(err),
+                )
+                raise
             finally:
                 runtime.busy = False
                 runtime.current_execution = None
@@ -187,6 +213,7 @@ class NotebookExecutionService:
             raise RuntimeError("Only code cells can be executed")
         runtime = self.state._ensure_headless_runtime(real_path)
         stable_cell_id = self.state._cell_id(cell, index)
+        execution_id = str(uuid.uuid4())
         self.state._assert_cell_not_leased(
             relative_path=relative_path,
             cell_id=stable_cell_id,
@@ -206,6 +233,8 @@ class NotebookExecutionService:
             cell_id=stable_cell_id,
             cell_index=index,
             owner_session_id=owner_session_id,
+            execution_id=execution_id,
+            operation="execute-cell",
         )
         actor = self.state._session_actor(owner_session_id, "agent")
         try:
@@ -244,10 +273,12 @@ class NotebookExecutionService:
         return {
             "status": "error" if error_text else "ok",
             "path": relative_path,
+            "execution_id": execution_id,
             "cell_id": stable_cell_id,
             "cell_index": index,
             "outputs": outputs,
             "execution_count": execution_count,
+            "operation": "execute-cell",
             "execution_mode": "headless-runtime",
             "execution_preference": "headless",
             **({"error": error_text} if error_text else {}),

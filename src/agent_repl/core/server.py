@@ -331,6 +331,7 @@ class CoreState:
     branch_records: dict[str, BranchRecord] = field(default_factory=dict)
     runtime_records: dict[str, RuntimeRecord] = field(default_factory=dict)
     run_records: dict[str, RunRecord] = field(default_factory=dict)
+    execution_records: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     activity_records: list[ActivityEventRecord] = field(default_factory=list, repr=False)
     headless_runtimes: dict[str, HeadlessNotebookRuntime] = field(default_factory=dict, repr=False)
     _validated_kernel_pythons: set[str] = field(default_factory=set, init=False, repr=False)
@@ -761,11 +762,14 @@ class CoreState:
         )
 
     def notebook_execution(self, execution_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        payload = self._execution_ledger_service.notebook_execution(execution_id)
+        if payload is not None:
+            return payload, HTTPStatus.OK
         client = self._projection_client(self.workspace_root)
         if client is None:
             return {"error": f"Unknown execution: {execution_id}"}, HTTPStatus.NOT_FOUND
-        payload = client.execution(execution_id)
-        return payload, HTTPStatus.OK
+        fallback_payload = client.execution(execution_id)
+        return fallback_payload, HTTPStatus.OK
 
     def notebook_execute_all(
         self,
@@ -1555,6 +1559,8 @@ class CoreState:
         cell_id: str,
         cell_index: int,
         owner_session_id: str | None = None,
+        execution_id: str | None = None,
+        operation: str = "execute-cell",
     ) -> tuple[list[Any], int | None, str | None]:
         return self._notebook_execution_service.execute_source(
             runtime,
@@ -1562,6 +1568,8 @@ class CoreState:
             cell_id=cell_id,
             cell_index=cell_index,
             owner_session_id=owner_session_id,
+            execution_id=execution_id,
+            operation=operation,
         )
 
     def _headless_notebook_execute_cell(
