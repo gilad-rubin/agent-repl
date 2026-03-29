@@ -586,6 +586,8 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
                 path: requireNotebookPath(),
               });
               dispatch({ type: 'ok', requestId: message.requestId });
+              await loadContents();
+              await loadRuntime();
               break;
             case 'execute-all':
               await ensureAttached();
@@ -639,6 +641,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
                 onSuccess: async () => {
                   dispatch({ type: 'ok', requestId: message.requestId });
                   await loadContents();
+                  await loadRuntime();
                 },
                 onError: async (error: unknown) => {
                   const typedError = error as Error & { conflict?: boolean };
