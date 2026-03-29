@@ -51,6 +51,7 @@ Notebook files + headless kernels
 - CLI notebook commands, the VS Code canvas, and the browser preview reuse the active human workspace session by default when one already exists
 - Prefer typed request/response contracts for notebook operations. Shared request models under `src/agent_repl/core/` are the source of truth for core client/server notebook APIs.
 - Keep `CoreState` moving toward an orchestrator role. Read, mutation, execution, and command wrappers should live in focused service modules instead of accumulating back into `server.py`.
+- Keep collaboration concerns cohesive. Session selection, presence, cell leases, and lease-conflict payloads belong together because notebook services depend on them as one domain.
 - Public subcommands return JSON; top-level help and version output remain plain text
 
 ## Modernization Notes
@@ -61,6 +62,8 @@ Notebook files + headless kernels
   - execution/restart logic
   - session/presence/lease collaboration logic
 - Prefer service modules that compose over `CoreState` rather than new mini-frameworks. The current good pattern is a thin service class with explicit methods and `CoreState` delegation.
+- Preserve lease lock ordering during collaboration refactors: resolve notebook/cell identity under `_notebook_lock`, then mutate lease state under `_lock`.
+- Presence and cell leases are intentionally transient collaboration state. Keep them out of persisted core state unless the product decision explicitly changes.
 - Keep adapters thin. CLI, browser preview, VS Code, and future MCP surfaces should reuse shared contracts and core services rather than re-encoding notebook semantics locally.
 - Before deleting an old helper, search tests for direct patching or mocking of that helper. Some internal methods are part of the regression harness even if they are not public APIs.
 - If a refactor touches run-all, restart-and-run-all, save/flush, notebook switching, or trailing-cell reuse, update the matching behavior-lock docs under `dev/behavior-locks/` in the same change.

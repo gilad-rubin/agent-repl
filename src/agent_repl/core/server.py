@@ -22,7 +22,14 @@ from jupyter_client import KernelManager
 from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
-from agent_repl.core.collaboration import CollaborationConflictError
+from agent_repl.core.collaboration import (
+    CELL_LEASE_TTL_SECONDS,
+    SESSION_CLIENT_RANK,
+    SESSION_STALE_AFTER_SECONDS,
+    SESSION_STATUS_RANK,
+    CollaborationConflictError,
+)
+from agent_repl.core.collaboration_service import CollaborationService
 from agent_repl.core.notebook_http_routes import handle_notebook_post
 from agent_repl.core.notebook_execution_service import NotebookExecutionService
 from agent_repl.core.notebook_mutation_service import NotebookMutationService
@@ -31,19 +38,6 @@ from agent_repl.core.notebook_write_service import NotebookWriteService
 
 
 CORE_VERSION = "0.1.0"
-SESSION_STALE_AFTER_SECONDS = 60.0
-SESSION_STATUS_RANK = {
-    "attached": 3,
-    "stale": 2,
-    "detached": 1,
-}
-SESSION_CLIENT_RANK = {
-    "vscode": 3,
-    "browser": 2,
-    "cli": 1,
-    "worker": 0,
-}
-CELL_LEASE_TTL_SECONDS = 45.0
 STATE_DIRNAME = ".agent-repl"
 STATE_FILENAME = "core-state.json"
 MAX_ACTIVITY_RECORDS = 500
@@ -341,6 +335,7 @@ class CoreState:
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _notebook_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _notebook_locks_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _collaboration_service: CollaborationService = field(init=False, repr=False)
     _notebook_execution_service: NotebookExecutionService = field(init=False, repr=False)
     _notebook_mutation_service: NotebookMutationService = field(init=False, repr=False)
     _notebook_read_service: NotebookReadService = field(init=False, repr=False)
@@ -356,6 +351,11 @@ class CoreState:
         self._last_activity_timestamp = max(
             (record.timestamp for record in self.activity_records),
             default=self.started_at,
+        )
+        self._collaboration_service = CollaborationService(
+            self,
+            cell_lease_record_type=CellLeaseRecord,
+            notebook_presence_record_type=NotebookPresenceRecord,
         )
         self._notebook_execution_service = NotebookExecutionService(self)
         self._notebook_mutation_service = NotebookMutationService(self)
@@ -496,33 +496,16 @@ class CoreState:
             self.persist()
 
     def _clear_session_leases(self, session_id: str) -> None:
-        with self._lock:
-            removed = [key for key, lease in list(self.cell_leases.items()) if lease.session_id == session_id]
-            for key in removed:
-                self.cell_leases.pop(key, None)
+        self._collaboration_service.clear_session_leases(session_id)
 
     def _lease_key(self, relative_path: str, cell_id: str) -> str:
         return f"{relative_path}::{cell_id}"
 
     def _reap_expired_cell_leases(self) -> None:
-        with self._lock:
-            now = time.time()
-            expired = [key for key, lease in list(self.cell_leases.items()) if lease.expires_at <= now]
-            for key in expired:
-                self.cell_leases.pop(key, None)
+        self._collaboration_service.reap_expired_cell_leases()
 
     def _leases_payload_for_path(self, relative_path: str) -> list[dict[str, Any]]:
-        self._reap_expired_cell_leases()
-        with self._lock:
-            leases = [lease for lease in list(self.cell_leases.values()) if lease.path == relative_path]
-            sessions = {session_id: record.payload() for session_id, record in self.session_records.items()}
-        items: list[dict[str, Any]] = []
-        for lease in leases:
-            payload = lease.payload()
-            payload["session"] = sessions.get(lease.session_id)
-            items.append(payload)
-        items.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
-        return items
+        return self._collaboration_service.leases_payload_for_path(relative_path)
 
     def _conflicting_lease(
         self,
@@ -532,26 +515,15 @@ class CoreState:
         owner_session_id: str | None,
         kinds: set[str] | None = None,
     ) -> CellLeaseRecord | None:
-        self._reap_expired_cell_leases()
-        with self._lock:
-            lease = self.cell_leases.get(self._lease_key(relative_path, cell_id))
-        if lease is None:
-            return None
-        if owner_session_id is not None and lease.session_id == owner_session_id:
-            return None
-        if kinds is not None and lease.kind not in kinds:
-            return None
-        return lease
+        return self._collaboration_service.conflicting_lease(
+            relative_path=relative_path,
+            cell_id=cell_id,
+            owner_session_id=owner_session_id,
+            kinds=kinds,
+        )
 
     def _active_structure_leases(self, relative_path: str, owner_session_id: str | None) -> list[CellLeaseRecord]:
-        self._reap_expired_cell_leases()
-        with self._lock:
-            return [
-                lease
-                for lease in list(self.cell_leases.values())
-                if lease.path == relative_path and lease.kind == "structure"
-                and not (owner_session_id is not None and lease.session_id == owner_session_id)
-            ]
+        return self._collaboration_service.active_structure_leases(relative_path, owner_session_id)
 
     def _assert_structure_not_leased(
         self,
@@ -560,18 +532,10 @@ class CoreState:
         owner_session_id: str | None,
         operation: str,
     ) -> None:
-        structure_leases = self._active_structure_leases(relative_path, owner_session_id)
-        if not structure_leases:
-            return
-        lease = structure_leases[0]
-        raise CollaborationConflictError(
-            f"Operation '{operation}' is blocked by an active structure lease",
-            payload=self._lease_conflict_payload(
-                relative_path=relative_path,
-                lease=lease,
-                operation=operation,
-                owner_session_id=owner_session_id,
-            ),
+        self._collaboration_service.assert_structure_not_leased(
+            relative_path=relative_path,
+            owner_session_id=owner_session_id,
+            operation=operation,
         )
 
     def _lease_conflict_payload(
@@ -582,31 +546,12 @@ class CoreState:
         operation: str,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        with self._lock:
-            session = self.session_records.get(lease.session_id)
-            document = next(
-                (record for record in list(self.document_records.values()) if record.relative_path == relative_path),
-                None,
-            )
-        suggested_branch = None
-        if owner_session_id is not None and document is not None:
-            suggested_branch = {
-                "action": "branch-start",
-                "document_id": document.document_id,
-                "owner_session_id": owner_session_id,
-                "reason": "lease-conflict",
-                "title": f"Conflict draft: {operation}",
-            }
-        return {
-            "error": f"Operation '{operation}' is blocked by an active cell lease",
-            "path": relative_path,
-            "conflict": {
-                "lease": lease.payload(),
-                "holder": session.payload() if session is not None else None,
-                "operation": operation,
-                "suggested_branch": suggested_branch,
-            },
-        }
+        return self._collaboration_service.lease_conflict_payload(
+            relative_path=relative_path,
+            lease=lease,
+            operation=operation,
+            owner_session_id=owner_session_id,
+        )
 
     def _assert_cell_not_leased(
         self,
@@ -617,22 +562,12 @@ class CoreState:
         operation: str,
         kinds: set[str] | None = None,
     ) -> None:
-        lease = self._conflicting_lease(
+        self._collaboration_service.assert_cell_not_leased(
             relative_path=relative_path,
             cell_id=cell_id,
             owner_session_id=owner_session_id,
+            operation=operation,
             kinds=kinds,
-        )
-        if lease is None:
-            return
-        raise CollaborationConflictError(
-            f"Operation '{operation}' is blocked by an active lease",
-            payload=self._lease_conflict_payload(
-                relative_path=relative_path,
-                lease=lease,
-                operation=operation,
-                owner_session_id=owner_session_id,
-            ),
         )
 
     def acquire_cell_lease(
@@ -645,72 +580,14 @@ class CoreState:
         kind: str = "edit",
         ttl_seconds: float | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        if kind not in {"edit", "structure"}:
-            return {"error": f"Invalid lease kind: {kind}"}, HTTPStatus.BAD_REQUEST
-        with self._lock:
-            session = self.session_records.get(session_id)
-        if session is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        real_path, relative_path = self._resolve_document_path(path)
-        with self._notebook_lock(real_path):
-            notebook, changed = self._load_notebook(real_path)
-            if changed:
-                self._save_notebook(real_path, notebook)
-            resolved_cell_id = cell_id
-            if resolved_cell_id is None and cell_index is not None:
-                index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
-                resolved_cell_id = self._cell_id(notebook.cells[index], index)
-        if not resolved_cell_id:
-            return {"error": "Missing cell_id or cell_index"}, HTTPStatus.BAD_REQUEST
-        conflict = self._conflicting_lease(
-            relative_path=relative_path,
-            cell_id=resolved_cell_id,
-            owner_session_id=session_id,
-        )
-        if conflict is not None:
-            return self._lease_conflict_payload(
-                relative_path=relative_path,
-                lease=conflict,
-                operation="lease-acquire",
-                owner_session_id=session_id,
-            ), HTTPStatus.CONFLICT
-        key = self._lease_key(relative_path, resolved_cell_id)
-        now = time.time()
-        expires_at = now + (ttl_seconds if ttl_seconds is not None else CELL_LEASE_TTL_SECONDS)
-        with self._lock:
-            existing = self.cell_leases.get(key)
-            created = existing is None
-            if existing is None:
-                lease = CellLeaseRecord(
-                    lease_id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    path=relative_path,
-                    cell_id=resolved_cell_id,
-                    kind=kind,
-                    created_at=now,
-                    updated_at=now,
-                    expires_at=expires_at,
-                )
-                self.cell_leases[key] = lease
-            else:
-                existing.session_id = session_id
-                existing.kind = kind
-                existing.updated_at = now
-                existing.expires_at = expires_at
-                lease = existing
-        self._append_activity_event(
-            path=relative_path,
-            event_type="lease-acquired",
-            detail=f"{session.actor} acquired {kind} lease",
-            actor=session.actor,
+        return self._collaboration_service.acquire_cell_lease(
             session_id=session_id,
-            cell_id=resolved_cell_id,
+            path=path,
+            cell_id=cell_id,
             cell_index=cell_index,
+            kind=kind,
+            ttl_seconds=ttl_seconds,
         )
-        self.persist()
-        payload = lease.payload()
-        payload["session"] = session.payload()
-        return {"status": "ok", "created": created, "lease": payload, "workspace_root": self.workspace_root}, HTTPStatus.OK
 
     def release_cell_lease(
         self,
@@ -720,49 +597,15 @@ class CoreState:
         cell_id: str | None = None,
         cell_index: int | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        with self._lock:
-            session = self.session_records.get(session_id)
-        if session is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        real_path, relative_path = self._resolve_document_path(path)
-        with self._notebook_lock(real_path):
-            notebook, changed = self._load_notebook(real_path)
-            if changed:
-                self._save_notebook(real_path, notebook)
-            resolved_cell_id = cell_id
-            if resolved_cell_id is None and cell_index is not None:
-                index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
-                resolved_cell_id = self._cell_id(notebook.cells[index], index)
-        if not resolved_cell_id:
-            return {"error": "Missing cell_id or cell_index"}, HTTPStatus.BAD_REQUEST
-        key = self._lease_key(relative_path, resolved_cell_id)
-        with self._lock:
-            lease = self.cell_leases.get(key)
-            if lease is None or lease.session_id != session_id:
-                return {"status": "ok", "released": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-            removed = self.cell_leases.pop(key)
-        self._append_activity_event(
-            path=relative_path,
-            event_type="lease-released",
-            detail=f"{session.actor} released {removed.kind} lease",
-            actor=session.actor,
+        return self._collaboration_service.release_cell_lease(
             session_id=session_id,
-            cell_id=resolved_cell_id,
+            path=path,
+            cell_id=cell_id,
             cell_index=cell_index,
         )
-        self.persist()
-        return {"status": "ok", "released": True, "workspace_root": self.workspace_root}, HTTPStatus.OK
 
     def _presence_payload_for_path(self, relative_path: str) -> list[dict[str, Any]]:
-        with self._lock:
-            presence_records = [record.payload() for record in self.notebook_presence.values() if record.path == relative_path]
-            session_payloads = {session_id: record.payload() for session_id, record in self.session_records.items()}
-        items: list[dict[str, Any]] = []
-        for payload in presence_records:
-            payload["session"] = session_payloads.get(payload["session_id"])
-            items.append(payload)
-        items.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
-        return items
+        return self._collaboration_service.presence_payload_for_path(relative_path)
 
     def start_session(
         self,
@@ -809,38 +652,7 @@ class CoreState:
         }
 
     def resolve_preferred_session(self, actor: str = "human") -> dict[str, Any]:
-        self._refresh_session_liveness()
-        best_record: SessionRecord | None = None
-        best_key: tuple[int, int, int, float, float] | None = None
-        with self._lock:
-            sessions = list(self.session_records.values())
-
-        for record in sessions:
-            if record.actor != actor:
-                continue
-            status_rank = SESSION_STATUS_RANK.get(record.status, 0)
-            if status_rank == 0:
-                continue
-            client_rank = SESSION_CLIENT_RANK.get(record.client, 0)
-            editor_rank = 1 if (
-                "editor" in record.capabilities or record.client == "vscode"
-            ) else 0
-            sort_key = (
-                status_rank,
-                editor_rank,
-                client_rank,
-                record.last_seen_at,
-                record.created_at,
-            )
-            if best_key is None or sort_key > best_key:
-                best_key = sort_key
-                best_record = record
-
-        return {
-            "status": "ok",
-            "session": best_record.payload() if best_record else None,
-            "workspace_root": self.workspace_root,
-        }
+        return self._collaboration_service.resolve_preferred_session(actor)
 
     def _refresh_session_liveness(self) -> None:
         with self._lock:
@@ -1072,83 +884,16 @@ class CoreState:
         cell_id: str | None = None,
         cell_index: int | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        with self._lock:
-            session = self.session_records.get(session_id)
-        if session is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        _real_path, relative_path = self._resolve_document_path(path)
-        now = time.time()
-        with self._lock:
-            existing = self.notebook_presence.get(session_id)
-            changed = (
-                existing is None
-                or existing.path != relative_path
-                or existing.activity != activity
-                or existing.cell_id != cell_id
-                or existing.cell_index != cell_index
-            )
-            if existing is None:
-                record = NotebookPresenceRecord(
-                    session_id=session_id,
-                    path=relative_path,
-                    activity=activity,
-                    cell_id=cell_id,
-                    cell_index=cell_index,
-                    created_at=now,
-                    updated_at=now,
-                )
-                self.notebook_presence[session_id] = record
-            else:
-                existing.path = relative_path
-                existing.activity = activity
-                existing.cell_id = cell_id
-                existing.cell_index = cell_index
-                existing.updated_at = now
-                record = existing
-        if changed:
-            self._append_activity_event(
-                path=relative_path,
-                event_type="presence-updated",
-                detail=f"{session.actor} {activity}",
-                actor=session.actor,
-                session_id=session_id,
-                cell_id=cell_id,
-                cell_index=cell_index,
-            )
-        self.persist()
-        payload = record.payload()
-        payload["session"] = session.payload()
-        return {
-            "status": "ok",
-            "presence": payload,
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.upsert_notebook_presence(
+            session_id=session_id,
+            path=path,
+            activity=activity,
+            cell_id=cell_id,
+            cell_index=cell_index,
+        )
 
     def clear_notebook_presence(self, *, session_id: str, path: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
-        with self._lock:
-            session = self.session_records.get(session_id)
-            existing = self.notebook_presence.get(session_id)
-        if existing is None:
-            return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-        if path is not None:
-            _real_path, relative_path = self._resolve_document_path(path)
-            if existing.path != relative_path:
-                return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-        with self._lock:
-            removed = self.notebook_presence.pop(session_id, None)
-        if removed is None:
-            return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-        self._append_activity_event(
-            path=removed.path,
-            event_type="presence-cleared",
-            detail=f"{session.actor if session is not None else 'session'} left notebook",
-            actor=session.actor if session is not None else None,
-            session_id=session_id,
-            cell_id=removed.cell_id,
-            cell_index=removed.cell_index,
-        )
-        self.persist()
-        return {"status": "ok", "cleared": True, "workspace_root": self.workspace_root}, HTTPStatus.OK
+        return self._collaboration_service.clear_notebook_presence(session_id=session_id, path=path)
 
     def notebook_project_visible(
         self,
