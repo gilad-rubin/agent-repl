@@ -1,4 +1,7 @@
 import {
+  shouldReloadStandaloneNotebookContents,
+} from '../src/shared/notebookActivity';
+import {
   buildReplaceSourceOperation,
   buildReplaceSourceOperations,
 } from '../src/shared/notebookEditPayload';
@@ -330,12 +333,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
       });
 
       const events = result.recent_events ?? [];
-      if (events.some((event) => (
-        event.type === 'cell-source-updated' ||
-        event.type === 'cell-inserted' ||
-        event.type === 'cell-removed' ||
-        event.type === 'notebook-reset-needed'
-      ))) {
+      if (shouldReloadStandaloneNotebookContents(events)) {
         await loadContents();
       }
       const activitySnapshot = buildActivitySnapshot(result, {

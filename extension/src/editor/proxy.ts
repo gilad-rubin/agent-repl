@@ -6,6 +6,7 @@ import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as util from 'util';
 import { coreCliPlans, sessionIdForWorkspaceState } from '../session';
+import { collectInlineCellSourceUpdates, isNotebookStructureReloadEvent } from '../shared/notebookActivity';
 import { buildReplaceSourceOperation } from '../shared/notebookEditPayload';
 import { buildActivitySnapshot, buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
 import { NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
@@ -569,19 +570,16 @@ export class DaemonProxy {
 
             const events = result.recent_events ?? [];
             let shouldReloadContents = false;
-            let shouldSyncLsp = false;
+            const sourceUpdates = collectInlineCellSourceUpdates(events);
+            for (const cell of sourceUpdates) {
+                this.upsertCell(cell as CellData);
+            }
             for (const event of events) {
-                if (event.type === 'cell-source-updated' && event.data?.cell) {
-                    this.upsertCell(event.data.cell);
-                    shouldSyncLsp = true;
-                } else if (
-                    event.type === 'cell-inserted' ||
-                    event.type === 'cell-removed' ||
-                    event.type === 'notebook-reset-needed'
-                ) {
+                if (isNotebookStructureReloadEvent(event.type)) {
                     shouldReloadContents = true;
                 }
             }
+            let shouldSyncLsp = sourceUpdates.length > 0;
             if (shouldReloadContents) {
                 await this.loadContents('activity-reload');
                 shouldSyncLsp = false;
