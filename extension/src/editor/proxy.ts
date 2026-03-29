@@ -6,7 +6,7 @@ import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as util from 'util';
 import { coreCliPlans, sessionIdForWorkspaceState } from '../session';
-import { buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
+import { buildActivitySnapshot, buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
 import { NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
 import type { CellData } from './protocol';
 
@@ -588,20 +588,18 @@ export class DaemonProxy {
                 this.syncLsp();
             }
             if (events.length === 0 && !result.runtime) return;
-            const runtimeSnapshot = buildRuntimeSnapshot(result);
+            const activitySnapshot = buildActivitySnapshot(result, {
+                cursorFallback: this.activityCursor,
+                includeDetachedRuntime: true,
+            });
 
             this.postMessage({
                 type: 'activity-update',
-                events: events.map((e: any) => ({
-                    event_id: e.event_id, path: e.path, event_type: e.type,
-                    detail: e.detail, actor: e.actor, session_id: e.session_id,
-                    cell_id: e.cell_id, cell_index: e.cell_index,
-                    data: e.data, timestamp: e.timestamp,
-                })),
-                presence: result.presence ?? [],
-                leases: result.leases ?? [],
-                runtime: runtimeSnapshot,
-                cursor: result.cursor ?? this.activityCursor,
+                events: activitySnapshot.events,
+                presence: activitySnapshot.presence,
+                leases: activitySnapshot.leases,
+                runtime: activitySnapshot.runtime,
+                cursor: activitySnapshot.cursor,
             });
 
             if (typeof result.cursor === 'number') this.activityCursor = result.cursor;

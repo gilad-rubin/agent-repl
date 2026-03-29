@@ -1,4 +1,4 @@
-import { buildRuntimeSnapshot } from '../src/shared/runtimeSnapshot';
+import { buildActivitySnapshot, buildRuntimeSnapshot } from '../src/shared/runtimeSnapshot';
 
 type NotebookOutput = {
   output_type: string;
@@ -334,26 +334,17 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
       ))) {
         await loadContents();
       }
-      const runtimeSnapshot = result.runtime ? buildRuntimeSnapshot(result) : null;
+      const activitySnapshot = buildActivitySnapshot(result, {
+        cursorFallback: activityCursor,
+      });
 
       dispatch({
         type: 'activity-update',
-        events: events.map((event) => ({
-          event_id: event.event_id,
-          path: event.path,
-          event_type: event.type,
-          detail: event.detail,
-          actor: event.actor,
-          session_id: event.session_id,
-          cell_id: event.cell_id,
-          cell_index: event.cell_index,
-          data: event.data,
-          timestamp: event.timestamp,
-        })),
-        presence: result.presence ?? [],
-        leases: result.leases ?? [],
-        runtime: runtimeSnapshot,
-        cursor: result.cursor ?? activityCursor,
+        events: activitySnapshot.events,
+        presence: activitySnapshot.presence,
+        leases: activitySnapshot.leases,
+        runtime: activitySnapshot.runtime,
+        cursor: activitySnapshot.cursor,
       });
 
       if (typeof result.cursor === 'number') {

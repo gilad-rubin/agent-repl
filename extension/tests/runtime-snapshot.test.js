@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const {
+    buildActivitySnapshot,
     buildRuntimeSnapshot,
     deriveRuntimeKernelLabel,
 } = require(path.resolve(__dirname, '../out/shared/runtimeSnapshot.js'));
@@ -76,6 +77,85 @@ test('buildRuntimeSnapshot falls back to runtime records when no live runtime is
             current_execution: { cell_id: 'stale-cell' },
             runtime_id: 'rt-detached',
             kernel_generation: 3,
+        },
+    );
+});
+
+test('buildActivitySnapshot maps event payloads and includes detached runtime only when requested', () => {
+    const payload = {
+        recent_events: [{
+            event_id: 'evt-1',
+            path: 'notebooks/demo.ipynb',
+            type: 'cell-source-updated',
+            detail: 'updated',
+            actor: 'human',
+            session_id: 'sess-1',
+            cell_id: 'cell-1',
+            cell_index: 0,
+            data: { cell: { cell_id: 'cell-1' } },
+            timestamp: 123,
+        }],
+        presence: [{ session_id: 'sess-1' }],
+        leases: [{ cell_id: 'cell-1' }],
+        runtime: null,
+        runtime_record: {
+            label: 'Detached Kernel',
+            runtime_id: 'rt-1',
+            kernel_generation: 4,
+        },
+    };
+
+    assert.deepEqual(
+        buildActivitySnapshot(payload, { cursorFallback: 9 }),
+        {
+            events: [{
+                event_id: 'evt-1',
+                path: 'notebooks/demo.ipynb',
+                event_type: 'cell-source-updated',
+                detail: 'updated',
+                actor: 'human',
+                session_id: 'sess-1',
+                cell_id: 'cell-1',
+                cell_index: 0,
+                data: { cell: { cell_id: 'cell-1' } },
+                timestamp: 123,
+            }],
+            presence: [{ session_id: 'sess-1' }],
+            leases: [{ cell_id: 'cell-1' }],
+            runtime: null,
+            cursor: 9,
+        },
+    );
+
+    assert.deepEqual(
+        buildActivitySnapshot(payload, {
+            cursorFallback: 9,
+            includeDetachedRuntime: true,
+        }),
+        {
+            events: [{
+                event_id: 'evt-1',
+                path: 'notebooks/demo.ipynb',
+                event_type: 'cell-source-updated',
+                detail: 'updated',
+                actor: 'human',
+                session_id: 'sess-1',
+                cell_id: 'cell-1',
+                cell_index: 0,
+                data: { cell: { cell_id: 'cell-1' } },
+                timestamp: 123,
+            }],
+            presence: [{ session_id: 'sess-1' }],
+            leases: [{ cell_id: 'cell-1' }],
+            runtime: {
+                active: false,
+                busy: false,
+                kernel_label: 'Detached Kernel',
+                current_execution: null,
+                runtime_id: 'rt-1',
+                kernel_generation: 4,
+            },
+            cursor: 9,
         },
     );
 });

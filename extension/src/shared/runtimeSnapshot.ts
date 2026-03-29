@@ -20,6 +20,26 @@ export type RuntimeEnvelopeLike = {
     current_execution?: Record<string, unknown> | null;
 };
 
+export type RecentEventLike = {
+    event_id: string;
+    path: string;
+    type: string;
+    detail: string;
+    actor: string;
+    session_id: string;
+    cell_id: string | null;
+    cell_index: number | null;
+    data: unknown;
+    timestamp: number;
+};
+
+export type ActivityEnvelopeLike = RuntimeEnvelopeLike & {
+    recent_events?: RecentEventLike[];
+    presence?: unknown[];
+    leases?: unknown[];
+    cursor?: number;
+};
+
 export type RuntimeSnapshot = {
     active: boolean;
     busy: boolean;
@@ -27,6 +47,27 @@ export type RuntimeSnapshot = {
     runtime_id?: string;
     kernel_generation: number | null;
     current_execution: Record<string, unknown> | null;
+};
+
+export type ActivityEventSnapshot = {
+    event_id: string;
+    path: string;
+    event_type: string;
+    detail: string;
+    actor: string;
+    session_id: string;
+    cell_id: string | null;
+    cell_index: number | null;
+    data: unknown;
+    timestamp: number;
+};
+
+export type ActivitySnapshot = {
+    events: ActivityEventSnapshot[];
+    presence: unknown[];
+    leases: unknown[];
+    runtime: RuntimeSnapshot | null;
+    cursor: number;
 };
 
 function basenameish(raw: string | undefined): string | undefined {
@@ -57,5 +98,37 @@ export function buildRuntimeSnapshot(payload: RuntimeEnvelopeLike): RuntimeSnaps
         runtime_id: runtime?.runtime_id ?? runtimeRecord?.runtime_id,
         kernel_generation: runtime?.kernel_generation ?? runtimeRecord?.kernel_generation ?? null,
         current_execution: runtime?.current_execution ?? payload.current_execution ?? null,
+    };
+}
+
+export function mapActivityEvents(events: RecentEventLike[] | null | undefined): ActivityEventSnapshot[] {
+    return (events ?? []).map((event) => ({
+        event_id: event.event_id,
+        path: event.path,
+        event_type: event.type,
+        detail: event.detail,
+        actor: event.actor,
+        session_id: event.session_id,
+        cell_id: event.cell_id,
+        cell_index: event.cell_index,
+        data: event.data,
+        timestamp: event.timestamp,
+    }));
+}
+
+export function buildActivitySnapshot(
+    payload: ActivityEnvelopeLike,
+    options?: {
+        cursorFallback?: number;
+        includeDetachedRuntime?: boolean;
+    },
+): ActivitySnapshot {
+    const includeDetachedRuntime = options?.includeDetachedRuntime ?? false;
+    return {
+        events: mapActivityEvents(payload.recent_events),
+        presence: payload.presence ?? [],
+        leases: payload.leases ?? [],
+        runtime: payload.runtime || includeDetachedRuntime ? buildRuntimeSnapshot(payload) : null,
+        cursor: payload.cursor ?? options?.cursorFallback ?? 0,
     };
 }
