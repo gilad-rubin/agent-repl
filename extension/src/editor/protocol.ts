@@ -239,7 +239,13 @@ export interface ActivityUpdate {
     events: ActivityEvent[];
     presence: PresenceRecord[];
     leases: LeaseRecord[];
-    runtime: { busy: boolean; kernel_label?: string; current_execution?: any } | null;
+    runtime: {
+        busy: boolean;
+        kernel_label?: string;
+        current_execution?: any;
+        running_cell_ids?: string[];
+        queued_cell_ids?: string[];
+    } | null;
     cursor: number;
 }
 

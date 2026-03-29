@@ -61,6 +61,13 @@ class NotebookReadService:
         real_path, relative_path = self.state._resolve_document_path(path)
         runtime = self.state.headless_runtimes.get(real_path)
         runtime_record = self.state._runtime_record_for_notebook(relative_path)
+        running: list[dict[str, Any]] = []
+        queued: list[dict[str, Any]] = []
+        if runtime_record is not None:
+            running, queued = self.state._execution_ledger_service.notebook_status(
+                runtime=runtime,
+                runtime_record=runtime_record,
+            )
         with self.state._lock:
             events = [
                 record.payload()
@@ -78,4 +85,6 @@ class NotebookReadService:
             "runtime": runtime.payload() if runtime is not None else None,
             "runtime_record": runtime_record.payload() if runtime_record is not None else None,
             "current_execution": runtime.current_execution if runtime is not None else None,
+            "running": running,
+            "queued": queued,
         }, HTTPStatus.OK

@@ -3528,6 +3528,12 @@ function App() {
               ? message.runtime.kernel_generation
               : kernelStatus.kernel_generation ?? null,
             current_execution: (message.runtime.current_execution as Record<string, unknown> | null | undefined) ?? null,
+            running_cell_ids: Array.isArray(message.runtime.running_cell_ids)
+              ? message.runtime.running_cell_ids.filter((cellId: unknown): cellId is string => typeof cellId === 'string')
+              : undefined,
+            queued_cell_ids: Array.isArray(message.runtime.queued_cell_ids)
+              ? message.runtime.queued_cell_ids.filter((cellId: unknown): cellId is string => typeof cellId === 'string')
+              : undefined,
           });
         }
 

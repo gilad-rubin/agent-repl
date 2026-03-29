@@ -2173,6 +2173,40 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual([item["run_id"] for item in body["queued"]], ["run-2"])
         self.assertEqual(body["queued"][0]["queue_position"], 1)
 
+    def test_notebook_activity_reports_server_owned_running_and_queued_runs(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        runtime = self.state.start_runtime(
+            runtime_id="rt-headless",
+            mode="shared",
+            label=None,
+            environment=_python_with_ipykernel(),
+            document_path="notebooks/demo.ipynb",
+        )
+        runtime_id = runtime["runtime"]["runtime_id"]
+        self.state.start_run(
+            run_id="run-1",
+            runtime_id=runtime_id,
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.state.start_run(
+            run_id="run-2",
+            runtime_id=runtime_id,
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+
+        body, status = self.state.notebook_activity("notebooks/demo.ipynb")
+
+        self.assertEqual(status, 200)
+        self.assertEqual([item["run_id"] for item in body["running"]], ["run-1"])
+        self.assertEqual([item["run_id"] for item in body["queued"]], ["run-2"])
+        self.assertEqual(body["queued"][0]["queue_position"], 1)
+
     def test_start_run_rejects_unknown_document_and_branch_targets(self):
         self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
         bad_document_body, bad_document_status = self.state.start_run(

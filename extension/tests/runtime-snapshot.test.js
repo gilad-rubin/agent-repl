@@ -135,6 +135,8 @@ test('buildActivitySnapshot maps event payloads and includes detached runtime on
             runtime_id: 'rt-1',
             kernel_generation: 4,
         },
+        running: [{ run_id: 'run-1', cell_id: 'cell-running' }],
+        queued: [{ run_id: 'run-2', cell_id: 'cell-queued', queue_position: 1 }],
     };
 
     assert.deepEqual(
@@ -186,8 +188,8 @@ test('buildActivitySnapshot maps event payloads and includes detached runtime on
                 current_execution: null,
                 runtime_id: 'rt-1',
                 kernel_generation: 4,
-                running_cell_ids: [],
-                queued_cell_ids: [],
+                running_cell_ids: ['cell-running'],
+                queued_cell_ids: ['cell-queued'],
             },
             cursor: 9,
         },
