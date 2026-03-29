@@ -7,6 +7,7 @@ import * as childProcess from 'child_process';
 import * as util from 'util';
 import { coreCliPlans, sessionIdForWorkspaceState } from '../session';
 import { collectInlineCellSourceUpdates, isNotebookStructureReloadEvent } from '../shared/notebookActivity';
+import { runNotebookCommandFlow } from '../shared/notebookCommandFlow';
 import { buildReplaceSourceOperation } from '../shared/notebookEditPayload';
 import { buildActivitySnapshot, buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
 import { NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
@@ -429,8 +430,9 @@ export class DaemonProxy {
         if (ownerSessionId) {
             body.owner_session_id = ownerSessionId;
         }
-        this.httpPost('/api/notebooks/execute-all', body)
-            .then(async () => {
+        runNotebookCommandFlow({
+            run: () => this.httpPost('/api/notebooks/execute-all', body),
+            onSuccess: async () => {
                 this.postMessage({ type: 'ok', requestId: msg.requestId });
                 await this.refreshNotebookSurfaceAfterSuccess(
                     'execute-all',
@@ -439,19 +441,23 @@ export class DaemonProxy {
                         await this.handleGetRuntime({ requestId: 'execute-all-runtime' });
                     },
                 );
-            })
-            .catch((err: any) => {
+            },
+            onConflict: async (err: any) => {
                 if (this.isSelfLeaseConflict(err, ownerSessionId)) {
                     void this.executeAllViaOwnedCells(msg.requestId, ownerSessionId);
-                    return;
+                    return true;
                 }
+                return false;
+            },
+            onError: async (err: any) => {
                 this.postMessage({
                     type: 'error',
                     requestId: msg.requestId,
                     message: err?.message ?? String(err),
                     conflict: Boolean(err?.conflict),
                 });
-            });
+            },
+        });
     }
 
     private async handleInterruptExecution(msg: any): Promise<void> {
@@ -488,8 +494,9 @@ export class DaemonProxy {
         if (ownerSessionId) {
             body.owner_session_id = ownerSessionId;
         }
-        this.httpPost('/api/notebooks/restart-and-run-all', body)
-            .then(async () => {
+        runNotebookCommandFlow({
+            run: () => this.httpPost('/api/notebooks/restart-and-run-all', body),
+            onSuccess: async () => {
                 this.postMessage({ type: 'ok', requestId: msg.requestId });
                 await this.refreshNotebookSurfaceAfterSuccess(
                     'restart-and-run-all',
@@ -498,19 +505,23 @@ export class DaemonProxy {
                         await this.handleGetRuntime({ requestId: 'restart-and-run-all-runtime' });
                     },
                 );
-            })
-            .catch((err: any) => {
+            },
+            onConflict: async (err: any) => {
                 if (this.isSelfLeaseConflict(err, ownerSessionId)) {
                     void this.restartAndExecuteAllViaOwnedCells(msg.requestId, ownerSessionId);
-                    return;
+                    return true;
                 }
+                return false;
+            },
+            onError: async (err: any) => {
                 this.postMessage({
                     type: 'error',
                     requestId: msg.requestId,
                     message: err?.message ?? String(err),
                     conflict: Boolean(err?.conflict),
                 });
-            });
+            },
+        });
     }
 
     private async handleGetKernels(msg: any): Promise<void> {

@@ -1,6 +1,7 @@
 import {
   shouldReloadStandaloneNotebookContents,
 } from '../src/shared/notebookActivity';
+import { runNotebookCommandFlow } from '../src/shared/notebookCommandFlow';
 import {
   buildReplaceSourceOperation,
   buildReplaceSourceOperations,
@@ -567,20 +568,25 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               break;
             case 'execute-all':
               await ensureAttached();
-              void postJson('/api/standalone/notebook/execute-all', {
-                client_id: clientId,
-                path: requireNotebookPath(),
-              }).then(async () => {
-                dispatch({ type: 'ok', requestId: message.requestId });
-                await loadContents();
-                await loadRuntime();
-              }).catch((error: Error & { conflict?: boolean }) => {
-                dispatch({
-                  type: 'error',
-                  requestId: message.requestId,
-                  message: error.message,
-                  conflict: Boolean(error.conflict),
-                });
+              runNotebookCommandFlow({
+                run: () => postJson('/api/standalone/notebook/execute-all', {
+                  client_id: clientId,
+                  path: requireNotebookPath(),
+                }),
+                onSuccess: async () => {
+                  dispatch({ type: 'ok', requestId: message.requestId });
+                  await loadContents();
+                  await loadRuntime();
+                },
+                onError: async (error: unknown) => {
+                  const typedError = error as Error & { conflict?: boolean };
+                  dispatch({
+                    type: 'error',
+                    requestId: message.requestId,
+                    message: typedError.message,
+                    conflict: Boolean(typedError.conflict),
+                  });
+                },
               });
               break;
             case 'select-kernel':
@@ -604,19 +610,24 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               break;
             case 'restart-and-run-all':
               await ensureAttached();
-              void postJson('/api/standalone/notebook/restart-and-run-all', {
-                client_id: clientId,
-                path: requireNotebookPath(),
-              }).then(async () => {
-                dispatch({ type: 'ok', requestId: message.requestId });
-                await loadContents();
-              }).catch((error: Error & { conflict?: boolean }) => {
-                dispatch({
-                  type: 'error',
-                  requestId: message.requestId,
-                  message: error.message,
-                  conflict: Boolean(error.conflict),
-                });
+              runNotebookCommandFlow({
+                run: () => postJson('/api/standalone/notebook/restart-and-run-all', {
+                  client_id: clientId,
+                  path: requireNotebookPath(),
+                }),
+                onSuccess: async () => {
+                  dispatch({ type: 'ok', requestId: message.requestId });
+                  await loadContents();
+                },
+                onError: async (error: unknown) => {
+                  const typedError = error as Error & { conflict?: boolean };
+                  dispatch({
+                    type: 'error',
+                    requestId: message.requestId,
+                    message: typedError.message,
+                    conflict: Boolean(typedError.conflict),
+                  });
+                },
               });
               break;
             case 'lsp-sync-cell': {
