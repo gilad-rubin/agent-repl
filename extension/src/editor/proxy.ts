@@ -6,6 +6,7 @@ import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as util from 'util';
 import { coreCliPlans, sessionIdForWorkspaceState } from '../session';
+import { buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
 import { NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
 import type { CellData } from './protocol';
 
@@ -531,18 +532,16 @@ export class DaemonProxy {
 
     private async handleGetRuntime(msg: any): Promise<void> {
         const result = await this.httpPost('/api/notebooks/runtime', { path: this.notebookPath });
-        const kernelLabel = result.runtime_record?.label
-            ?? (typeof result.runtime?.python_path === 'string' ? path.basename(result.runtime.python_path) : undefined)
-            ?? (typeof result.runtime?.environment === 'string' ? path.basename(result.runtime.environment) : undefined);
+        const snapshot = buildRuntimeSnapshot(result);
         this.postMessage({
             type: 'runtime',
             requestId: msg.requestId,
-            active: result.active ?? Boolean(result.runtime),
-            busy: result.runtime?.busy ?? false,
-            kernel_label: kernelLabel,
-            runtime_id: result.runtime?.runtime_id ?? result.runtime_record?.runtime_id,
-            kernel_generation: result.runtime?.kernel_generation ?? result.runtime_record?.kernel_generation ?? null,
-            current_execution: result.runtime?.current_execution ?? result.current_execution ?? null,
+            active: snapshot.active,
+            busy: snapshot.busy,
+            kernel_label: snapshot.kernel_label,
+            runtime_id: snapshot.runtime_id,
+            kernel_generation: snapshot.kernel_generation,
+            current_execution: snapshot.current_execution,
         });
     }
 
@@ -589,6 +588,7 @@ export class DaemonProxy {
                 this.syncLsp();
             }
             if (events.length === 0 && !result.runtime) return;
+            const runtimeSnapshot = buildRuntimeSnapshot(result);
 
             this.postMessage({
                 type: 'activity-update',
@@ -600,25 +600,7 @@ export class DaemonProxy {
                 })),
                 presence: result.presence ?? [],
                 leases: result.leases ?? [],
-                runtime: result.runtime
-                    ? {
-                        active: true,
-                        busy: result.runtime.busy ?? false,
-                        current_execution: result.runtime.current_execution ?? result.current_execution ?? null,
-                        runtime_id: result.runtime.runtime_id ?? result.runtime_record?.runtime_id,
-                        kernel_generation: result.runtime.kernel_generation ?? result.runtime_record?.kernel_generation ?? null,
-                        kernel_label: result.runtime_record?.label
-                            ?? (typeof result.runtime.python_path === 'string' ? path.basename(result.runtime.python_path) : undefined)
-                            ?? (typeof result.runtime.environment === 'string' ? path.basename(result.runtime.environment) : undefined),
-                    }
-                    : {
-                        active: false,
-                        busy: false,
-                        current_execution: null,
-                        kernel_label: result.runtime_record?.label ?? undefined,
-                        runtime_id: result.runtime_record?.runtime_id,
-                        kernel_generation: result.runtime_record?.kernel_generation ?? null,
-                    },
+                runtime: runtimeSnapshot,
                 cursor: result.cursor ?? this.activityCursor,
             });
 

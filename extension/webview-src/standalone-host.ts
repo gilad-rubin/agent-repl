@@ -1,3 +1,5 @@
+import { buildRuntimeSnapshot } from '../src/shared/runtimeSnapshot';
+
 type NotebookOutput = {
   output_type: string;
   name?: string;
@@ -272,13 +274,14 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
       client_id: clientId,
       path: requireNotebookPath(),
     });
+    const snapshot = buildRuntimeSnapshot(result);
     dispatch({
       type: 'runtime',
       requestId,
       path: currentNotebookPath,
-      busy: result.runtime?.busy ?? false,
-      kernel_label: result.runtime_record?.label ?? result.runtime?.python_path,
-      current_execution: result.runtime?.current_execution ?? null,
+      busy: snapshot.busy,
+      kernel_label: snapshot.kernel_label,
+      current_execution: snapshot.current_execution,
     });
   };
 
@@ -331,6 +334,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
       ))) {
         await loadContents();
       }
+      const runtimeSnapshot = result.runtime ? buildRuntimeSnapshot(result) : null;
 
       dispatch({
         type: 'activity-update',
@@ -348,13 +352,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
         })),
         presence: result.presence ?? [],
         leases: result.leases ?? [],
-        runtime: result.runtime
-          ? {
-              busy: result.runtime.busy ?? false,
-              kernel_label: result.runtime_record?.label ?? result.runtime.python_path,
-              current_execution: result.runtime.current_execution ?? null,
-            }
-          : null,
+        runtime: runtimeSnapshot,
         cursor: result.cursor ?? activityCursor,
       });
 
