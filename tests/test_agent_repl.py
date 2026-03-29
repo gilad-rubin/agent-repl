@@ -2073,14 +2073,93 @@ class TestCoreState(unittest.TestCase):
             kind="execute",
         )
         self.assertEqual(second_status, 200)
+        self.assertEqual(first_body["run"]["status"], "running")
+        self.assertIsNone(first_body["run"]["queue_position"])
+        self.assertEqual(second_body["run"]["status"], "queued")
+        self.assertEqual(second_body["run"]["queue_position"], 1)
 
         finish_body, finish_status = self.state.finish_run(first_body["run"]["run_id"], "completed")
         self.assertEqual(finish_status, 200)
         self.assertEqual(self.state.runtime_records["rt-1"].status, "busy")
+        self.assertEqual(self.state.run_records["run-2"].status, "running")
+        self.assertIsNone(self.state.run_records["run-2"].queue_position)
 
         final_body, final_status = self.state.finish_run(second_body["run"]["run_id"], "completed")
         self.assertEqual(final_status, 200)
         self.assertEqual(self.state.runtime_records["rt-1"].status, "idle")
+
+    def test_start_run_recomputes_queue_positions_for_multiple_waiting_runs(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
+
+        self.state.start_run(
+            run_id="run-1",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        second_body, second_status = self.state.start_run(
+            run_id="run-2",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.assertEqual(second_status, 200)
+        third_body, third_status = self.state.start_run(
+            run_id="run-3",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.assertEqual(third_status, 200)
+        self.assertEqual(second_body["run"]["queue_position"], 1)
+        self.assertEqual(third_body["run"]["queue_position"], 2)
+
+        finish_body, finish_status = self.state.finish_run("run-1", "completed")
+        self.assertEqual(finish_status, 200)
+        self.assertEqual(finish_body["run"]["status"], "completed")
+        self.assertEqual(self.state.run_records["run-2"].status, "running")
+        self.assertEqual(self.state.run_records["run-3"].status, "queued")
+        self.assertEqual(self.state.run_records["run-3"].queue_position, 1)
+
+    def test_notebook_status_reports_server_owned_running_and_queued_runs(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        runtime = self.state.start_runtime(
+            runtime_id="rt-headless",
+            mode="shared",
+            label=None,
+            environment=_python_with_ipykernel(),
+            document_path="notebooks/demo.ipynb",
+        )
+        runtime_id = runtime["runtime"]["runtime_id"]
+        self.state.start_run(
+            run_id="run-1",
+            runtime_id=runtime_id,
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.state.start_run(
+            run_id="run-2",
+            runtime_id=runtime_id,
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+
+        body, status = self.state.notebook_status("notebooks/demo.ipynb")
+
+        self.assertEqual(status, 200)
+        self.assertEqual([item["run_id"] for item in body["running"]], ["run-1"])
+        self.assertEqual([item["run_id"] for item in body["queued"]], ["run-2"])
+        self.assertEqual(body["queued"][0]["queue_position"], 1)
 
     def test_start_run_rejects_unknown_document_and_branch_targets(self):
         self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)

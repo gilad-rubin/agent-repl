@@ -29,6 +29,7 @@ from agent_repl.core.collaboration_http_routes import (
     handle_collaboration_post,
 )
 from agent_repl.core.document_http_routes import handle_document_get, handle_document_post
+from agent_repl.core.execution_ledger_service import ExecutionLedgerService
 from agent_repl.core.notebook_http_routes import handle_notebook_post
 from agent_repl.core.notebook_execution_service import NotebookExecutionService
 from agent_repl.core.notebook_mutation_service import NotebookMutationService
@@ -197,6 +198,7 @@ class RunRecord:
     status: str
     created_at: float
     updated_at: float
+    queue_position: int | None = None
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -206,6 +208,7 @@ class RunRecord:
             "target_ref": self.target_ref,
             "kind": self.kind,
             "status": self.status,
+            "queue_position": self.queue_position,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -336,6 +339,7 @@ class CoreState:
     _notebook_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _notebook_locks_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _collaboration_service: CollaborationService = field(init=False, repr=False)
+    _execution_ledger_service: ExecutionLedgerService = field(init=False, repr=False)
     _notebook_execution_service: NotebookExecutionService = field(init=False, repr=False)
     _notebook_mutation_service: NotebookMutationService = field(init=False, repr=False)
     _notebook_read_service: NotebookReadService = field(init=False, repr=False)
@@ -359,6 +363,10 @@ class CoreState:
             notebook_presence_record_type=NotebookPresenceRecord,
             branch_record_type=BranchRecord,
             default_session_capabilities=_default_session_capabilities,
+        )
+        self._execution_ledger_service = ExecutionLedgerService(
+            self,
+            run_record_type=RunRecord,
         )
         self._notebook_execution_service = NotebookExecutionService(self)
         self._notebook_mutation_service = NotebookMutationService(self)
@@ -615,9 +623,7 @@ class CoreState:
         self._collaboration_service.refresh_session_liveness()
 
     def _recompute_counts(self) -> None:
-        self.documents = len(self.document_records)
-        self.sessions = len(self.session_records)
-        self.runs = sum(1 for record in self.run_records.values() if record.status in {"queued", "running"})
+        self._execution_ledger_service.recompute_counts()
 
     def persist(self) -> None:
         if self.state_file is None:
@@ -1476,16 +1482,21 @@ class CoreState:
 
     def _headless_notebook_status(self, real_path: str, relative_path: str) -> dict[str, Any]:
         runtime = self.headless_runtimes.get(real_path)
-        running = []
-        if runtime and runtime.current_execution:
-            running.append(runtime.current_execution)
+        runtime_record = self._runtime_record_for_notebook(relative_path)
+        running: list[dict[str, Any]]
+        queued: list[dict[str, Any]]
+        if runtime_record is not None:
+            running, queued = self._execution_ledger_service.notebook_status(runtime=runtime, runtime_record=runtime_record)
+        else:
+            running = [dict(runtime.current_execution)] if runtime and runtime.current_execution else []
+            queued = []
         return {
             "path": relative_path,
             "open": False,
             "kernel_state": "busy" if runtime and runtime.busy else ("idle" if runtime else "not_open"),
             "busy": bool(runtime and runtime.busy),
             "running": running,
-            "queued": [],
+            "queued": queued,
         }
 
     def _create_notebook_cells(self, cells: list[dict[str, Any]] | None) -> list[Any]:
@@ -1954,14 +1965,7 @@ class CoreState:
         }, HTTPStatus.OK
 
     def list_runs_payload(self) -> dict[str, Any]:
-        self._recompute_counts()
-        return {
-            "status": "ok",
-            "runs": [record.payload() for record in self.run_records.values()],
-            "count": len(self.run_records),
-            "active_count": self.runs,
-            "workspace_root": self.workspace_root,
-        }
+        return self._execution_ledger_service.list_runs_payload()
 
     def start_run(
         self,
@@ -1972,67 +1976,16 @@ class CoreState:
         target_ref: str,
         kind: str,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        self._reap_expired_runtimes()
-        runtime = self.runtime_records.get(runtime_id)
-        if runtime is None:
-            return {"error": f"Unknown runtime_id: {runtime_id}"}, HTTPStatus.BAD_REQUEST
-        if runtime.status in {"stopped", "reaped", "failed"}:
-            return {"error": f"Runtime is not runnable: {runtime_id}"}, HTTPStatus.BAD_REQUEST
-        if runtime.status == "recovery-needed":
-            return {"error": f"Runtime requires recovery: {runtime_id}"}, HTTPStatus.BAD_REQUEST
-        if runtime.status == "degraded":
-            return {"error": f"Runtime is degraded and must be recovered before new runs: {runtime_id}"}, HTTPStatus.BAD_REQUEST
-        if target_type == "document" and target_ref not in self.document_records:
-            return {"error": f"Unknown document target_ref: {target_ref}"}, HTTPStatus.BAD_REQUEST
-        if target_type == "branch" and target_ref not in self.branch_records:
-            return {"error": f"Unknown branch target_ref: {target_ref}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        record = RunRecord(
+        return self._execution_ledger_service.start_run(
             run_id=run_id,
             runtime_id=runtime_id,
             target_type=target_type,
             target_ref=target_ref,
             kind=kind,
-            status="running",
-            created_at=now,
-            updated_at=now,
         )
-        self.run_records[run_id] = record
-        self._transition_runtime_record(runtime, "busy", health="healthy", reason=f"run-start:{run_id}")
-        self._recompute_counts()
-        self.persist()
-        return {
-            "status": "ok",
-            "run": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
 
     def finish_run(self, run_id: str, status: str) -> tuple[dict[str, Any], HTTPStatus]:
-        record = self.run_records.get(run_id)
-        if record is None:
-            return {"error": f"Unknown run_id: {run_id}"}, HTTPStatus.NOT_FOUND
-        if status not in {"completed", "failed", "interrupted"}:
-            return {"error": f"Invalid run status: {status}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        record.status = status
-        record.updated_at = now
-        runtime = self.runtime_records.get(record.runtime_id)
-        if runtime is not None:
-            active_runtime_runs = sum(
-                1
-                for item in self.run_records.values()
-                if item.runtime_id == record.runtime_id and item.status in {"queued", "running"}
-            )
-            target_status = "busy" if active_runtime_runs else "idle"
-            target_health = "degraded" if status == "failed" else runtime.health
-            self._transition_runtime_record(runtime, target_status, health=target_health, reason=f"run-finish:{run_id}")
-        self._recompute_counts()
-        self.persist()
-        return {
-            "status": "ok",
-            "run": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._execution_ledger_service.finish_run(run_id, status)
 
 
 def serve_forever(
