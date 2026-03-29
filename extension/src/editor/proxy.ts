@@ -6,10 +6,10 @@ import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as util from 'util';
 import { coreCliPlans, sessionIdForWorkspaceState } from '../session';
-import { collectInlineCellSourceUpdates, isNotebookStructureReloadEvent } from '../shared/notebookActivity';
+import { buildActivityPollResult } from '../shared/notebookActivity';
 import { runNotebookCommandFlow } from '../shared/notebookCommandFlow';
 import { buildReplaceSourceOperation } from '../shared/notebookEditPayload';
-import { buildActivitySnapshot, buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
+import { buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
 import { NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
 import type { CellData } from './protocol';
 
@@ -588,29 +588,22 @@ export class DaemonProxy {
             if (this.activityCursor > 0) body.since = this.activityCursor;
             const result = await this.httpPost('/api/notebooks/activity', body);
 
-            const events = result.recent_events ?? [];
-            let shouldReloadContents = false;
-            const sourceUpdates = collectInlineCellSourceUpdates(events);
-            for (const cell of sourceUpdates) {
-                this.upsertCell(cell as CellData);
-            }
-            for (const event of events) {
-                if (isNotebookStructureReloadEvent(event.type)) {
-                    shouldReloadContents = true;
-                }
-            }
-            let shouldSyncLsp = sourceUpdates.length > 0;
-            if (shouldReloadContents) {
-                await this.loadContents('activity-reload');
-                shouldSyncLsp = false;
-            } else if (shouldSyncLsp) {
-                this.syncLsp();
-            }
-            if (events.length === 0 && !result.runtime) return;
-            const activitySnapshot = buildActivitySnapshot(result, {
+            const activityResult = buildActivityPollResult(result, {
                 cursorFallback: this.activityCursor,
                 includeDetachedRuntime: true,
+                inlineSourceUpdates: true,
+                reloadOnSourceUpdates: false,
             });
+            for (const cell of activityResult.sourceUpdates) {
+                this.upsertCell(cell as CellData);
+            }
+            if (activityResult.shouldReloadContents) {
+                await this.loadContents('activity-reload');
+            } else if (activityResult.shouldSyncLsp) {
+                this.syncLsp();
+            }
+            const activitySnapshot = activityResult.activityUpdate;
+            if (!activitySnapshot) return;
 
             this.postMessage({
                 type: 'activity-update',

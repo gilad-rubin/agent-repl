@@ -1,12 +1,12 @@
 import {
-  shouldReloadStandaloneNotebookContents,
+  buildActivityPollResult,
 } from '../src/shared/notebookActivity';
 import { runNotebookCommandFlow } from '../src/shared/notebookCommandFlow';
 import {
   buildReplaceSourceOperation,
   buildReplaceSourceOperations,
 } from '../src/shared/notebookEditPayload';
-import { buildActivitySnapshot, buildRuntimeSnapshot } from '../src/shared/runtimeSnapshot';
+import { buildRuntimeSnapshot } from '../src/shared/runtimeSnapshot';
 
 type NotebookOutput = {
   output_type: string;
@@ -349,13 +349,18 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
         since: activityCursor > 0 ? activityCursor : undefined,
       });
 
-      const events = result.recent_events ?? [];
-      if (shouldReloadStandaloneNotebookContents(events)) {
+      const activityResult = buildActivityPollResult(result, {
+        cursorFallback: activityCursor,
+        reloadOnSourceUpdates: true,
+        inlineSourceUpdates: false,
+      });
+      if (activityResult.shouldReloadContents) {
         await loadContents();
       }
-      const activitySnapshot = buildActivitySnapshot(result, {
-        cursorFallback: activityCursor,
-      });
+      const activitySnapshot = activityResult.activityUpdate;
+      if (!activitySnapshot) {
+        return;
+      }
 
       dispatch({
         type: 'activity-update',

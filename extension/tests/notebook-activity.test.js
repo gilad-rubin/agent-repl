@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const {
+    buildActivityPollResult,
     collectInlineCellSourceUpdates,
     isNotebookStructureReloadEvent,
     shouldReloadStandaloneNotebookContents,
@@ -39,4 +40,57 @@ test('collectInlineCellSourceUpdates returns only concrete cell payloads', () =>
         ]),
         [{ cell_id: 'cell-1', source: 'x = 1' }],
     );
+});
+
+test('buildActivityPollResult preserves proxy-style inline source updates without forcing a reload', () => {
+    const result = buildActivityPollResult({
+        recent_events: [
+            { event_id: '1', path: 'demo.ipynb', type: 'cell-source-updated', detail: '', actor: 'human', session_id: 'sess', cell_id: 'cell-1', cell_index: 0, data: { cell: { cell_id: 'cell-1', source: 'print(1)' } }, timestamp: 1 },
+        ],
+        runtime: {
+            busy: true,
+        },
+    }, {
+        cursorFallback: 7,
+        includeDetachedRuntime: true,
+        inlineSourceUpdates: true,
+        reloadOnSourceUpdates: false,
+    });
+
+    assert.deepEqual(result.sourceUpdates, [{ cell_id: 'cell-1', source: 'print(1)' }]);
+    assert.equal(result.shouldReloadContents, false);
+    assert.equal(result.shouldSyncLsp, true);
+    assert.equal(result.activityUpdate?.cursor, 7);
+    assert.equal(result.activityUpdate?.events[0]?.event_type, 'cell-source-updated');
+  });
+
+test('buildActivityPollResult preserves standalone reload-on-source-update behavior', () => {
+    const result = buildActivityPollResult({
+        recent_events: [
+            { event_id: '1', path: 'demo.ipynb', type: 'cell-source-updated', detail: '', actor: 'human', session_id: 'sess', cell_id: 'cell-1', cell_index: 0, data: { cell: { cell_id: 'cell-1', source: 'print(1)' } }, timestamp: 1 },
+        ],
+    }, {
+        cursorFallback: 3,
+        reloadOnSourceUpdates: true,
+        inlineSourceUpdates: false,
+    });
+
+    assert.deepEqual(result.sourceUpdates, [{ cell_id: 'cell-1', source: 'print(1)' }]);
+    assert.equal(result.shouldReloadContents, true);
+    assert.equal(result.shouldSyncLsp, false);
+    assert.equal(result.activityUpdate?.cursor, 3);
+  });
+
+test('buildActivityPollResult skips activity updates when there are no events and no runtime payload', () => {
+    const result = buildActivityPollResult({
+        recent_events: [],
+    }, {
+        cursorFallback: 11,
+        includeDetachedRuntime: true,
+    });
+
+    assert.deepEqual(result.sourceUpdates, []);
+    assert.equal(result.shouldReloadContents, false);
+    assert.equal(result.shouldSyncLsp, false);
+    assert.equal(result.activityUpdate, null);
 });
