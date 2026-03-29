@@ -2343,7 +2343,8 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(restored.runtime_records["rt-1"].status, "recovery-needed")
         self.assertEqual(restored.run_records[run_body["run"]["run_id"]].status, "interrupted")
         self.assertTrue(any(event.type == "runtime-state-changed" for event in restored.activity_records))
-        self.assertTrue(Path(restored.state_file).exists())
+        db_path = Path(str(self.workspace_root)) / ".agent-repl" / "core-state.db"
+        self.assertTrue(db_path.exists())
 
     def test_runtime_state_changes_are_visible_in_notebook_activity(self):
         notebook_path = "notebooks/runtime-transitions.ipynb"

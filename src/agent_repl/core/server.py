@@ -337,6 +337,7 @@ class CoreState:
     _notebook_mutation_service: NotebookMutationService = field(init=False, repr=False)
     _notebook_read_service: NotebookReadService = field(init=False, repr=False)
     _notebook_write_service: NotebookWriteService = field(init=False, repr=False)
+    _db: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = os.path.realpath(self.workspace_root)
@@ -619,9 +620,21 @@ class CoreState:
         self._execution_ledger_service.recompute_counts()
 
     def persist(self) -> None:
-        if self.state_file is None:
-            return
         with self._lock:
+            if self._db is not None:
+                from agent_repl.core.db import persist_all
+                persist_all(
+                    self._db,
+                    sessions=[r.payload() for r in self.session_records.values()],
+                    documents=[r.payload() for r in self.document_records.values()],
+                    branches=[r.payload() for r in self.branch_records.values()],
+                    runtimes=[r.payload() for r in self.runtime_records.values()],
+                    runs=[r.payload() for r in self.run_records.values()],
+                    activity=[r.payload() for r in self.activity_records],
+                )
+                return
+            if self.state_file is None:
+                return
             Path(self.state_file).parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "version": self.version,
@@ -2211,40 +2224,36 @@ def _load_or_create_state(
     pid: int,
     started_at: float,
 ) -> CoreState:
+    from agent_repl.core.db import load_all, migrate_from_json, open_db
+
     state_file = _state_file_path(workspace_root)
-    if not os.path.exists(state_file):
-        return CoreState(
+    db = open_db(workspace_root)
+
+    # Migrate from JSON if the old state file still exists.
+    migrate_from_json(db, state_file)
+
+    data = load_all(db)
+
+    def _new_state(**extra: Any) -> CoreState:
+        s = CoreState(
             workspace_root=workspace_root,
             runtime_dir=runtime_dir,
             token=token,
             pid=pid,
             started_at=started_at,
             state_file=state_file,
+            **extra,
         )
+        s._db = db
+        return s
 
-    try:
-        payload = json.loads(Path(state_file).read_text())
-    except Exception:
-        return CoreState(
-            workspace_root=workspace_root,
-            runtime_dir=runtime_dir,
-            token=token,
-            pid=pid,
-            started_at=started_at,
-            state_file=state_file,
-        )
+    if not any(data.values()):
+        return _new_state()
 
-    state = CoreState(
-        workspace_root=workspace_root,
-        runtime_dir=runtime_dir,
-        token=token,
-        pid=pid,
-        started_at=started_at,
-        state_file=state_file,
-        version=str(payload.get("version") or CORE_VERSION),
+    state = _new_state(
         session_records={
             record["session_id"]: SessionRecord(**record)
-            for record in payload.get("sessions", [])
+            for record in data.get("sessions", [])
             if isinstance(record, dict) and isinstance(record.get("session_id"), str)
         },
         document_records={
@@ -2259,27 +2268,27 @@ def _load_or_create_state(
                 created_at=record["created_at"],
                 updated_at=record["updated_at"],
             )
-            for record in payload.get("documents", [])
+            for record in data.get("documents", [])
             if isinstance(record, dict) and isinstance(record.get("document_id"), str)
         },
         branch_records={
             record["branch_id"]: BranchRecord(**record)
-            for record in payload.get("branches", [])
+            for record in data.get("branches", [])
             if isinstance(record, dict) and isinstance(record.get("branch_id"), str)
         },
         runtime_records={
             record["runtime_id"]: RuntimeRecord(**record)
-            for record in payload.get("runtimes", [])
+            for record in data.get("runtimes", [])
             if isinstance(record, dict) and isinstance(record.get("runtime_id"), str)
         },
         run_records={
             record["run_id"]: RunRecord(**record)
-            for record in payload.get("runs", [])
+            for record in data.get("runs", [])
             if isinstance(record, dict) and isinstance(record.get("run_id"), str)
         },
         activity_records=[
             ActivityEventRecord(**record)
-            for record in payload.get("activity", [])
+            for record in data.get("activity", [])
             if isinstance(record, dict) and isinstance(record.get("event_id"), str)
         ],
     )
