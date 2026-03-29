@@ -23,24 +23,10 @@ from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
 from agent_repl.core.collaboration import CollaborationConflictError
+from agent_repl.core.notebook_http_routes import handle_notebook_post
 from agent_repl.core.notebook_execution_service import NotebookExecutionService
 from agent_repl.core.notebook_mutation_service import NotebookMutationService
 from agent_repl.core.notebook_read_service import NotebookReadService
-from agent_repl.core.notebook_requests import (
-    NotebookActivityRequest,
-    NotebookCreateRequest,
-    NotebookEditRequest,
-    NotebookExecuteCellRequest,
-    NotebookExecuteVisibleCellRequest,
-    NotebookExecutionLookupRequest,
-    NotebookInsertExecuteRequest,
-    NotebookLeaseAcquireRequest,
-    NotebookLeaseReleaseRequest,
-    NotebookPathRequest,
-    NotebookProjectVisibleRequest,
-    NotebookSelectKernelRequest,
-    NotebookSessionPathRequest,
-)
 from agent_repl.core.notebook_write_service import NotebookWriteService
 
 
@@ -2700,179 +2686,9 @@ def _handler_factory(state: CoreState):
                     body, status = state.rebind_document(document_id)
                     self._json(status, body)
                     return
-                if self.path == "/api/notebooks/contents":
-                    request = self._parse_request(payload, NotebookPathRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_contents(request.path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/status":
-                    request = self._parse_request(payload, NotebookPathRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_status(request.path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/create":
-                    request = self._parse_request(payload, NotebookCreateRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_create(
-                        request.path,
-                        cells=request.cells,
-                        kernel_id=request.kernel_id,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/edit":
-                    request = self._parse_request(payload, NotebookEditRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_edit(request.path, request.operations, owner_session_id=request.owner_session_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/select-kernel":
-                    request = self._parse_request(payload, NotebookSelectKernelRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_select_kernel(request.path, kernel_id=request.kernel_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/execute-cell":
-                    request = self._parse_request(payload, NotebookExecuteCellRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_execute_cell(
-                        request.path,
-                        cell_id=request.cell_id,
-                        cell_index=request.cell_index,
-                        owner_session_id=request.owner_session_id,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/insert-and-execute":
-                    request = self._parse_request(payload, NotebookInsertExecuteRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_insert_execute(
-                        request.path,
-                        source=request.source,
-                        cell_type=request.cell_type,
-                        at_index=request.at_index,
-                        owner_session_id=request.owner_session_id,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/execution":
-                    request = self._parse_request(payload, NotebookExecutionLookupRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_execution(request.execution_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/interrupt":
-                    request = self._parse_request(payload, NotebookPathRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_interrupt(request.path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/runtime":
-                    request = self._parse_request(payload, NotebookPathRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_runtime(request.path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/projection":
-                    request = self._parse_request(payload, NotebookPathRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_projection(request.path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/activity":
-                    request = self._parse_request(payload, NotebookActivityRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_activity(request.path, since=request.since)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/project-visible":
-                    request = self._parse_request(payload, NotebookProjectVisibleRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_project_visible(
-                        request.path,
-                        cells=request.cells,
-                        owner_session_id=request.owner_session_id,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/execute-visible-cell":
-                    request = self._parse_request(payload, NotebookExecuteVisibleCellRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_execute_visible_cell(
-                        request.path,
-                        cell_index=request.cell_index,
-                        source=request.source,
-                        owner_session_id=request.owner_session_id,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/lease/acquire":
-                    request = self._parse_request(payload, NotebookLeaseAcquireRequest)
-                    if request is None:
-                        return
-                    body, status = state.acquire_cell_lease(
-                        session_id=request.session_id,
-                        path=request.path,
-                        cell_id=request.cell_id,
-                        cell_index=request.cell_index,
-                        kind=request.kind,
-                        ttl_seconds=request.ttl_seconds,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/lease/release":
-                    request = self._parse_request(payload, NotebookLeaseReleaseRequest)
-                    if request is None:
-                        return
-                    body, status = state.release_cell_lease(
-                        session_id=request.session_id,
-                        path=request.path,
-                        cell_id=request.cell_id,
-                        cell_index=request.cell_index,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/restart":
-                    request = self._parse_request(payload, NotebookPathRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_restart(request.path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/execute-all":
-                    request = self._parse_request(payload, NotebookSessionPathRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_execute_all(
-                        request.path,
-                        owner_session_id=request.owner_session_id,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/restart-and-run-all":
-                    request = self._parse_request(payload, NotebookSessionPathRequest)
-                    if request is None:
-                        return
-                    body, status = state.notebook_restart_and_run_all(
-                        request.path,
-                        owner_session_id=request.owner_session_id,
-                    )
+                notebook_route = handle_notebook_post(state, self.path, payload)
+                if notebook_route is not None:
+                    status, body = notebook_route
                     self._json(status, body)
                     return
                 if self.path == "/api/branches/start":
@@ -3059,13 +2875,6 @@ def _handler_factory(state: CoreState):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except Exception as err:  # pragma: no cover - exercised via integration test
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
-
-        def _parse_request(self, payload: dict[str, Any], request_type: Any) -> Any | None:
-            try:
-                return request_type.from_payload(payload)
-            except ValueError as err:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": str(err)})
-                return None
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
             # Keep the daemon quiet unless we decide to surface structured logs later.
