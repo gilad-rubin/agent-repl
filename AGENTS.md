@@ -23,6 +23,9 @@ uv run agent-repl reload --pretty        # confirm which built extension/routes 
 - Prefer writing the failing test first when the harness is practical; if you need to explore or patch first, still add the test in the same change before finishing.
 - Do not ship behavior changes without the narrowest relevant automated coverage in Python tests, extension tests, or both.
 - If a request cannot be covered with an automated test, call out the gap explicitly in the final report and explain why.
+- During modernization refactors, treat hidden UX decisions as locked product behavior. If a user would notice it, add or update a behavior-lock test before moving internals.
+- Preserve intentional test seams when extracting services. If a regression test patches a `CoreState` helper such as `_execute_source`, keep a delegate seam or replace it with an equally direct hook instead of silently removing it.
+- Prefer a two-layer regression pass for core refactors: run the tight targeted subset for the touched seam first, then rerun the full Python suite before committing.
 
 ## Documentation Sync Default
 
@@ -46,7 +49,21 @@ Notebook files + headless kernels
 - The VS Code extension is now primarily a projection and editor-integration layer: custom canvas editor, prompt cells, kernel discovery, reload, and compatibility routes
 - The browser preview and the VS Code canvas both render the same bundle from `extension/webview-src/main.tsx`
 - CLI notebook commands, the VS Code canvas, and the browser preview reuse the active human workspace session by default when one already exists
+- Prefer typed request/response contracts for notebook operations. Shared request models under `src/agent_repl/core/` are the source of truth for core client/server notebook APIs.
+- Keep `CoreState` moving toward an orchestrator role. Read, mutation, execution, and command wrappers should live in focused service modules instead of accumulating back into `server.py`.
 - Public subcommands return JSON; top-level help and version output remain plain text
+
+## Modernization Notes
+
+- When extracting code out of `src/agent_repl/core/server.py`, group by cohesive responsibility:
+  - read/projection APIs
+  - mutation/edit/project-visible logic
+  - execution/restart logic
+  - session/presence/lease collaboration logic
+- Prefer service modules that compose over `CoreState` rather than new mini-frameworks. The current good pattern is a thin service class with explicit methods and `CoreState` delegation.
+- Keep adapters thin. CLI, browser preview, VS Code, and future MCP surfaces should reuse shared contracts and core services rather than re-encoding notebook semantics locally.
+- Before deleting an old helper, search tests for direct patching or mocking of that helper. Some internal methods are part of the regression harness even if they are not public APIs.
+- If a refactor touches run-all, restart-and-run-all, save/flush, notebook switching, or trailing-cell reuse, update the matching behavior-lock docs under `dev/behavior-locks/` in the same change.
 
 ## Coupling
 
@@ -78,6 +95,7 @@ API changes usually require updating multiple layers together:
 - Recompiling does NOT update an installed extension under `~/.vscode/extensions/` — reinstall the `.vsix` or use Extension Development Host
 - The browser preview does not exercise VS Code messaging, kernel attach, or custom-editor lifecycle. Before signoff on integration-sensitive changes, verify once in the Extension Development Host or installed extension.
 - The browser preview does exercise the standalone session-selection path. If preview and VS Code disagree on lease behavior, inspect how the active human session is being reused before changing lease rules.
+- Dirty-draft behavior around execute-all, restart-and-run-all, and notebook switching is high-risk. If you touch those flows, add or tighten explicit regression coverage instead of relying on current behavior by inference.
 - `browserCanvasUrl` lets the installed extension prefer preview-served `canvas.js` and `canvas.css` on loopback, with a fallback to packaged assets. If preview and installed UI disagree, suspect asset drift first.
 - If CLI behavior disagrees with the repo source, suspect installed-extension drift before debugging notebook state. `agent-repl reload --pretty` reports the live `extension_root` and `routes_module`; verify those paths point at the build you meant to test.
 
@@ -126,6 +144,7 @@ When a multi-method attach or selection attempt fails, return ALL diagnostics so
 - Source input pattern (`-s`, `--source-file`, stdin) is shared across `ix`, `respond`, `edit replace-source`, `edit insert` — keep consistent
 - Cell targeting (`--cell-id` or `-i INDEX`) is shared across cell-specific commands — keep consistent
 - For notebook mutations and executions, treat omitted `--session-id` as meaningful behavior: the CLI should reuse the preferred active human session when possible instead of inventing a fresh owner
+- When adding or changing core-backed notebook commands, prefer shaping the request through shared notebook request-contract helpers instead of open-coded dictionaries.
 
 </important>
 
