@@ -22,7 +22,9 @@ from jupyter_client import KernelManager
 from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
+from agent_repl.core.collaboration import CollaborationConflictError
 from agent_repl.core.notebook_read_service import NotebookReadService
+from agent_repl.core.notebook_write_service import NotebookWriteService
 
 
 CORE_VERSION = "0.1.0"
@@ -55,12 +57,6 @@ RUNTIME_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "recovery-needed": {"provisioning", "stopped", "reaped"},
     "ready": {"recovery-needed"},
 }
-
-
-class CollaborationConflictError(RuntimeError):
-    def __init__(self, message: str, *, payload: dict[str, Any] | None = None):
-        super().__init__(message)
-        self.payload = payload or {"error": message}
 
 
 @dataclass
@@ -343,6 +339,7 @@ class CoreState:
     _notebook_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _notebook_locks_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _notebook_read_service: NotebookReadService = field(init=False, repr=False)
+    _notebook_write_service: NotebookWriteService = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = os.path.realpath(self.workspace_root)
@@ -356,6 +353,7 @@ class CoreState:
             default=self.started_at,
         )
         self._notebook_read_service = NotebookReadService(self)
+        self._notebook_write_service = NotebookWriteService(self)
         self._recompute_counts()
 
     def _next_activity_timestamp(self) -> float:
@@ -980,11 +978,7 @@ class CoreState:
         cells: list[dict[str, Any]] | None,
         kernel_id: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        with self._notebook_lock(real_path):
-            payload = self._headless_notebook_create(real_path, relative_path, cells=cells, kernel_id=kernel_id)
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.create(path, cells=cells, kernel_id=kernel_id)
 
     def notebook_edit(
         self,
@@ -993,14 +987,7 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_edit(real_path, relative_path, operations, owner_session_id=owner_session_id)
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.edit(path, operations, owner_session_id=owner_session_id)
 
     def notebook_execute_cell(
         self,
@@ -1010,20 +997,12 @@ class CoreState:
         cell_index: int | None,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_execute_cell(
-                    real_path,
-                    relative_path,
-                    cell_id=cell_id,
-                    cell_index=cell_index,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.execute_cell(
+            path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            owner_session_id=owner_session_id,
+        )
 
     def notebook_insert_execute(
         self,
@@ -1034,21 +1013,13 @@ class CoreState:
         at_index: int,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_insert_execute(
-                    real_path,
-                    relative_path,
-                    source=source,
-                    cell_type=cell_type,
-                    at_index=at_index,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.insert_execute(
+            path,
+            source=source,
+            cell_type=cell_type,
+            at_index=at_index,
+            owner_session_id=owner_session_id,
+        )
 
     def notebook_execution(self, execution_id: str) -> tuple[dict[str, Any], HTTPStatus]:
         client = self._projection_client(self.workspace_root)
@@ -1063,47 +1034,10 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_execute_all(
-                    real_path,
-                    relative_path,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.execute_all(path, owner_session_id=owner_session_id)
 
     def notebook_interrupt(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        if runtime is None:
-            return {"status": "ok", "interrupted": False, "reason": "no-runtime"}, HTTPStatus.OK
-        current_execution = runtime.current_execution
-        if not current_execution:
-            return {"status": "ok", "interrupted": False, "reason": "idle"}, HTTPStatus.OK
-        try:
-            runtime.manager.interrupt_kernel()
-        except Exception as err:
-            return {"error": f"Failed to interrupt execution: {err}"}, HTTPStatus.INTERNAL_SERVER_ERROR
-        self._append_activity_event(
-            path=relative_path,
-            event_type="execution-interrupt-requested",
-            detail="Interrupt requested for current execution",
-            actor="agent",
-            session_id=None,
-            runtime_id=runtime.runtime_id,
-            cell_id=current_execution.get("cell_id"),
-            cell_index=current_execution.get("cell_index"),
-        )
-        self.persist()
-        return {
-            "status": "ok",
-            "interrupted": True,
-            "current_execution": current_execution,
-        }, HTTPStatus.OK
+        return self._notebook_write_service.interrupt(path)
 
     def notebook_select_kernel(
         self,
@@ -1111,34 +1045,7 @@ class CoreState:
         *,
         kernel_id: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        python_path = self._resolve_python_path(kernel_id)
-        venv_path = os.path.join(self.workspace_root, ".venv", "bin", "python")
-        source_hint = venv_path if not kernel_id and os.path.exists(venv_path) else None
-        self._ensure_kernel_capable_python(python_path, source_hint=source_hint)
-        existing = self.headless_runtimes.get(real_path)
-        if existing is not None and existing.python_path == python_path:
-            existing.last_used_at = time.time()
-        else:
-            if existing is not None:
-                self._shutdown_headless_runtime(real_path)
-            self._ensure_headless_runtime(real_path, kernel_id=python_path)
-        runtime = self.headless_runtimes.get(real_path)
-        if runtime is not None:
-            self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime)
-            self.persist()
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "kernel": {
-                "id": python_path,
-                "label": Path(python_path).name,
-                "python": python_path,
-                "type": "headless",
-            },
-            "message": f"Selected kernel: {python_path}",
-            "mode": "headless",
-        }, HTTPStatus.OK
+        return self._notebook_write_service.select_kernel(path, kernel_id=kernel_id)
 
     def notebook_runtime(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         return self._notebook_read_service.runtime(path)
@@ -1243,24 +1150,7 @@ class CoreState:
         cells: list[dict[str, Any]],
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        if runtime is None:
-            runtime = self._ensure_headless_runtime(real_path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_project_visible(
-                    real_path,
-                    relative_path,
-                    cells=cells,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime)
-        self.persist()
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.project_visible(path, cells=cells, owner_session_id=owner_session_id)
 
     def notebook_execute_visible_cell(
         self,
@@ -1270,31 +1160,15 @@ class CoreState:
         source: str,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        if runtime is None:
-            runtime = self._ensure_headless_runtime(real_path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_execute_visible_cell(
-                    real_path,
-                    relative_path,
-                    cell_index=cell_index,
-                    source=source,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime)
-        self.persist()
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.execute_visible_cell(
+            path,
+            cell_index=cell_index,
+            source=source,
+            owner_session_id=owner_session_id,
+        )
 
     def notebook_restart(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_restart(real_path, relative_path)
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.restart(path)
 
     def notebook_restart_and_run_all(
         self,
@@ -1302,18 +1176,7 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_restart_and_run_all(
-                    real_path,
-                    relative_path,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.restart_and_run_all(path, owner_session_id=owner_session_id)
 
     def refresh_document(self, document_id: str) -> tuple[dict[str, Any], HTTPStatus]:
         record = self.document_records.get(document_id)
