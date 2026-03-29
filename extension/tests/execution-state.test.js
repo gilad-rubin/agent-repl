@@ -38,3 +38,60 @@ test('resolveIdleExecutionTransition only completes executing cells when no fail
         pausedIds: [],
     });
 });
+
+test('queueExecutionBuckets removes newly queued cells from executing, failed, and paused sets', () => {
+    const { queueExecutionBuckets } = loadExecutionStateModule();
+
+    const result = queueExecutionBuckets({
+        queuedIds: ['cell-1'],
+        executingIds: ['cell-2'],
+        failedCellIds: ['cell-2', 'cell-3'],
+        pausedCellIds: ['cell-3', 'cell-4'],
+    }, ['cell-2', 'cell-3']);
+
+    assert.deepEqual(result, {
+        queuedIds: ['cell-1', 'cell-2', 'cell-3'],
+        executingIds: [],
+        failedCellIds: [],
+        pausedCellIds: ['cell-4'],
+    });
+});
+
+test('startExecutionBuckets promotes cells into executing while clearing queued, failed, and paused entries', () => {
+    const { startExecutionBuckets } = loadExecutionStateModule();
+
+    const result = startExecutionBuckets({
+        queuedIds: ['cell-1', 'cell-2'],
+        executingIds: ['cell-3'],
+        failedCellIds: ['cell-2', 'cell-4'],
+        pausedCellIds: ['cell-1', 'cell-5'],
+    }, ['cell-1', 'cell-4']);
+
+    assert.deepEqual(result, {
+        queuedIds: ['cell-2'],
+        executingIds: ['cell-3', 'cell-1', 'cell-4'],
+        failedCellIds: ['cell-2'],
+        pausedCellIds: ['cell-5'],
+    });
+});
+
+test('syncExecutionBuckets keeps server-owned queued and running ids while clearing stale failures and pauses', () => {
+    const { syncExecutionBuckets } = loadExecutionStateModule();
+
+    const result = syncExecutionBuckets({
+        queuedIds: ['old-queued'],
+        executingIds: ['old-running'],
+        failedCellIds: ['cell-queued', 'cell-failed'],
+        pausedCellIds: ['cell-running', 'cell-paused'],
+    }, {
+        queuedIds: ['cell-queued'],
+        executingIds: ['cell-running'],
+    });
+
+    assert.deepEqual(result, {
+        queuedIds: ['cell-queued'],
+        executingIds: ['cell-running'],
+        failedCellIds: ['cell-failed'],
+        pausedCellIds: ['cell-paused'],
+    });
+});

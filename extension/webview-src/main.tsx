@@ -37,7 +37,12 @@ import { PageFeedbackToolbarCSS } from 'agentation';
 import { CodeMirrorCell, CodeMirrorCellHandle } from './codemirror-cell';
 import { createStandaloneHost, readStandaloneConfig } from './standalone-host';
 import { deriveCellStatusKind, type CellStatusKind } from '../src/shared/cellStatus';
-import { resolveIdleExecutionTransition } from '../src/shared/executionState';
+import {
+  queueExecutionBuckets,
+  resolveIdleExecutionTransition,
+  startExecutionBuckets,
+  syncExecutionBuckets,
+} from '../src/shared/executionState';
 import { decideNotebookCommandKeyAction } from '../src/shared/notebookCommandController';
 import '@carbon/styles/css/styles.css';
 import './styles.css';
@@ -2361,20 +2366,12 @@ function App() {
     }
 
     const nextQueuedIds = Array.from(new Set(cellIds));
-    const queuedIds = Array.from(new Set([...stateRef.current.queuedIds, ...nextQueuedIds]));
-    const executingIds = stateRef.current.executingIds.filter((cellId) => !nextQueuedIds.includes(cellId));
-    const failedCellIds = stateRef.current.failedCellIds.filter((cellId) => !nextQueuedIds.includes(cellId));
-    const pausedCellIds = stateRef.current.pausedCellIds.filter((cellId) => !nextQueuedIds.includes(cellId));
-    updateExecutionStateRef({
-      queuedIds,
-      executingIds,
-      failedCellIds,
-      pausedCellIds,
-    });
-    setQueuedIds((current) => Array.from(new Set([...current, ...nextQueuedIds])));
-    setExecutingIds((current) => current.filter((cellId) => !nextQueuedIds.includes(cellId)));
-    setFailedCellIds((current) => current.filter((cellId) => !nextQueuedIds.includes(cellId)));
-    setPausedCellIds((current) => current.filter((cellId) => !nextQueuedIds.includes(cellId)));
+    const nextState = queueExecutionBuckets(stateRef.current, nextQueuedIds);
+    updateExecutionStateRef(nextState);
+    setQueuedIds(nextState.queuedIds);
+    setExecutingIds(nextState.executingIds);
+    setFailedCellIds(nextState.failedCellIds);
+    setPausedCellIds(nextState.pausedCellIds);
     setCompletedTimes((current) => {
       const nextTimes = { ...current };
       for (const cellId of nextQueuedIds) {
@@ -2392,20 +2389,12 @@ function App() {
 
     const nextExecutingIds = Array.from(new Set(cellIds));
     const startedAt = Date.now();
-    const queuedIds = stateRef.current.queuedIds.filter((cellId) => !nextExecutingIds.includes(cellId));
-    const executingIds = Array.from(new Set([...stateRef.current.executingIds, ...nextExecutingIds]));
-    const failedCellIds = stateRef.current.failedCellIds.filter((cellId) => !nextExecutingIds.includes(cellId));
-    const pausedCellIds = stateRef.current.pausedCellIds.filter((cellId) => !nextExecutingIds.includes(cellId));
-    updateExecutionStateRef({
-      queuedIds,
-      executingIds,
-      failedCellIds,
-      pausedCellIds,
-    });
-    setQueuedIds((current) => current.filter((cellId) => !nextExecutingIds.includes(cellId)));
-    setExecutingIds((current) => Array.from(new Set([...current, ...nextExecutingIds])));
-    setFailedCellIds((current) => current.filter((cellId) => !nextExecutingIds.includes(cellId)));
-    setPausedCellIds((current) => current.filter((cellId) => !nextExecutingIds.includes(cellId)));
+    const nextState = startExecutionBuckets(stateRef.current, nextExecutingIds);
+    updateExecutionStateRef(nextState);
+    setQueuedIds(nextState.queuedIds);
+    setExecutingIds(nextState.executingIds);
+    setFailedCellIds(nextState.failedCellIds);
+    setPausedCellIds(nextState.pausedCellIds);
     setCompletedTimes((current) => {
       const nextTimes = { ...current };
       for (const cellId of nextExecutingIds) {
@@ -3003,22 +2992,15 @@ function App() {
           executionStartRef.current.get(cellId) ?? startedAt,
         );
       }
-      const nextFailedIds = stateRef.current.failedCellIds.filter(
-        (cellId) => !nextQueuedIds.includes(cellId) && !nextExecutingIds.includes(cellId),
-      );
-      const nextPausedIds = stateRef.current.pausedCellIds.filter(
-        (cellId) => !nextQueuedIds.includes(cellId) && !nextExecutingIds.includes(cellId),
-      );
-      setQueuedIds(nextQueuedIds);
-      setExecutingIds(nextExecutingIds);
-      setFailedCellIds(nextFailedIds);
-      setPausedCellIds(nextPausedIds);
-      updateExecutionStateRef({
+      const nextState = syncExecutionBuckets(stateRef.current, {
         queuedIds: nextQueuedIds,
         executingIds: nextExecutingIds,
-        failedCellIds: nextFailedIds,
-        pausedCellIds: nextPausedIds,
       });
+      setQueuedIds(nextState.queuedIds);
+      setExecutingIds(nextState.executingIds);
+      setFailedCellIds(nextState.failedCellIds);
+      setPausedCellIds(nextState.pausedCellIds);
+      updateExecutionStateRef(nextState);
     }
     if (!runtime.busy && !runtime.current_execution) {
       const current = stateRef.current;
