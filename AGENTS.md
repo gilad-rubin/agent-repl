@@ -81,6 +81,7 @@ Notebook files + headless kernels
 - Treat `handleRuntimeUpdate` the same way: runtime-active sync and idle resolution should come from a shared reduction helper, with `main.tsx` only committing buckets plus timing side effects.
 - For cross-surface polling, prefer one shared “interpret activity poll result” helper with explicit options for surface-specific policy such as reload-on-source-update or inline-source-apply. Do not duplicate event scanning logic across the editor proxy and standalone host.
 - For post-command refresh behavior, consult the shared `postCommandRefreshSpec` in `extension/src/shared/postCommandRefresh.ts`. Both the proxy and standalone host must agree on which commands reload contents, runtime, or both. If a new command is added, add its refresh policy to the shared spec first.
+- The core daemon now uses a Starlette ASGI app (`src/agent_repl/core/asgi.py`) served by uvicorn instead of `ThreadingHTTPServer`. Auth is handled by `TokenAuthMiddleware`. Domain route modules still use the `(HTTPStatus, dict) | None` handler pattern; the ASGI app adapts them through a catch-all dispatcher. New routes should be added to the appropriate domain route module.
 - Before deleting an old helper, search tests for direct patching or mocking of that helper. Some internal methods are part of the regression harness even if they are not public APIs.
 - If a refactor touches run-all, restart-and-run-all, save/flush, notebook switching, or trailing-cell reuse, update the matching behavior-lock docs under `dev/behavior-locks/` in the same change.
 

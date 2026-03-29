@@ -22,7 +22,7 @@ import requests
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
-from agent_repl.core.server import CoreState, _handler_factory, _load_or_create_state
+from agent_repl.core.server import CoreState, _load_or_create_state
 from agent_repl.http_api import poll_execution_until_complete
 from agent_repl.notebook_runtime_client import (
     BridgeNotebookRuntimeAdapter,
@@ -4957,17 +4957,24 @@ class TestServerRobustness(unittest.TestCase):
 
         state.finish_run = boom  # type: ignore[method-assign]
 
-        from http.server import ThreadingHTTPServer
         import threading
+        import uvicorn
+        from agent_repl.core.asgi import create_app
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_factory(state))
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        app = create_app(state)
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
+        uv_server = uvicorn.Server(config)
+        thread = threading.Thread(target=uv_server.run, daemon=True)
         thread.start()
-        self.addCleanup(thread.join, 2)
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
+        # Wait for the server to start
+        import time
+        for _ in range(50):
+            if uv_server.started:
+                break
+            time.sleep(0.05)
+        self.addCleanup(lambda: setattr(uv_server, "should_exit", True))
 
-        port = server.server_address[1]
+        port = uv_server.servers[0].sockets[0].getsockname()[1]
         client = CoreClient(f"http://127.0.0.1:{port}", "tok")
 
         with self.assertRaisesRegex(RuntimeError, "boom for run-1:completed"):

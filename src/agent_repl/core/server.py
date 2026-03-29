@@ -13,7 +13,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -24,18 +23,11 @@ from jupyter_client.kernelspec import KernelSpec
 from agent_repl.client import BridgeClient
 from agent_repl.core.collaboration import CollaborationConflictError
 from agent_repl.core.collaboration_service import CollaborationService
-from agent_repl.core.collaboration_http_routes import (
-    handle_collaboration_get,
-    handle_collaboration_post,
-)
-from agent_repl.core.document_http_routes import handle_document_get, handle_document_post
 from agent_repl.core.execution_ledger_service import ExecutionLedgerService
-from agent_repl.core.notebook_http_routes import handle_notebook_post
 from agent_repl.core.notebook_execution_service import NotebookExecutionService
 from agent_repl.core.notebook_mutation_service import NotebookMutationService
 from agent_repl.core.notebook_read_service import NotebookReadService
 from agent_repl.core.notebook_write_service import NotebookWriteService
-from agent_repl.core.runtime_http_routes import handle_runtime_get, handle_runtime_post
 
 
 CORE_VERSION = "0.1.0"
@@ -2003,6 +1995,12 @@ def serve_forever(
     token: str | None = None,
     port: int = 0,
 ) -> None:
+    import socket
+
+    import uvicorn
+
+    from agent_repl.core.asgi import create_app
+
     workspace_root = os.path.realpath(workspace_root)
     runtime_dir = os.path.realpath(runtime_dir)
     token = token or secrets.token_hex(24)
@@ -2015,19 +2013,32 @@ def serve_forever(
     )
     Path(runtime_dir).mkdir(parents=True, exist_ok=True)
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), _handler_factory(state))
-    actual_port = server.server_address[1]
+    # Resolve an ephemeral port before uvicorn starts so we can write
+    # the runtime metadata file with the real port.
+    if port == 0:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
     runtime_file = os.path.join(runtime_dir, f"agent-repl-core-{state.pid}.json")
     state.runtime_file = runtime_file
     Path(runtime_file).write_text(json.dumps({
         "pid": state.pid,
-        "port": actual_port,
+        "port": port,
         "token": token,
         "version": state.version,
         "code_hash": _current_package_hash(),
         "workspace_root": workspace_root,
         "started_at": state.started_at,
     }))
+
+    config = uvicorn.Config(
+        create_app(state, shutdown_callback=lambda: setattr(server, "should_exit", True)),
+        host="127.0.0.1",
+        port=port,
+        log_level="error",
+    )
+    server = uvicorn.Server(config)
 
     startup_hash = _current_package_hash()
 
@@ -2036,7 +2047,7 @@ def serve_forever(
             time.sleep(60)
             try:
                 if _current_package_hash() != startup_hash:
-                    server.shutdown()
+                    server.should_exit = True
                     return
             except Exception:
                 continue
@@ -2045,120 +2056,16 @@ def serve_forever(
     watchdog.start()
 
     try:
-        server.serve_forever(poll_interval=0.2)
+        server.run()
     finally:
         try:
             state.shutdown_headless_runtimes()
-            server.server_close()
         finally:
             if state.runtime_file:
                 try:
                     os.unlink(state.runtime_file)
                 except OSError:
                     pass
-
-
-def _handler_factory(state: CoreState):
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            try:
-                if not _authorized(self.headers.get("Authorization"), state.token):
-                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
-                    return
-
-                if self.path == "/api/health":
-                    self._json(HTTPStatus.OK, state.health_payload())
-                    return
-                if self.path == "/api/status":
-                    self._json(HTTPStatus.OK, state.status_payload())
-                    return
-                document_route = handle_document_get(state, self.path)
-                if document_route is not None:
-                    status, body = document_route
-                    self._json(status, body)
-                    return
-                collaboration_route = handle_collaboration_get(state, self.path)
-                if collaboration_route is not None:
-                    status, body = collaboration_route
-                    self._json(status, body)
-                    return
-                runtime_route = handle_runtime_get(state, self.path)
-                if runtime_route is not None:
-                    status, body = runtime_route
-                    self._json(status, body)
-                    return
-
-                self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
-            except Exception as err:  # pragma: no cover - exercised via integration test
-                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
-
-        def do_POST(self) -> None:  # noqa: N802
-            try:
-                if not _authorized(self.headers.get("Authorization"), state.token):
-                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
-                    return
-
-                payload = self._body()
-
-                if self.path == "/api/shutdown":
-                    self._json(HTTPStatus.OK, {"status": "ok", "stopping": True, "pid": state.pid})
-                    threading.Thread(target=self.server.shutdown, daemon=True).start()
-                    return
-                document_route = handle_document_post(state, self.path, payload)
-                if document_route is not None:
-                    status, body = document_route
-                    self._json(status, body)
-                    return
-                notebook_route = handle_notebook_post(state, self.path, payload)
-                if notebook_route is not None:
-                    status, body = notebook_route
-                    self._json(status, body)
-                    return
-                collaboration_route = handle_collaboration_post(state, self.path, payload)
-                if collaboration_route is not None:
-                    status, body = collaboration_route
-                    self._json(status, body)
-                    return
-                runtime_route = handle_runtime_post(state, self.path, payload)
-                if runtime_route is not None:
-                    status, body = runtime_route
-                    self._json(status, body)
-                    return
-
-                self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
-            except Exception as err:  # pragma: no cover - exercised via integration test
-                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
-
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
-            # Keep the daemon quiet unless we decide to surface structured logs later.
-            return
-
-        def _json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(status.value)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def _body(self) -> dict[str, Any]:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0:
-                return {}
-            raw = self.rfile.read(length)
-            if not raw:
-                return {}
-            try:
-                data = json.loads(raw.decode("utf-8"))
-            except ValueError:
-                return {}
-            return data if isinstance(data, dict) else {}
-
-    return Handler
-
-
-def _authorized(header: str | None, token: str) -> bool:
-    return header == f"token {token}"
 
 
 def _path_within(candidate: str, root: str) -> bool:
