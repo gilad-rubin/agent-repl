@@ -22,13 +22,7 @@ from jupyter_client import KernelManager
 from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
-from agent_repl.core.collaboration import (
-    CELL_LEASE_TTL_SECONDS,
-    SESSION_CLIENT_RANK,
-    SESSION_STALE_AFTER_SECONDS,
-    SESSION_STATUS_RANK,
-    CollaborationConflictError,
-)
+from agent_repl.core.collaboration import CollaborationConflictError
 from agent_repl.core.collaboration_service import CollaborationService
 from agent_repl.core.notebook_http_routes import handle_notebook_post
 from agent_repl.core.notebook_execution_service import NotebookExecutionService
@@ -354,8 +348,11 @@ class CoreState:
         )
         self._collaboration_service = CollaborationService(
             self,
+            session_record_type=SessionRecord,
             cell_lease_record_type=CellLeaseRecord,
             notebook_presence_record_type=NotebookPresenceRecord,
+            branch_record_type=BranchRecord,
+            default_session_capabilities=_default_session_capabilities,
         )
         self._notebook_execution_service = NotebookExecutionService(self)
         self._notebook_mutation_service = NotebookMutationService(self)
@@ -404,14 +401,7 @@ class CoreState:
         return payload
 
     def list_sessions_payload(self) -> dict[str, Any]:
-        self._refresh_session_liveness()
-        self._recompute_counts()
-        return {
-            "status": "ok",
-            "sessions": [record.payload() for record in self.session_records.values()],
-            "count": self.sessions,
-            "workspace_root": self.workspace_root,
-        }
+        return self._collaboration_service.list_sessions_payload()
 
     def _append_activity_event(
         self,
@@ -479,21 +469,10 @@ class CoreState:
         return record
 
     def _clear_session_presence(self, session_id: str) -> None:
-        with self._lock:
-            self.notebook_presence.pop(session_id, None)
+        self._collaboration_service.clear_session_presence(session_id)
 
     def _refresh_session_leases(self, session_id: str) -> None:
-        with self._lock:
-            now = time.time()
-            changed = False
-            for lease in list(self.cell_leases.values()):
-                if lease.session_id != session_id:
-                    continue
-                lease.updated_at = now
-                lease.expires_at = now + CELL_LEASE_TTL_SECONDS
-                changed = True
-        if changed:
-            self.persist()
+        self._collaboration_service.refresh_session_leases(session_id)
 
     def _clear_session_leases(self, session_id: str) -> None:
         self._collaboration_service.clear_session_leases(session_id)
@@ -615,55 +594,19 @@ class CoreState:
         session_id: str,
         capabilities: list[str] | None = None,
     ) -> dict[str, Any]:
-        now = time.time()
-        resolved_capabilities = capabilities or _default_session_capabilities(client)
-        existing = self.session_records.get(session_id)
-        if existing is None:
-            record = SessionRecord(
-                session_id=session_id,
-                actor=actor,
-                client=client,
-                label=label,
-                status="attached",
-                capabilities=resolved_capabilities,
-                resume_count=0,
-                created_at=now,
-                last_seen_at=now,
-            )
-            self.session_records[session_id] = record
-            created = True
-        else:
-            existing.actor = actor
-            existing.client = client
-            existing.label = label
-            existing.status = "attached"
-            existing.capabilities = resolved_capabilities
-            existing.resume_count += 1
-            existing.last_seen_at = now
-            record = existing
-            created = False
-        self.sessions = len(self.session_records)
-        self.persist()
-        return {
-            "status": "ok",
-            "created": created,
-            "session": record.payload(),
-            "workspace_root": self.workspace_root,
-        }
+        return self._collaboration_service.start_session(
+            actor,
+            client,
+            label,
+            session_id,
+            capabilities=capabilities,
+        )
 
     def resolve_preferred_session(self, actor: str = "human") -> dict[str, Any]:
         return self._collaboration_service.resolve_preferred_session(actor)
 
     def _refresh_session_liveness(self) -> None:
-        with self._lock:
-            now = time.time()
-            changed = False
-            for record in self.session_records.values():
-                if record.status == "attached" and (now - record.last_seen_at) > SESSION_STALE_AFTER_SECONDS:
-                    record.status = "stale"
-                    changed = True
-        if changed:
-            self.persist()
+        self._collaboration_service.refresh_session_liveness()
 
     def _recompute_counts(self) -> None:
         self.documents = len(self.document_records)
@@ -691,48 +634,13 @@ class CoreState:
             os.replace(tmp_path, self.state_file)
 
     def touch_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        record = self.session_records.get(session_id)
-        if record is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        record.status = "attached"
-        record.last_seen_at = time.time()
-        self._refresh_session_leases(session_id)
-        self.persist()
-        return {
-            "status": "ok",
-            "session": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.touch_session(session_id)
 
     def detach_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        record = self.session_records.get(session_id)
-        if record is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        record.status = "detached"
-        record.last_seen_at = time.time()
-        self._clear_session_presence(session_id)
-        self._clear_session_leases(session_id)
-        self.persist()
-        return {
-            "status": "ok",
-            "session": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.detach_session(session_id)
 
     def end_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        record = self.session_records.pop(session_id, None)
-        self.sessions = len(self.session_records)
-        if record is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        self._clear_session_presence(session_id)
-        self._clear_session_leases(session_id)
-        self.persist()
-        return {
-            "status": "ok",
-            "ended": True,
-            "session_id": session_id,
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.end_session(session_id)
 
     def list_documents_payload(self) -> dict[str, Any]:
         self._recompute_counts()
@@ -1482,12 +1390,7 @@ class CoreState:
         return normalized
 
     def _session_actor(self, session_id: str | None, fallback: str | None = None) -> str | None:
-        if session_id is None:
-            return fallback
-        session = self.session_records.get(session_id)
-        if session is None:
-            return fallback
-        return session.actor
+        return self._collaboration_service.session_actor(session_id, fallback)
 
     def _cell_payload(self, cell: Any, index: int) -> dict[str, Any]:
         is_code = cell.cell_type == "code"
@@ -1793,48 +1696,17 @@ class CoreState:
         title: str | None,
         purpose: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        if branch_id in self.branch_records:
-            return {"error": f"Duplicate branch_id: {branch_id}"}, HTTPStatus.BAD_REQUEST
-        if document_id not in self.document_records:
-            return {"error": f"Unknown document_id: {document_id}"}, HTTPStatus.BAD_REQUEST
-        if owner_session_id is not None and owner_session_id not in self.session_records:
-            return {"error": f"Unknown owner_session_id: {owner_session_id}"}, HTTPStatus.BAD_REQUEST
-        if parent_branch_id is not None and parent_branch_id not in self.branch_records:
-            return {"error": f"Unknown parent_branch_id: {parent_branch_id}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        record = BranchRecord(
+        return self._collaboration_service.start_branch(
             branch_id=branch_id,
             document_id=document_id,
             owner_session_id=owner_session_id,
             parent_branch_id=parent_branch_id,
             title=title,
             purpose=purpose,
-            status="active",
-            created_at=now,
-            updated_at=now,
         )
-        self.branch_records[branch_id] = record
-        self.persist()
-        return {
-            "status": "ok",
-            "branch": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
 
     def finish_branch(self, branch_id: str, status: str) -> tuple[dict[str, Any], HTTPStatus]:
-        if status not in {"merged", "rejected", "abandoned"}:
-            return {"error": f"Invalid branch status: {status}"}, HTTPStatus.BAD_REQUEST
-        record = self.branch_records.get(branch_id)
-        if record is None:
-            return {"error": f"Unknown branch_id: {branch_id}"}, HTTPStatus.NOT_FOUND
-        record.status = status
-        record.updated_at = time.time()
-        self.persist()
-        return {
-            "status": "ok",
-            "branch": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.finish_branch(branch_id, status)
 
     def request_branch_review(
         self,
@@ -1843,38 +1715,11 @@ class CoreState:
         requested_by_session_id: str,
         note: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        branch = self.branch_records.get(branch_id)
-        if branch is None:
-            return {"error": f"Unknown branch_id: {branch_id}"}, HTTPStatus.NOT_FOUND
-        if branch.status != "active":
-            return {"error": f"Branch is not reviewable in status '{branch.status}'"}, HTTPStatus.BAD_REQUEST
-        session = self.session_records.get(requested_by_session_id)
-        if session is None:
-            return {"error": f"Unknown requested_by_session_id: {requested_by_session_id}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        branch.review_status = "requested"
-        branch.review_requested_by_session_id = requested_by_session_id
-        branch.review_requested_at = now
-        branch.review_resolved_by_session_id = None
-        branch.review_resolved_at = None
-        branch.review_resolution = None
-        branch.review_note = note
-        branch.updated_at = now
-        document = self.document_records.get(branch.document_id)
-        if document is not None:
-            self._append_activity_event(
-                path=document.relative_path,
-                event_type="review-requested",
-                detail=f"{session.actor} requested review for branch {branch_id}",
-                actor=session.actor,
-                session_id=requested_by_session_id,
-            )
-        self.persist()
-        return {
-            "status": "ok",
-            "branch": branch.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.request_branch_review(
+            branch_id=branch_id,
+            requested_by_session_id=requested_by_session_id,
+            note=note,
+        )
 
     def resolve_branch_review(
         self,
@@ -1884,38 +1729,12 @@ class CoreState:
         resolution: str,
         note: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        if resolution not in {"approved", "changes-requested", "rejected"}:
-            return {"error": f"Invalid review resolution: {resolution}"}, HTTPStatus.BAD_REQUEST
-        branch = self.branch_records.get(branch_id)
-        if branch is None:
-            return {"error": f"Unknown branch_id: {branch_id}"}, HTTPStatus.NOT_FOUND
-        if branch.review_status != "requested":
-            return {"error": f"Branch review is not pending for {branch_id}"}, HTTPStatus.BAD_REQUEST
-        session = self.session_records.get(resolved_by_session_id)
-        if session is None:
-            return {"error": f"Unknown resolved_by_session_id: {resolved_by_session_id}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        branch.review_status = "resolved"
-        branch.review_resolved_by_session_id = resolved_by_session_id
-        branch.review_resolved_at = now
-        branch.review_resolution = resolution
-        branch.review_note = note or branch.review_note
-        branch.updated_at = now
-        document = self.document_records.get(branch.document_id)
-        if document is not None:
-            self._append_activity_event(
-                path=document.relative_path,
-                event_type="review-resolved",
-                detail=f"{session.actor} resolved branch {branch_id} review as {resolution}",
-                actor=session.actor,
-                session_id=resolved_by_session_id,
-            )
-        self.persist()
-        return {
-            "status": "ok",
-            "branch": branch.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.resolve_branch_review(
+            branch_id=branch_id,
+            resolved_by_session_id=resolved_by_session_id,
+            resolution=resolution,
+            note=note,
+        )
 
     def list_runtimes_payload(self) -> dict[str, Any]:
         self._reap_expired_runtimes()
