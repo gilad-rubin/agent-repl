@@ -72,6 +72,7 @@ Notebook files + headless kernels
 - For Piece 2 execution work, treat the daemon run ledger as the source of truth for `queued` and run promotion, but do not let ledger transitions trample a live headless notebook execution that is already keeping the runtime busy.
 - Keep `runtime.current_execution` for now as a live projection of server-owned execution state. The modernization path is to make it derive from stronger daemon truth, not to delete it before the browser/editor clients have a compatible replacement.
 - When extending headless execution truth, prefer daemon-owned `execution_id`s and a server-first `notebook_execution()` lookup path before adding new transport complexity. That keeps polling semantics stable while we move execution authority out of editor/projection code.
+- For extension/browser execution UI, prefer hydrating `queued`/`running` cell state from the daemon's notebook status/runtime refresh path when available, and use event-driven local inference only as a fallback. That keeps hidden queue semantics intact while shrinking client-side truth duplication.
 - Before deleting an old helper, search tests for direct patching or mocking of that helper. Some internal methods are part of the regression harness even if they are not public APIs.
 - If a refactor touches run-all, restart-and-run-all, save/flush, notebook switching, or trailing-cell reuse, update the matching behavior-lock docs under `dev/behavior-locks/` in the same change.
 

@@ -198,6 +198,8 @@ export interface RuntimeResponse {
     runtime_id?: string;
     kernel_generation?: number | null;
     current_execution?: { cell_id?: string; cell_index?: number } | null;
+    running_cell_ids?: string[];
+    queued_cell_ids?: string[];
 }
 
 export interface LspDiagnosticsMessage {

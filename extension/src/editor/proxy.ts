@@ -544,8 +544,15 @@ export class DaemonProxy {
     }
 
     private async handleGetRuntime(msg: any): Promise<void> {
-        const result = await this.httpPost('/api/notebooks/runtime', { path: this.notebookPath });
-        const snapshot = buildRuntimeSnapshot(result);
+        const [runtimeResult, statusResult] = await Promise.all([
+            this.httpPost('/api/notebooks/runtime', { path: this.notebookPath }),
+            this.httpPost('/api/notebooks/status', { path: this.notebookPath }),
+        ]);
+        const snapshot = buildRuntimeSnapshot({
+            ...runtimeResult,
+            running: Array.isArray(statusResult?.running) ? statusResult.running : undefined,
+            queued: Array.isArray(statusResult?.queued) ? statusResult.queued : undefined,
+        });
         this.postMessage({
             type: 'runtime',
             requestId: msg.requestId,
@@ -555,6 +562,8 @@ export class DaemonProxy {
             runtime_id: snapshot.runtime_id,
             kernel_generation: snapshot.kernel_generation,
             current_execution: snapshot.current_execution,
+            running_cell_ids: snapshot.running_cell_ids,
+            queued_cell_ids: snapshot.queued_cell_ids,
         });
     }
 

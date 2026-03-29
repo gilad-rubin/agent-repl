@@ -18,6 +18,8 @@ export type RuntimeEnvelopeLike = {
     runtime?: RuntimeLike;
     runtime_record?: RuntimeRecordLike;
     current_execution?: Record<string, unknown> | null;
+    running?: Array<Record<string, unknown>> | null;
+    queued?: Array<Record<string, unknown>> | null;
 };
 
 export type RecentEventLike = {
@@ -47,6 +49,8 @@ export type RuntimeSnapshot = {
     runtime_id?: string;
     kernel_generation: number | null;
     current_execution: Record<string, unknown> | null;
+    running_cell_ids: string[];
+    queued_cell_ids: string[];
 };
 
 export type ActivityEventSnapshot = {
@@ -91,14 +95,39 @@ export function deriveRuntimeKernelLabel(
 export function buildRuntimeSnapshot(payload: RuntimeEnvelopeLike): RuntimeSnapshot {
     const runtime = payload.runtime;
     const runtimeRecord = payload.runtime_record;
+    const currentExecution = runtime?.current_execution ?? payload.current_execution ?? null;
+    const runningCellIds = collectExecutionCellIds(payload.running);
+    const queuedCellIds = collectExecutionCellIds(payload.queued);
+    const currentExecutionCellId = cellIdFromExecutionLike(currentExecution);
+    if (currentExecutionCellId && !runningCellIds.includes(currentExecutionCellId)) {
+        runningCellIds.unshift(currentExecutionCellId);
+    }
     return {
         active: payload.active ?? Boolean(runtime),
         busy: runtime?.busy ?? false,
         kernel_label: deriveRuntimeKernelLabel(runtime, runtimeRecord),
         runtime_id: runtime?.runtime_id ?? runtimeRecord?.runtime_id,
         kernel_generation: runtime?.kernel_generation ?? runtimeRecord?.kernel_generation ?? null,
-        current_execution: runtime?.current_execution ?? payload.current_execution ?? null,
+        current_execution: currentExecution,
+        running_cell_ids: runningCellIds,
+        queued_cell_ids: queuedCellIds.filter((cellId) => !runningCellIds.includes(cellId)),
     };
+}
+
+function collectExecutionCellIds(entries: Array<Record<string, unknown>> | null | undefined): string[] {
+    const cellIds: string[] = [];
+    for (const entry of entries ?? []) {
+        const cellId = cellIdFromExecutionLike(entry);
+        if (cellId && !cellIds.includes(cellId)) {
+            cellIds.push(cellId);
+        }
+    }
+    return cellIds;
+}
+
+function cellIdFromExecutionLike(entry: Record<string, unknown> | null | undefined): string | null {
+    const cellId = entry?.cell_id;
+    return typeof cellId === 'string' && cellId.trim() !== '' ? cellId : null;
 }
 
 export function mapActivityEvents(events: RecentEventLike[] | null | undefined): ActivityEventSnapshot[] {

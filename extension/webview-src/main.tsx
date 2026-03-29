@@ -106,6 +106,8 @@ type RuntimeInfo = {
   runtime_id?: string;
   kernel_generation?: number | null;
   current_execution?: Record<string, unknown> | null;
+  running_cell_ids?: string[];
+  queued_cell_ids?: string[];
 };
 
 type CellDiagnostic = {
@@ -327,6 +329,20 @@ function cellMatchesCurrentRuntime(cell: NotebookCell | null | undefined, runtim
 function currentExecutionCellId(runtime: RuntimeInfo): string | null {
   const cellId = runtime.current_execution?.cell_id;
   return typeof cellId === 'string' && cellId ? cellId : null;
+}
+
+function runtimeCellIds(runtime: RuntimeInfo, kind: 'running' | 'queued'): string[] {
+  const raw = kind === 'running' ? runtime.running_cell_ids : runtime.queued_cell_ids;
+  const cellIds = Array.isArray(raw)
+    ? raw.filter((cellId): cellId is string => typeof cellId === 'string' && cellId.length > 0)
+    : [];
+  if (kind === 'running') {
+    const currentCellId = currentExecutionCellId(runtime);
+    if (currentCellId && !cellIds.includes(currentCellId)) {
+      return [currentCellId, ...cellIds];
+    }
+  }
+  return cellIds;
 }
 
 function withCellRuntimeProvenance(
@@ -2977,18 +2993,32 @@ function App() {
 
   const handleRuntimeUpdate = useCallback((runtime: RuntimeInfo) => {
     setKernelStatus(runtime);
-    const activeCellId = currentExecutionCellId(runtime);
-    if (activeCellId) {
-      executionStartRef.current.set(
-        activeCellId,
-        executionStartRef.current.get(activeCellId) ?? Date.now(),
+    const nextExecutingIds = runtimeCellIds(runtime, 'running');
+    const nextQueuedIds = runtimeCellIds(runtime, 'queued').filter((cellId) => !nextExecutingIds.includes(cellId));
+    if (nextExecutingIds.length > 0 || nextQueuedIds.length > 0) {
+      const startedAt = Date.now();
+      for (const cellId of nextExecutingIds) {
+        executionStartRef.current.set(
+          cellId,
+          executionStartRef.current.get(cellId) ?? startedAt,
+        );
+      }
+      const nextFailedIds = stateRef.current.failedCellIds.filter(
+        (cellId) => !nextQueuedIds.includes(cellId) && !nextExecutingIds.includes(cellId),
       );
-      setQueuedIds((current) => current.filter((cellId) => cellId !== activeCellId));
-      setExecutingIds((current) =>
-        current.includes(activeCellId) ? current : [...current, activeCellId],
+      const nextPausedIds = stateRef.current.pausedCellIds.filter(
+        (cellId) => !nextQueuedIds.includes(cellId) && !nextExecutingIds.includes(cellId),
       );
-      setFailedCellIds((current) => current.filter((cellId) => cellId !== activeCellId));
-      setPausedCellIds((current) => current.filter((cellId) => cellId !== activeCellId));
+      setQueuedIds(nextQueuedIds);
+      setExecutingIds(nextExecutingIds);
+      setFailedCellIds(nextFailedIds);
+      setPausedCellIds(nextPausedIds);
+      updateExecutionStateRef({
+        queuedIds: nextQueuedIds,
+        executingIds: nextExecutingIds,
+        failedCellIds: nextFailedIds,
+        pausedCellIds: nextPausedIds,
+      });
     }
     if (!runtime.busy && !runtime.current_execution) {
       const current = stateRef.current;
@@ -3298,6 +3328,12 @@ function App() {
           runtime_id: typeof message.runtime_id === 'string' ? message.runtime_id : undefined,
           kernel_generation: typeof message.kernel_generation === 'number' ? message.kernel_generation : null,
           current_execution: (message.current_execution as Record<string, unknown> | null | undefined) ?? null,
+          running_cell_ids: Array.isArray(message.running_cell_ids)
+            ? message.running_cell_ids.filter((cellId: unknown): cellId is string => typeof cellId === 'string')
+            : undefined,
+          queued_cell_ids: Array.isArray(message.queued_cell_ids)
+            ? message.queued_cell_ids.filter((cellId: unknown): cellId is string => typeof cellId === 'string')
+            : undefined,
         });
         return;
       }

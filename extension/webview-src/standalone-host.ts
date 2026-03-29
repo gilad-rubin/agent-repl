@@ -269,20 +269,34 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
 
   const loadRuntime = async (requestId?: string) => {
     await ensureAttached();
-    const result = await postJson<{
-      runtime?: {
-        busy?: boolean;
-        python_path?: string;
-        current_execution?: Record<string, unknown> | null;
-      } | null;
-      runtime_record?: {
-        label?: string;
-      } | null;
-    }>('/api/standalone/notebook/runtime', {
-      client_id: clientId,
-      path: requireNotebookPath(),
+    const notebookPath = requireNotebookPath();
+    const [runtimeResult, statusResult] = await Promise.all([
+      postJson<{
+        runtime?: {
+          busy?: boolean;
+          python_path?: string;
+          current_execution?: Record<string, unknown> | null;
+        } | null;
+        runtime_record?: {
+          label?: string;
+        } | null;
+      }>('/api/standalone/notebook/runtime', {
+        client_id: clientId,
+        path: notebookPath,
+      }),
+      postJson<{
+        running?: Array<Record<string, unknown>>;
+        queued?: Array<Record<string, unknown>>;
+      }>('/api/standalone/notebook/status', {
+        client_id: clientId,
+        path: notebookPath,
+      }),
+    ]);
+    const snapshot = buildRuntimeSnapshot({
+      ...runtimeResult,
+      running: Array.isArray(statusResult.running) ? statusResult.running : undefined,
+      queued: Array.isArray(statusResult.queued) ? statusResult.queued : undefined,
     });
-    const snapshot = buildRuntimeSnapshot(result);
     dispatch({
       type: 'runtime',
       requestId,
@@ -290,6 +304,8 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
       busy: snapshot.busy,
       kernel_label: snapshot.kernel_label,
       current_execution: snapshot.current_execution,
+      running_cell_ids: snapshot.running_cell_ids,
+      queued_cell_ids: snapshot.queued_cell_ids,
     });
   };
 

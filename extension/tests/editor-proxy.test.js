@@ -131,6 +131,63 @@ test('handleExecuteCell leaves a queued cell queued until activity marks it runn
     assert.deepEqual(runtimeRequests, ['execute-queued-runtime']);
 });
 
+test('handleGetRuntime merges notebook status queue data into the runtime message', async () => {
+    const postedMessages = [];
+    const httpCalls = [];
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    proxy.httpPost = async (endpoint, body) => {
+        httpCalls.push({ endpoint, body });
+        if (endpoint === '/api/notebooks/runtime') {
+            return {
+                active: true,
+                runtime: {
+                    busy: true,
+                    current_execution: { cell_id: 'cell-running' },
+                    runtime_id: 'rt-1',
+                    kernel_generation: 4,
+                },
+                runtime_record: { label: 'Notebook Python' },
+            };
+        }
+        if (endpoint === '/api/notebooks/status') {
+            return {
+                running: [{ run_id: 'run-1', cell_id: 'cell-running' }],
+                queued: [{ run_id: 'run-2', cell_id: 'cell-queued', queue_position: 1 }],
+            };
+        }
+        return { status: 'ok' };
+    };
+
+    await proxy.handleGetRuntime({ requestId: 'runtime-1' });
+
+    assert.deepEqual(httpCalls.map((call) => call.endpoint), [
+        '/api/notebooks/runtime',
+        '/api/notebooks/status',
+    ]);
+    assert.deepEqual(postedMessages, [{
+        type: 'runtime',
+        requestId: 'runtime-1',
+        active: true,
+        busy: true,
+        kernel_label: 'Notebook Python',
+        runtime_id: 'rt-1',
+        kernel_generation: 4,
+        current_execution: { cell_id: 'cell-running' },
+        running_cell_ids: ['cell-running'],
+        queued_cell_ids: ['cell-queued'],
+    }]);
+});
+
 test('handleExecuteCell treats a completed headless execution as finished and refreshes contents', async () => {
     const postedMessages = [];
     const httpCalls = [];
