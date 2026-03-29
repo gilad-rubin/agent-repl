@@ -8,6 +8,7 @@ import { applyEdits, EditOp } from './notebook/operations';
 import { getCellId, ensureIds, resolveCell, withCellId, newCellId } from './notebook/identity';
 import { toJupyter, stripForAgent } from './notebook/outputs';
 import { executeCell, getExecution, getStatus, insertAndExecute, resetExecutionState, resetJupyterApiCache, getJupyterApi, startExecution, startNotebookExecutionAll } from './execution/queue';
+import { isCanvasNotebookOpen, listOpenCanvasNotebookPaths } from './editor/provider';
 
 type KernelRecord = {
     id: string;
@@ -49,6 +50,11 @@ function samePath(a: string | null | undefined, b: string | null | undefined): b
 
 function shellQuote(arg: string): string {
     return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+function workspaceKernelLabel(workspace: string | null): string {
+    const base = workspace ? path.basename(workspace) : '';
+    return base ? `${base} (.venv)` : '.venv (workspace)';
 }
 
 function jupyterKernelDirs(): string[] {
@@ -111,6 +117,20 @@ function resolveWorkspaceDir(cwd?: string): string | null {
     return folders[0]?.uri.fsPath ?? null;
 }
 
+function buildBrowserCanvasUrl(
+    relativePath: string,
+    browserUrlOverride?: string,
+): string {
+    const configured = vscode.workspace.getConfiguration('agent-repl').get<string>(
+        'browserCanvasUrl',
+        'http://127.0.0.1:4173/preview.html',
+    );
+    const base = (browserUrlOverride && browserUrlOverride.trim()) || configured;
+    const url = new URL(base);
+    url.searchParams.set('path', relativePath);
+    return url.toString();
+}
+
 export function discoverKernels(workspaceDir?: string | null): KernelDiscovery {
     const workspace = workspaceDir ?? null;
     const workspaceVenvPython = workspace
@@ -171,13 +191,14 @@ export function discoverKernels(workspaceDir?: string | null): KernelDiscovery {
             matchingSpec.recommended = true;
             preferredKernel = matchingSpec;
         } else {
+            const label = workspaceKernelLabel(workspace);
             preferredKernel = {
                 id: workspaceVenvPython,
-                label: '.venv (workspace)',
+                label,
                 type: 'workspace-venv',
                 python: workspaceVenvPython,
                 kernelspec_name: null,
-                kernelspec_display_name: '.venv (workspace)',
+                kernelspec_display_name: label,
                 source: workspaceVenvPython,
                 recommended: true,
             };
@@ -307,12 +328,17 @@ async function readNotebookContents(relPath: string, cwd?: string): Promise<{ pa
     }
 
     let notebook: { cells?: Array<Record<string, any>> };
-    try {
-        notebook = JSON.parse(Buffer.from(data).toString('utf8'));
-    } catch {
-        const err = new Error(`Notebook '${relPath}' is not valid JSON`) as any;
-        err.statusCode = 400;
-        throw err;
+    const rawText = Buffer.from(data).toString('utf8');
+    if (rawText.trim().length === 0) {
+        notebook = { cells: [] };
+    } else {
+        try {
+            notebook = JSON.parse(rawText);
+        } catch {
+            const err = new Error(`Notebook '${relPath}' is not valid JSON`) as any;
+            err.statusCode = 400;
+            throw err;
+        }
     }
 
     const cells = [];
@@ -651,9 +677,12 @@ export function buildRoutes(maxQueue: number): Routes {
             version: '0.3.0',
             extension_root: path.resolve(__dirname, '..'),
             routes_module: __filename,
-            open_notebooks: vscode.workspace.notebookDocuments
+            open_notebooks: Array.from(new Set([
+                ...vscode.workspace.notebookDocuments
                 .filter(d => d.notebookType === 'jupyter-notebook')
-                .map(d => d.uri.fsPath)
+                .map(d => d.uri.fsPath),
+                ...listOpenCanvasNotebookPaths(),
+            ])),
         }),
 
         'GET /api/debug/jupyter-api': async (_body, q) => {
@@ -774,6 +803,18 @@ export function buildRoutes(maxQueue: number): Routes {
             resolveNotebookUri(relPath, cwd);
             const doc = findOpenNotebook(relPath, cwd);
             if (!doc) {
+                const notebookUri = resolveNotebookUri(relPath, cwd);
+                if (isCanvasNotebookOpen(notebookUri.fsPath)) {
+                    return {
+                        path: relPath,
+                        open: true,
+                        open_via: 'canvas',
+                        kernel_state: 'canvas',
+                        busy: false,
+                        running: [],
+                        queued: [],
+                    };
+                }
                 return {
                     path: relPath,
                     open: false,
@@ -1017,12 +1058,51 @@ export function buildRoutes(maxQueue: number): Routes {
         },
 
         'POST /api/notebook/open': async (body) => {
-            const { path: relPath, cwd } = body as { path: string; cwd?: string };
+            const { path: relPath, cwd, editor, target, browser_url } = body as {
+                path: string;
+                cwd?: string;
+                editor?: string;
+                target?: string;
+                browser_url?: string;
+            };
             const uri = resolveNotebookUri(relPath, cwd);
+            const resolvedTarget = target === 'browser' ? 'browser' : 'vscode';
+            const resolvedEditor = editor === 'jupyter' ? 'jupyter' : 'canvas';
+            if (resolvedTarget === 'browser') {
+                const url = buildBrowserCanvasUrl(
+                    relPath,
+                    typeof browser_url === 'string' ? browser_url : undefined,
+                );
+                await vscode.env.openExternal(vscode.Uri.parse(url));
+                return {
+                    status: 'ok',
+                    path: relPath,
+                    target: 'browser',
+                    editor: 'canvas',
+                    url,
+                };
+            }
+            if (resolvedEditor === 'canvas') {
+                await vscode.commands.executeCommand('vscode.openWith', uri, 'agent-repl.canvasEditor');
+                return {
+                    status: 'ok',
+                    path: relPath,
+                    target: 'vscode',
+                    editor: 'canvas',
+                    view_type: 'agent-repl.canvasEditor',
+                };
+            }
+
             const doc = await resolveOrOpenNotebook(relPath, cwd);
             await vscode.commands.executeCommand('vscode.openWith', uri, 'jupyter-notebook');
             await ensureNotebookEditor(doc, { preserveFocus: false, preview: false });
-            return { status: 'ok', path: relPath };
+            return {
+                status: 'ok',
+                path: relPath,
+                target: 'vscode',
+                editor: 'jupyter',
+                view_type: 'jupyter-notebook',
+            };
         },
 
         // --- Prompts ---

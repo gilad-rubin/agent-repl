@@ -63,6 +63,100 @@ def _notebook_client(path: str) -> CoreClient | BridgeClient:
     return CoreClient.discover(workspace_hint=path)
 
 
+_SESSION_STATUS_RANK = {
+    "attached": 3,
+    "stale": 2,
+    "detached": 1,
+}
+_SESSION_CLIENT_RANK = {
+    "vscode": 3,
+    "browser": 2,
+    "cli": 1,
+    "worker": 0,
+}
+
+
+def _preferred_human_session_id(client: Any) -> str | None:
+    if not hasattr(client, "list_sessions"):
+        return None
+    try:
+        payload = client.list_sessions()
+    except Exception:
+        return None
+
+    sessions = payload.get("sessions")
+    if not isinstance(sessions, list):
+        return None
+
+    best_session_id: str | None = None
+    best_key: tuple[int, int, int, float, float] | None = None
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        session_id = session.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        if session.get("actor") != "human":
+            continue
+        status = session.get("status")
+        if not isinstance(status, str):
+            continue
+        status_rank = _SESSION_STATUS_RANK.get(status, 0)
+        if status_rank == 0:
+            continue
+        client_rank = _SESSION_CLIENT_RANK.get(str(session.get("client") or ""), 0)
+        capabilities = session.get("capabilities")
+        editor_rank = 1 if (
+            isinstance(capabilities, list) and "editor" in capabilities
+        ) or session.get("client") == "vscode" else 0
+        last_seen = session.get("last_seen_at")
+        created_at = session.get("created_at")
+        sort_key = (
+            status_rank,
+            editor_rank,
+            client_rank,
+            float(last_seen) if isinstance(last_seen, (int, float)) else 0.0,
+            float(created_at) if isinstance(created_at, (int, float)) else 0.0,
+        )
+        if best_key is None or sort_key > best_key:
+            best_key = sort_key
+            best_session_id = session_id
+    return best_session_id
+
+
+def _default_owner_session_id(
+    client: Any,
+    *,
+    client_type: str = "cli",
+    label: str = "CLI",
+) -> str | None:
+    existing = _preferred_human_session_id(client)
+    if existing:
+        return existing
+    if not hasattr(client, "start_session"):
+        return None
+    try:
+        payload = client.start_session(actor="human", client=client_type, label=label)
+    except Exception:
+        return None
+    session = payload.get("session")
+    session_id = session.get("session_id") if isinstance(session, dict) else None
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def _owner_session_id_from_args(
+    client: Any,
+    args: argparse.Namespace,
+    *,
+    client_type: str = "cli",
+    label: str = "CLI",
+) -> str | None:
+    explicit_session_id = getattr(args, "session_id", None)
+    if explicit_session_id:
+        return explicit_session_id
+    return _default_owner_session_id(client, client_type=client_type, label=label)
+
+
 # ------------------------------------------------------------------
 # Subcommand handlers
 # ------------------------------------------------------------------
@@ -122,45 +216,52 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_edit(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
-    op: dict[str, Any] = {"op": args.edit_command}
+    ops: list[dict[str, Any]] = []
 
     if args.edit_command == "replace-source":
+        op: dict[str, Any] = {"op": args.edit_command}
         op["source"] = _read_source(args)
         if args.cell_id:
             op["cell_id"] = args.cell_id
         if args.index is not None:
             op["cell_index"] = args.index
+        ops.append(op)
     elif args.edit_command == "insert":
-        op["source"] = _read_source(args)
-        op["cell_type"] = args.cell_type
-        op["at_index"] = args.at_index
+        cells = _read_cells(args, default_cell_type=getattr(args, "cell_type", "code"))
+        ops = _build_insert_ops(cells, at_index=args.at_index)
     elif args.edit_command == "delete":
+        op = {"op": args.edit_command}
         if args.cell_id:
             op["cell_id"] = args.cell_id
         if args.index is not None:
             op["cell_index"] = args.index
+        ops.append(op)
     elif args.edit_command == "move":
+        op = {"op": args.edit_command}
         if args.cell_id:
             op["cell_id"] = args.cell_id
         if args.index is not None:
             op["cell_index"] = args.index
         op["to_index"] = args.to_index
+        ops.append(op)
     elif args.edit_command == "clear-outputs":
+        op = {"op": args.edit_command}
         if getattr(args, "all", False):
             op["all"] = True
         elif args.cell_id:
             op["cell_id"] = args.cell_id
         elif args.index is not None:
             op["cell_index"] = args.index
+        ops.append(op)
 
     if hasattr(client, "notebook_edit"):
-        session_id = getattr(args, "session_id", None)
+        session_id = _owner_session_id_from_args(client, args)
         if session_id:
-            result = client.notebook_edit(args.path, [op], owner_session_id=session_id)
+            result = client.notebook_edit(args.path, ops, owner_session_id=session_id)
         else:
-            result = client.notebook_edit(args.path, [op])
+            result = client.notebook_edit(args.path, ops)
     else:
-        result = client.edit(args.path, [op])
+        result = client.edit(args.path, ops)
     _out(result, args.pretty)
     return 0
 
@@ -171,7 +272,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
     timeout = getattr(args, "timeout", 30)
     if args.code:
         if hasattr(client, "notebook_insert_execute"):
-            session_id = getattr(args, "session_id", None)
+            session_id = _owner_session_id_from_args(client, args)
             kwargs: dict[str, Any] = {"wait": wait, "timeout": timeout}
             if session_id:
                 kwargs["owner_session_id"] = session_id
@@ -180,7 +281,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
             result = client.insert_and_execute(args.path, args.code, wait=wait, timeout=timeout)
     elif args.cell_id:
         if hasattr(client, "notebook_execute_cell"):
-            session_id = getattr(args, "session_id", None)
+            session_id = _owner_session_id_from_args(client, args)
             kwargs = {"cell_id": args.cell_id, "wait": wait, "timeout": timeout}
             if session_id:
                 kwargs["owner_session_id"] = session_id
@@ -195,19 +296,80 @@ def cmd_exec(args: argparse.Namespace) -> int:
 
 
 def cmd_ix(args: argparse.Namespace) -> int:
-    source = _read_source(args)
     wait = not getattr(args, "no_wait", False)
     timeout = getattr(args, "timeout", 30)
     at_index = getattr(args, "at_index", -1)
     client = _notebook_client(args.path)
-    if hasattr(client, "notebook_insert_execute"):
-        session_id = getattr(args, "session_id", None)
-        kwargs = {"at_index": at_index, "wait": wait, "timeout": timeout}
-        if session_id:
-            kwargs["owner_session_id"] = session_id
-        result = client.notebook_insert_execute(args.path, source, **kwargs)
-    else:
-        result = client.insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
+    cells = _read_cells(args, default_cell_type="code")
+    if len(cells) == 1 and not _has_cells_payload(args):
+        source = cells[0]["source"]
+        if hasattr(client, "notebook_insert_execute"):
+            session_id = _owner_session_id_from_args(client, args)
+            kwargs = {"at_index": at_index, "wait": wait, "timeout": timeout}
+            if session_id:
+                kwargs["owner_session_id"] = session_id
+            result = client.notebook_insert_execute(args.path, source, **kwargs)
+        else:
+            result = client.insert_and_execute(args.path, source, at_index=at_index, wait=wait, timeout=timeout)
+        _out(result, args.pretty)
+        return 0
+
+    if getattr(args, "no_wait", False):
+        raise SystemExit("Error: batch ix does not support --no-wait")
+
+    session_id = _owner_session_id_from_args(client, args)
+    results: list[dict[str, Any]] = []
+    current_index = at_index
+    stopped_on_error = False
+
+    for cell in cells:
+        cell_type = cell["cell_type"]
+        source = cell["source"]
+        if cell_type == "code":
+            if hasattr(client, "notebook_insert_execute"):
+                kwargs = {"at_index": current_index, "wait": wait, "timeout": timeout}
+                if session_id:
+                    kwargs["owner_session_id"] = session_id
+                item_result = client.notebook_insert_execute(args.path, source, **kwargs)
+            else:
+                item_result = client.insert_and_execute(
+                    args.path,
+                    source,
+                    at_index=current_index,
+                    wait=wait,
+                    timeout=timeout,
+                )
+            results.append({**item_result, "cell_type": cell_type})
+            if item_result.get("status") == "error":
+                stopped_on_error = True
+                break
+        else:
+            op = _build_insert_ops([cell], at_index=current_index)[0]
+            if hasattr(client, "notebook_edit"):
+                if session_id:
+                    edit_result = client.notebook_edit(args.path, [op], owner_session_id=session_id)
+                else:
+                    edit_result = client.notebook_edit(args.path, [op])
+            else:
+                edit_result = client.edit(args.path, [op])
+            entry = dict(edit_result.get("results", [{}])[0])
+            entry["cell_type"] = cell_type
+            results.append(entry)
+
+        if current_index != -1:
+            current_index += 1
+
+    result: dict[str, Any] = {
+        "status": "error" if stopped_on_error else "ok",
+        "path": args.path,
+        "results": results,
+        "operation": "batch-insert-execute",
+    }
+    if stopped_on_error:
+        failed = results[-1]
+        result["stopped_on_error"] = True
+        if failed.get("cell_id") is not None:
+            result["failed_cell_id"] = failed["cell_id"]
     _out(result, args.pretty)
     return 0
 
@@ -215,7 +377,11 @@ def cmd_ix(args: argparse.Namespace) -> int:
 def cmd_run_all(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
     if hasattr(client, "notebook_execute_all"):
-        result = client.notebook_execute_all(args.path)
+        session_id = _default_owner_session_id(client)
+        if session_id:
+            result = client.notebook_execute_all(args.path, owner_session_id=session_id)
+        else:
+            result = client.notebook_execute_all(args.path)
     else:
         result = client.execute_all(args.path)
     _out(result, args.pretty)
@@ -235,7 +401,11 @@ def cmd_restart(args: argparse.Namespace) -> int:
 def cmd_restart_run_all(args: argparse.Namespace) -> int:
     client = _notebook_client(args.path)
     if hasattr(client, "notebook_restart_and_run_all"):
-        result = client.notebook_restart_and_run_all(args.path)
+        session_id = _default_owner_session_id(client)
+        if session_id:
+            result = client.notebook_restart_and_run_all(args.path, owner_session_id=session_id)
+        else:
+            result = client.notebook_restart_and_run_all(args.path)
     else:
         result = client.restart_and_run_all(args.path)
     _out(result, args.pretty)
@@ -252,6 +422,24 @@ def cmd_new(args: argparse.Namespace) -> int:
         result = client.notebook_create(args.path, cells=cells, kernel_id=kernel_id)
     else:
         result = client.create(args.path, cells=cells, kernel_id=kernel_id)
+    if getattr(args, "open", False):
+        result["open"] = _client(args.path).open(
+            args.path,
+            editor=getattr(args, "editor", "canvas"),
+            target=getattr(args, "target", "vscode"),
+            browser_url=getattr(args, "browser_url", None),
+        )
+    _out(result, args.pretty)
+    return 0
+
+
+def cmd_open(args: argparse.Namespace) -> int:
+    result = _client(args.path).open(
+        args.path,
+        editor=getattr(args, "editor", "canvas"),
+        target=getattr(args, "target", "vscode"),
+        browser_url=getattr(args, "browser_url", None),
+    )
     _out(result, args.pretty)
     return 0
 
@@ -438,18 +626,22 @@ def cmd_core(args: argparse.Namespace) -> int:
         return 0
 
     if args.core_command == "project-visible-notebook":
+        client = _core_client(workspace_root, runtime_dir=runtime_dir)
         kwargs: dict[str, Any] = {"cells": _read_json_payload(args, field_name="cells")}
-        if getattr(args, "session_id", None):
-            kwargs["owner_session_id"] = args.session_id
-        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_project_visible(args.path, **kwargs)
+        session_id = _owner_session_id_from_args(client, args)
+        if session_id:
+            kwargs["owner_session_id"] = session_id
+        result = client.notebook_project_visible(args.path, **kwargs)
         _out(result, args.pretty)
         return 0
 
     if args.core_command == "execute-visible-cell":
+        client = _core_client(workspace_root, runtime_dir=runtime_dir)
         kwargs = {"cell_index": args.cell_index, "source": _read_source(args)}
-        if getattr(args, "session_id", None):
-            kwargs["owner_session_id"] = args.session_id
-        result = _core_client(workspace_root, runtime_dir=runtime_dir).notebook_execute_visible_cell(args.path, **kwargs)
+        session_id = _owner_session_id_from_args(client, args)
+        if session_id:
+            kwargs["owner_session_id"] = session_id
+        result = client.notebook_execute_visible_cell(args.path, **kwargs)
         _out(result, args.pretty)
         return 0
 
@@ -608,6 +800,43 @@ def _read_source(args: argparse.Namespace) -> str:
     raise SystemExit("Error: provide --source/-s or pipe to stdin")
 
 
+def _has_cells_payload(args: argparse.Namespace) -> bool:
+    return getattr(args, "cells_json", None) is not None or getattr(args, "cells_file", None) is not None
+
+
+def _read_cells(args: argparse.Namespace, *, default_cell_type: str) -> list[dict[str, str]]:
+    if _has_cells_payload(args):
+        if getattr(args, "source", None) is not None or getattr(args, "source_file", None) is not None:
+            raise SystemExit("Error: provide either --source/--source-file or --cells-json/--cells-file, not both")
+        cells = _read_json_payload(args, field_name="cells")
+        normalized: list[dict[str, str]] = []
+        for index, cell in enumerate(cells):
+            source = cell.get("source")
+            if not isinstance(source, str):
+                raise SystemExit(f"Error: cell {index} is missing a string 'source'")
+            raw_type = cell.get("cell_type", cell.get("type", default_cell_type))
+            if not isinstance(raw_type, str) or not raw_type:
+                raise SystemExit(f"Error: cell {index} is missing a string 'type' or 'cell_type'")
+            normalized.append({"cell_type": raw_type, "source": source})
+        return normalized
+    return [{"cell_type": default_cell_type, "source": _read_source(args)}]
+
+
+def _build_insert_ops(cells: list[dict[str, str]], *, at_index: int) -> list[dict[str, Any]]:
+    ops: list[dict[str, Any]] = []
+    current_index = at_index
+    for cell in cells:
+        ops.append({
+            "op": "insert",
+            "source": cell["source"],
+            "cell_type": cell["cell_type"],
+            "at_index": current_index,
+        })
+        if current_index != -1:
+            current_index += 1
+    return ops
+
+
 def _read_json_payload(args: argparse.Namespace, *, field_name: str) -> list[dict[str, Any]]:
     inline = getattr(args, f"{field_name}_json", None)
     if inline is not None:
@@ -634,7 +863,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     # reload
-    sub.add_parser("reload", help="Restart the VS Code extension host")
+    sub.add_parser("reload", help="Hot-reload installed extension routes")
 
     # cat
     p = sub.add_parser("cat", help="Read notebook contents")
@@ -660,6 +889,8 @@ def build_parser() -> argparse.ArgumentParser:
     ep = esub.add_parser("insert")
     ep.add_argument("-s", "--source")
     ep.add_argument("--source-file")
+    ep.add_argument("--cells-json")
+    ep.add_argument("--cells-file")
     ep.add_argument("--cell-type", default="code")
     ep.add_argument("--at-index", type=int, default=-1)
 
@@ -692,6 +923,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session-id", help="Collaboration session to attribute the insert/execute to")
     p.add_argument("-s", "--source")
     p.add_argument("--source-file")
+    p.add_argument("--cells-json")
+    p.add_argument("--cells-file")
     p.add_argument("--at-index", type=int, default=-1, help="Insert at this cell index (-1 = end)")
     p.add_argument("--no-wait", action="store_true", help="Return immediately without waiting for output")
     p.add_argument("--timeout", type=float, default=30, help="Seconds to wait for completion (default: 30)")
@@ -713,6 +946,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("--cells-json")
     p.add_argument("--kernel", help="Python executable path (e.g. /opt/miniconda3/bin/python3 or python3)")
+    p.add_argument("--open", action="store_true", help="Open the notebook after creating it")
+    p.add_argument("--target", choices=["vscode", "browser"], default="vscode", help="Where to open with --open (default: vscode)")
+    p.add_argument("--editor", choices=["canvas", "jupyter"], default="canvas", help="Editor to use with --open (default: canvas)")
+    p.add_argument("--browser-url", help="Standalone browser canvas URL to use when --target browser")
+
+    # open
+    p = sub.add_parser("open", help="Open an existing notebook")
+    p.add_argument("path")
+    p.add_argument("--target", choices=["vscode", "browser"], default="vscode", help="Where to open it (default: vscode)")
+    p.add_argument("--editor", choices=["canvas", "jupyter"], default="canvas", help="Editor to use (default: canvas)")
+    p.add_argument("--browser-url", help="Standalone browser canvas URL to use when --target browser")
 
     # kernels
     sub.add_parser("kernels", help="List available notebook kernels")
@@ -979,6 +1223,7 @@ def build_parser() -> argparse.ArgumentParser:
         "restart",
         "restart-run-all",
         "new",
+        "open",
         "kernels",
         "select-kernel",
         "prompts",
@@ -1020,6 +1265,7 @@ def main(argv: list[str] | None = None) -> int:
         "restart": cmd_restart,
         "restart-run-all": cmd_restart_run_all,
         "new": cmd_new,
+        "open": cmd_open,
         "kernels": cmd_kernels,
         "select-kernel": cmd_select_kernel,
         "prompts": cmd_prompts,

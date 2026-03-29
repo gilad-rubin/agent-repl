@@ -7,3 +7,4 @@
 - **Compact intros** - start pages with 3-4 short bullets that summarize the key takeaways.
 - **Explicit failure guidance** - when describing errors, include “How to fix:” guidance instead of vague troubleshooting.
 - **Runtime-first language** - describe `agent-repl` as the notebook runtime authority and the editor as an optional projection client.
+- **Ship doc sync with the change** - when behavior, commands, workflows, or architecture notes change, update the affected public docs in `docs/` in the same change and cross-check `AGENTS.md`, `SKILL.md`, and `dev/` too.

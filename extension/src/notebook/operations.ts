@@ -5,6 +5,7 @@ export type EditOp =
     | { op: 'replace-source'; cell_id?: string; cell_index?: number; source: string }
     | { op: 'insert'; cell_type: 'code' | 'markdown' | 'raw'; source: string; at_index: number; metadata?: Record<string, any> }
     | { op: 'delete'; cell_id?: string; cell_index?: number }
+    | { op: 'change-cell-type'; cell_id?: string; cell_index?: number; cell_type: 'code' | 'markdown' | 'raw'; source?: string }
     | { op: 'move'; cell_id?: string; cell_index?: number; to_index: number }
     | { op: 'clear-outputs'; cell_id?: string; cell_index?: number; all?: boolean };
 
@@ -13,6 +14,13 @@ export interface EditResult {
     changed: boolean;
     cell_id?: string;
     cell_count: number;
+}
+
+function normalizeInsertIndex(doc: vscode.NotebookDocument, atIndex: number): number {
+    if (atIndex === -1) {
+        return doc.cellCount;
+    }
+    return Math.max(0, Math.min(atIndex, doc.cellCount));
 }
 
 /**
@@ -44,6 +52,7 @@ async function applySingle(doc: vscode.NotebookDocument, op: EditOp): Promise<Ed
         case 'replace-source': return replaceSource(doc, op);
         case 'insert': return insertCell(doc, op);
         case 'delete': return deleteCell(doc, op);
+        case 'change-cell-type': return changeCellType(doc, op);
         case 'move': return moveCell(doc, op);
         case 'clear-outputs': return clearOutputs(doc, op);
         default: throw new Error(`Unknown op: ${(op as any).op}`);
@@ -69,7 +78,7 @@ async function insertCell(
     doc: vscode.NotebookDocument,
     op: { cell_type: string; source: string; at_index: number; metadata?: Record<string, any> }
 ): Promise<EditResult> {
-    const index = op.at_index === -1 ? doc.cellCount : op.at_index;
+    const index = normalizeInsertIndex(doc, op.at_index);
     const kind = op.cell_type === 'code' ? vscode.NotebookCellKind.Code : vscode.NotebookCellKind.Markup;
     const lang = op.cell_type === 'code' ? 'python' : 'markdown';
     const cellId = newCellId();
@@ -92,6 +101,24 @@ async function deleteCell(
     edit.set(doc.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(idx, idx + 1))]);
     const ok = await vscode.workspace.applyEdit(edit);
     return { op: 'delete', changed: ok, cell_id: cellId, cell_count: doc.cellCount };
+}
+
+async function changeCellType(
+    doc: vscode.NotebookDocument,
+    op: { cell_id?: string; cell_index?: number; cell_type: string; source?: string }
+): Promise<EditResult> {
+    const idx = resolveCell(doc, { cell_id: op.cell_id, cell_index: op.cell_index });
+    const cell = doc.cellAt(idx);
+    const targetIsCode = op.cell_type === 'code';
+    const kind = targetIsCode ? vscode.NotebookCellKind.Code : vscode.NotebookCellKind.Markup;
+    const languageId = targetIsCode ? 'python' : 'markdown';
+    const cellData = new vscode.NotebookCellData(kind, op.source ?? cell.document.getText(), languageId);
+    cellData.metadata = cell.metadata;
+    cellData.outputs = [];
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(doc.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(idx, idx + 1), [cellData])]);
+    const ok = await vscode.workspace.applyEdit(edit);
+    return { op: 'change-cell-type', changed: ok, cell_id: getCellId(cell), cell_count: doc.cellCount };
 }
 
 async function moveCell(

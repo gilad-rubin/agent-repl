@@ -718,3 +718,160 @@ test('restart routes use background shutdown and quiet reattach without opening 
         fs.readFileSync = originalReadFileSync;
     }
 });
+
+test('open route defaults to the Agent REPL canvas editor', async () => {
+    const uri = { fsPath: '/workspace/tmp/demo.ipynb', toString: () => 'file:///workspace/tmp/demo.ipynb' };
+    const doc = { uri, notebookType: 'jupyter-notebook', cellCount: 0 };
+    let ensureCalls = 0;
+    const executeCalls = [];
+
+    const routesModule = loadRoutesModule({
+        vscode: {
+            Uri: { file: (value) => ({ fsPath: value, toString: () => `file://${value}` }) },
+            workspace: {
+                workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
+                notebookDocuments: [],
+                getConfiguration: () => ({ get: (_key, fallback) => fallback }),
+                fs: { writeFile: async () => {} },
+                openNotebookDocument: async () => doc,
+            },
+            window: {
+                showNotebookDocument: async () => ({}),
+                activeNotebookEditor: undefined,
+                activeTextEditor: undefined,
+                visibleNotebookEditors: [],
+            },
+            commands: {
+                executeCommand: async (...args) => {
+                    executeCalls.push(args);
+                },
+            },
+            env: {
+                openExternal: async () => {
+                    throw new Error('browser open should not run');
+                },
+            },
+            extensions: {
+                getExtension: () => undefined,
+            },
+        },
+        resolver: {
+            resolveNotebook: () => doc,
+            resolveNotebookUri: () => uri,
+            resolveOrOpenNotebook: async () => doc,
+            findOpenNotebook: () => undefined,
+            findEditor: () => {
+                throw new Error('not needed');
+            },
+            ensureNotebookEditor: async () => {
+                ensureCalls += 1;
+                return {};
+            },
+            captureEditorFocus: () => ({ kind: 'none' }),
+            restoreEditorFocus: async () => {},
+        },
+        queue: {
+            executeCell: async () => ({ status: 'ok' }),
+            getExecution: () => ({ status: 'ok' }),
+            getStatus: async () => ({ kernel_state: 'idle' }),
+            insertAndExecute: async () => ({ status: 'ok' }),
+            resetExecutionState: () => {},
+            resetJupyterApiCache: () => {},
+            getJupyterApi: async () => undefined,
+            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
+            startNotebookExecutionAll: async () => [],
+        },
+    });
+
+    const routes = routesModule.buildRoutes(20);
+    const result = await routes['POST /api/notebook/open']({
+        path: 'tmp/demo.ipynb',
+        cwd: '/workspace',
+    });
+
+    assert.equal(result.status, 'ok');
+    assert.equal(result.editor, 'canvas');
+    assert.equal(result.view_type, 'agent-repl.canvasEditor');
+    assert.deepEqual(executeCalls, [['vscode.openWith', uri, 'agent-repl.canvasEditor']]);
+    assert.equal(ensureCalls, 0);
+});
+
+test('open route can target the standalone browser canvas', async () => {
+    const uri = { fsPath: '/workspace/tmp/demo.ipynb', toString: () => 'file:///workspace/tmp/demo.ipynb' };
+    const doc = { uri, notebookType: 'jupyter-notebook', cellCount: 0 };
+    const openedUrls = [];
+    const executeCalls = [];
+
+    const routesModule = loadRoutesModule({
+        vscode: {
+            Uri: {
+                file: (value) => ({ fsPath: value, toString: () => `file://${value}` }),
+                parse: (value) => ({ toString: () => value }),
+            },
+            workspace: {
+                workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
+                notebookDocuments: [],
+                getConfiguration: () => ({ get: (_key, fallback) => fallback }),
+                fs: { writeFile: async () => {} },
+                openNotebookDocument: async () => doc,
+            },
+            window: {
+                showNotebookDocument: async () => ({}),
+                activeNotebookEditor: undefined,
+                activeTextEditor: undefined,
+                visibleNotebookEditors: [],
+            },
+            commands: {
+                executeCommand: async (...args) => {
+                    executeCalls.push(args);
+                },
+            },
+            env: {
+                openExternal: async (target) => {
+                    openedUrls.push(target.toString());
+                },
+            },
+            extensions: {
+                getExtension: () => undefined,
+            },
+        },
+        resolver: {
+            resolveNotebook: () => doc,
+            resolveNotebookUri: () => uri,
+            resolveOrOpenNotebook: async () => doc,
+            findOpenNotebook: () => undefined,
+            findEditor: () => {
+                throw new Error('not needed');
+            },
+            ensureNotebookEditor: async () => ({}),
+            captureEditorFocus: () => ({ kind: 'none' }),
+            restoreEditorFocus: async () => {},
+        },
+        queue: {
+            executeCell: async () => ({ status: 'ok' }),
+            getExecution: () => ({ status: 'ok' }),
+            getStatus: async () => ({ kernel_state: 'idle' }),
+            insertAndExecute: async () => ({ status: 'ok' }),
+            resetExecutionState: () => {},
+            resetJupyterApiCache: () => {},
+            getJupyterApi: async () => undefined,
+            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
+            startNotebookExecutionAll: async () => [],
+        },
+    });
+
+    const routes = routesModule.buildRoutes(20);
+    const result = await routes['POST /api/notebook/open']({
+        path: 'tmp/demo.ipynb',
+        cwd: '/workspace',
+        target: 'browser',
+        browser_url: 'http://127.0.0.1:4183/preview.html',
+    });
+
+    assert.equal(result.status, 'ok');
+    assert.equal(result.target, 'browser');
+    assert.equal(result.editor, 'canvas');
+    assert.equal(result.url, 'http://127.0.0.1:4183/preview.html?path=tmp%2Fdemo.ipynb');
+    assert.deepEqual(openedUrls, ['http://127.0.0.1:4183/preview.html?path=tmp%2Fdemo.ipynb']);
+    assert.deepEqual(executeCalls, []);
+});

@@ -467,6 +467,17 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(record.relative_path, "notebooks/demo.ipynb")
         self.assertEqual(record.sync_state, "in-sync")
 
+    def test_notebook_contents_treats_empty_file_as_blank_notebook(self):
+        empty_path = self.workspace_root / "notebooks" / "empty.ipynb"
+        empty_path.write_text("")
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            body, status = self.state.notebook_contents("notebooks/empty.ipynb")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["path"], "notebooks/empty.ipynb")
+        self.assertEqual(body["cells"], [])
+
     def test_notebook_create_uses_headless_runtime_and_registers_document(self):
         with mock.patch.object(self.state, "_projection_client", return_value=None):
             body, status = self.state.notebook_create(
@@ -494,6 +505,84 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["results"][0]["op"], "replace-source")
         self.assertEqual(len(self.state.document_records), 1)
+
+    def test_notebook_edit_falls_back_to_cell_index_when_read_only_contents_generated_ephemeral_ids(self):
+        notebook_path = self.workspace_root / "notebooks" / "ephemeral-ids.ipynb"
+        notebook_path.parent.mkdir(parents=True, exist_ok=True)
+        notebook_path.write_text(json.dumps({
+            "cells": [{
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": ["x = 1\n"],
+            }],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }))
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            contents_body, contents_status = self.state.notebook_contents("notebooks/ephemeral-ids.ipynb")
+            self.assertEqual(contents_status, 200)
+            generated_cell_id = contents_body["cells"][0]["cell_id"]
+
+            body, status = self.state.notebook_edit(
+                "notebooks/ephemeral-ids.ipynb",
+                [{"op": "replace-source", "cell_id": generated_cell_id, "cell_index": 0, "source": "x = 2"}],
+            )
+
+            refreshed_body, refreshed_status = self.state.notebook_contents("notebooks/ephemeral-ids.ipynb")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["results"][0]["op"], "replace-source")
+        self.assertEqual(refreshed_status, 200)
+        self.assertEqual(refreshed_body["cells"][0]["source"], "x = 2")
+
+    def test_notebook_edit_insert_clamps_out_of_range_index_for_blank_headless_notebook(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                "notebooks/blank-insert.ipynb",
+                cells=[],
+                kernel_id=_python_with_ipykernel(),
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            body, status = self.state.notebook_edit(
+                "notebooks/blank-insert.ipynb",
+                [{"op": "insert", "cell_type": "code", "source": "", "at_index": 1}],
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["results"][0]["op"], "insert")
+        self.assertEqual(body["results"][0]["cell_count"], 1)
+
+        contents_body, contents_status = self.state.notebook_contents("notebooks/blank-insert.ipynb")
+        self.assertEqual(contents_status, 200)
+        self.assertEqual(len(contents_body["cells"]), 1)
+
+    def test_notebook_insert_execute_clamps_out_of_range_index_for_blank_headless_notebook(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                "notebooks/blank-insert-execute.ipynb",
+                cells=[],
+                kernel_id=_python_with_ipykernel(),
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            body, status = self.state.notebook_insert_execute(
+                "notebooks/blank-insert-execute.ipynb",
+                source="21 * 2",
+                cell_type="code",
+                at_index=1,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["cell_index"], 0)
+        self.assertEqual(body["outputs"][0]["data"]["text/plain"], "42")
 
     def test_notebook_execute_cell_uses_headless_runtime(self):
         with mock.patch.object(self.state, "_projection_client", return_value=None):
@@ -580,7 +669,10 @@ class TestCoreState(unittest.TestCase):
                 self.state.notebook_create("notebooks/no-kernel.ipynb", cells=None, kernel_id=None)
 
     def test_headless_notebook_create_rejects_python_without_ipykernel(self):
-        with mock.patch.object(self.state, "_projection_client", return_value=None):
+        with (
+            mock.patch.object(self.state, "_projection_client", return_value=None),
+            mock.patch("agent_repl.core.server.subprocess.run", return_value=mock.Mock(returncode=1, stderr="No module named 'ipykernel'", stdout="")),
+        ):
             with self.assertRaisesRegex(RuntimeError, "is not kernel-capable"):
                 self.state.notebook_create("notebooks/no-ipykernel.ipynb", cells=None, kernel_id=sys.executable)
 
@@ -609,6 +701,114 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(status_status, 200)
             self.assertFalse(status_body["open"])
             self.assertEqual(status_body["kernel_state"], "idle")
+
+    def test_headless_restart_and_run_all_allows_owner_session_leases(self):
+        notebook_path = "notebooks/headless-restart-lease.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": "21 * 2"}],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            self.state.start_session("human", "vscode", "editor", "sess-human", ["projection", "editor", "presence"])
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            cell_id = contents_body["cells"][0]["cell_id"]
+
+            lease_body, lease_status = self.state.acquire_cell_lease(
+                session_id="sess-human",
+                path=notebook_path,
+                cell_id=cell_id,
+            )
+            self.assertEqual(lease_status, 200)
+            self.assertEqual(lease_body["lease"]["session_id"], "sess-human")
+
+            blocked_body, blocked_status = self.state.notebook_restart_and_run_all(notebook_path)
+            self.assertEqual(blocked_status, 409)
+            self.assertEqual(blocked_body["conflict"]["lease"]["session_id"], "sess-human")
+            self.assertEqual(blocked_body["conflict"]["operation"], "execute-cell")
+
+            allowed_body, allowed_status = self.state.notebook_restart_and_run_all(
+                notebook_path,
+                owner_session_id="sess-human",
+            )
+            self.assertEqual(allowed_status, 200)
+            self.assertEqual(allowed_body["status"], "ok")
+            self.assertEqual(allowed_body["executions"][0]["outputs"][0]["data"]["text/plain"], "42")
+
+    def test_headless_execute_all_stops_after_first_failed_cell(self):
+        notebook_path = "notebooks/headless-stop-on-error.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "print('before')"},
+                    {"type": "code", "source": "raise ValueError('boom')"},
+                    {"type": "code", "source": "print('after')"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            failed_cell_id = contents_body["cells"][1]["cell_id"]
+
+            execute_body, execute_status = self.state.notebook_execute_all(notebook_path)
+            self.assertEqual(execute_status, 200)
+            self.assertEqual(execute_body["status"], "error")
+            self.assertTrue(execute_body["stopped_on_error"])
+            self.assertEqual(execute_body["failed_cell_id"], failed_cell_id)
+            self.assertEqual(len(execute_body["executions"]), 2)
+            self.assertEqual(execute_body["executions"][0]["status"], "ok")
+            self.assertEqual(execute_body["executions"][1]["status"], "error")
+            self.assertEqual(execute_body["executions"][1]["cell_id"], failed_cell_id)
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            self.assertEqual(contents_body["cells"][0]["outputs"][0]["text"], "before\n")
+            self.assertEqual(contents_body["cells"][1]["outputs"][0]["output_type"], "error")
+            self.assertEqual(contents_body["cells"][2]["outputs"], [])
+            self.assertIsNone(contents_body["cells"][2]["execution_count"])
+
+    def test_headless_restart_and_run_all_stops_after_first_failed_cell(self):
+        notebook_path = "notebooks/headless-restart-stop-on-error.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "print('before restart')"},
+                    {"type": "code", "source": "raise RuntimeError('boom')"},
+                    {"type": "code", "source": "print('after restart')"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            restart_body, restart_status = self.state.notebook_restart_and_run_all(notebook_path)
+            self.assertEqual(restart_status, 200)
+            self.assertEqual(restart_body["status"], "error")
+            self.assertEqual(restart_body["mode"], "headless")
+            self.assertTrue(restart_body["stopped_on_error"])
+            self.assertEqual(len(restart_body["executions"]), 2)
+            self.assertEqual(restart_body["restart"]["kernel_state"], "idle")
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            self.assertEqual(contents_body["cells"][2]["outputs"], [])
+            self.assertIsNone(contents_body["cells"][2]["execution_count"])
 
     def test_headless_notebook_runtime_reports_active_runtime_without_projection_client(self):
         notebook_path = "notebooks/headless-runtime.ipynb"
@@ -1078,6 +1278,82 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(finished_status, 200)
             self.assertTrue(any(event["type"] == "execution-finished" for event in finished_body["recent_events"]))
 
+    def test_notebook_insert_execute_exposes_inserted_cell_in_contents_while_running(self):
+        notebook_path = "notebooks/ix-visible-while-running.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(notebook_path, cells=[], kernel_id=kernel_python)
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            entered_execute = threading.Event()
+            release_execute = threading.Event()
+            original_execute_source = self.state._execute_source
+            result_holder: dict[str, Any] = {}
+
+            def delayed_execute_source(*args: Any, **kwargs: Any) -> tuple[list[Any], int | None, str | None]:
+                entered_execute.set()
+                self.assertTrue(release_execute.wait(timeout=5), "timed out waiting to release ix execution")
+                return original_execute_source(*args, **kwargs)
+
+            def run_insert_execute() -> None:
+                body, status = self.state.notebook_insert_execute(
+                    notebook_path,
+                    source="21 * 2",
+                    cell_type="code",
+                    at_index=-1,
+                )
+                result_holder["body"] = body
+                result_holder["status"] = status
+
+            with mock.patch.object(self.state, "_execute_source", side_effect=delayed_execute_source):
+                thread = threading.Thread(target=run_insert_execute)
+                thread.start()
+                self.assertTrue(entered_execute.wait(timeout=5), "ix execution never started")
+
+                contents_body, contents_status = self.state.notebook_contents(notebook_path)
+                self.assertEqual(contents_status, 200)
+                self.assertEqual(len(contents_body["cells"]), 1)
+                self.assertEqual(contents_body["cells"][0]["source"], "21 * 2")
+                self.assertEqual(contents_body["cells"][0]["outputs"], [])
+                self.assertTrue(thread.is_alive(), "ix finished before contents could observe the inserted cell")
+
+                release_execute.set()
+                thread.join(timeout=10)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result_holder["status"], 200)
+            self.assertEqual(result_holder["body"]["outputs"][0]["data"]["text/plain"], "42")
+
+    def test_notebook_activity_cursor_does_not_skip_same_tick_events(self):
+        notebook_path = "notebooks/demo.ipynb"
+
+        with mock.patch("agent_repl.core.server.time.time", side_effect=[100.0, 100.0]):
+            first_event = self.state._append_activity_event(
+                path=notebook_path,
+                event_type="execution-finished",
+                detail="Finished cell 1",
+                cell_id="cell-1",
+                cell_index=0,
+            )
+            second_event = self.state._append_activity_event(
+                path=notebook_path,
+                event_type="execution-started",
+                detail="Executing cell 2",
+                cell_id="cell-2",
+                cell_index=1,
+            )
+
+        self.assertGreater(second_event["timestamp"], first_event["timestamp"])
+
+        body, status = self.state.notebook_activity(notebook_path, since=first_event["timestamp"])
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [event["event_id"] for event in body["recent_events"]],
+            [second_event["event_id"]],
+        )
+
     def test_notebook_edit_emits_cell_source_update_event_with_payload(self):
         notebook_path = "notebooks/source-update-event.ipynb"
         kernel_python = _python_with_ipykernel()
@@ -1168,6 +1444,46 @@ class TestCoreState(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(result_holder["status"], 200)
             self.assertEqual(result_holder["body"]["status"], "ok")
+
+    def test_notebook_execute_all_emits_finished_after_output_update_for_each_cell(self):
+        notebook_path = "notebooks/run-all-activity-order.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "print('one')"},
+                    {"type": "code", "source": "print('two')"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            cell_ids = [cell["cell_id"] for cell in contents_body["cells"]]
+
+            execute_body, execute_status = self.state.notebook_execute_all(
+                notebook_path,
+                owner_session_id=None,
+            )
+            self.assertEqual(execute_status, 200)
+            self.assertEqual(execute_body["status"], "ok")
+
+            activity_body, activity_status = self.state.notebook_activity(notebook_path)
+            self.assertEqual(activity_status, 200)
+            events = activity_body["recent_events"]
+
+            for cell_id in cell_ids:
+                cell_events = [event["type"] for event in events if event["cell_id"] == cell_id]
+                self.assertIn("cell-outputs-updated", cell_events)
+                self.assertIn("execution-finished", cell_events)
+                self.assertGreater(
+                    max(index for index, event_type in enumerate(cell_events) if event_type == "execution-finished"),
+                    max(index for index, event_type in enumerate(cell_events) if event_type == "cell-outputs-updated"),
+                )
 
     def test_cell_leases_resolve_cells_under_notebook_lock(self):
         import nbformat
@@ -2054,6 +2370,35 @@ class TestBridgeEndpoints(unittest.TestCase):
             },
         )
 
+    def test_open_calls_post(self):
+        self.client.open("demo.ipynb")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebook/open", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "demo.ipynb", "cwd": "/workspace", "editor": "canvas", "target": "vscode"},
+        )
+
+    def test_open_passes_selected_editor(self):
+        self.client.open("demo.ipynb", editor="jupyter")
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "demo.ipynb", "cwd": "/workspace", "editor": "jupyter", "target": "vscode"},
+        )
+
+    def test_open_passes_browser_target_and_url(self):
+        self.client.open("demo.ipynb", target="browser", browser_url="http://127.0.0.1:4183/preview.html")
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {
+                "path": "demo.ipynb",
+                "cwd": "/workspace",
+                "editor": "canvas",
+                "target": "browser",
+                "browser_url": "http://127.0.0.1:4183/preview.html",
+            },
+        )
+
     def test_select_kernel_includes_interactive(self):
         self.client.select_kernel("nb.ipynb", interactive=True)
         self.assertEqual(
@@ -2300,6 +2645,24 @@ class TestCoreEndpoints(unittest.TestCase):
         self.assertIn("/api/notebooks/execute-all", url)
         self.assertEqual(self.mock_post.call_args.kwargs["json"], {"path": "nb.ipynb"})
 
+    def test_notebook_execute_all_includes_owner_session_id(self):
+        self.client.notebook_execute_all("nb.ipynb", owner_session_id="sess-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/execute-all", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "owner_session_id": "sess-1"},
+        )
+
+    def test_notebook_restart_and_run_all_includes_owner_session_id(self):
+        self.client.notebook_restart_and_run_all("nb.ipynb", owner_session_id="sess-1")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/notebooks/restart-and-run-all", url)
+        self.assertEqual(
+            self.mock_post.call_args.kwargs["json"],
+            {"path": "nb.ipynb", "owner_session_id": "sess-1"},
+        )
+
     def test_notebook_runtime_calls_post(self):
         self.client.notebook_runtime("nb.ipynb")
         url = self.mock_post.call_args[0][0]
@@ -2496,6 +2859,12 @@ class TestParser(unittest.TestCase):
         args = build_parser().parse_args(["ix", "nb.ipynb", "--session-id", "sess-1", "-s", "print(1)"])
         self.assertEqual(args.session_id, "sess-1")
 
+    def test_ix_with_cells_json(self):
+        args = build_parser().parse_args([
+            "ix", "nb.ipynb", "--cells-json", '[{"type":"markdown","source":"# hi"},{"type":"code","source":"x=1"}]',
+        ])
+        self.assertEqual(args.cells_json, '[{"type":"markdown","source":"# hi"},{"type":"code","source":"x=1"}]')
+
     def test_edit_replace_source(self):
         args = build_parser().parse_args(["edit", "nb.ipynb", "replace-source", "-s", "x=1", "--cell-id", "c1"])
         self.assertEqual(args.edit_command, "replace-source")
@@ -2509,6 +2878,12 @@ class TestParser(unittest.TestCase):
         args = build_parser().parse_args(["edit", "nb.ipynb", "insert", "-s", "# hi", "--cell-type", "markdown"])
         self.assertEqual(args.edit_command, "insert")
         self.assertEqual(getattr(args, "cell_type", None), "markdown")
+
+    def test_edit_insert_with_cells_json(self):
+        args = build_parser().parse_args([
+            "edit", "nb.ipynb", "insert", "--cells-json", '[{"type":"markdown","source":"# hi"},{"type":"code","source":"x=1"}]',
+        ])
+        self.assertEqual(args.cells_json, '[{"type":"markdown","source":"# hi"},{"type":"code","source":"x=1"}]')
 
     def test_edit_delete(self):
         args = build_parser().parse_args(["edit", "nb.ipynb", "delete", "-i", "2"])
@@ -2531,6 +2906,9 @@ class TestParser(unittest.TestCase):
     def test_new(self):
         args = build_parser().parse_args(["new", "nb.ipynb"])
         self.assertEqual(args.command, "new")
+        self.assertFalse(args.open)
+        self.assertEqual(args.target, "vscode")
+        self.assertEqual(args.editor, "canvas")
 
     def test_new_with_kernel_and_cells_json(self):
         args = build_parser().parse_args([
@@ -2538,6 +2916,32 @@ class TestParser(unittest.TestCase):
         ])
         self.assertEqual(args.kernel, "/tmp/.venv/bin/python")
         self.assertEqual(args.cells_json, '[{"type":"code","source":"x=1"}]')
+
+    def test_new_with_open(self):
+        args = build_parser().parse_args(["new", "nb.ipynb", "--open"])
+        self.assertTrue(args.open)
+        self.assertEqual(args.target, "vscode")
+        self.assertEqual(args.editor, "canvas")
+
+    def test_new_with_open_in_browser(self):
+        args = build_parser().parse_args(["new", "nb.ipynb", "--open", "--target", "browser", "--browser-url", "http://127.0.0.1:4183/preview.html"])
+        self.assertTrue(args.open)
+        self.assertEqual(args.target, "browser")
+        self.assertEqual(args.browser_url, "http://127.0.0.1:4183/preview.html")
+
+    def test_open(self):
+        args = build_parser().parse_args(["open", "nb.ipynb"])
+        self.assertEqual(args.command, "open")
+        self.assertEqual(args.target, "vscode")
+        self.assertEqual(args.editor, "canvas")
+
+    def test_open_with_jupyter_editor(self):
+        args = build_parser().parse_args(["open", "nb.ipynb", "--editor", "jupyter"])
+        self.assertEqual(args.editor, "jupyter")
+
+    def test_open_in_browser(self):
+        args = build_parser().parse_args(["open", "nb.ipynb", "--target", "browser"])
+        self.assertEqual(args.target, "browser")
 
     def test_reload(self):
         args = build_parser().parse_args(["reload"])
@@ -2715,6 +3119,7 @@ class TestCommands(unittest.TestCase):
         client.restart_kernel.return_value = {"status": "ok"}
         client.restart_and_run_all.return_value = {"status": "ok"}
         client.create.return_value = {"status": "ok"}
+        client.open.return_value = {"status": "ok", "editor": "canvas", "target": "vscode"}
         client.select_kernel.return_value = {"status": "ok"}
         client.edit.return_value = {"results": []}
         client.prompt_status.return_value = {"status": "ok"}
@@ -2865,7 +3270,15 @@ class TestCommands(unittest.TestCase):
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
-        core.notebook_insert_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30)
+        core.notebook_insert_execute.assert_called_once_with(
+            "nb.ipynb",
+            "x=1",
+            at_index=-1,
+            wait=True,
+            timeout=30,
+            owner_session_id="sess-1",
+        )
+        core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.insert_and_execute.assert_not_called()
 
     def test_ix_passes_session_id_to_core_execution_surface(self):
@@ -2899,6 +3312,91 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=False, timeout=30)
 
+    def test_ix_batch_uses_bridge_surface_sequentially(self):
+        client = self._mock_client()
+        client.edit.return_value = {"path": "nb.ipynb", "results": [{"op": "insert", "cell_id": "md-1"}]}
+        client.insert_and_execute.side_effect = [
+            {"status": "ok", "cell_id": "code-1", "cell_index": 1},
+            {"status": "ok", "cell_id": "code-2", "cell_index": 2},
+        ]
+        code, out = self._run([
+            "ix",
+            "nb.ipynb",
+            "--cells-json",
+            '[{"type":"markdown","source":"# hi"},{"type":"code","source":"x=1"},{"type":"code","source":"x+1"}]',
+        ], client)
+        self.assertEqual(code, 0)
+        client.edit.assert_called_once_with(
+            "nb.ipynb",
+            [{"op": "insert", "source": "# hi", "cell_type": "markdown", "at_index": -1}],
+        )
+        self.assertEqual(
+            client.insert_and_execute.call_args_list,
+            [
+                mock.call("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30),
+                mock.call("nb.ipynb", "x+1", at_index=-1, wait=True, timeout=30),
+            ],
+        )
+        payload = json.loads(out)
+        self.assertEqual(payload["operation"], "batch-insert-execute")
+        self.assertEqual(len(payload["results"]), 3)
+
+    def test_ix_batch_prefers_core_surfaces_sequentially(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client()
+        core.notebook_edit.return_value = {"path": "nb.ipynb", "results": [{"op": "insert", "cell_id": "md-1"}]}
+        core.notebook_insert_execute.side_effect = [
+            {"status": "ok", "cell_id": "code-1", "cell_index": 1},
+            {"status": "ok", "cell_id": "code-2", "cell_index": 2},
+        ]
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main([
+                    "ix",
+                    "nb.ipynb",
+                    "--session-id",
+                    "sess-1",
+                    "--cells-json",
+                    '[{"type":"markdown","source":"# hi"},{"type":"code","source":"x=1"},{"type":"code","source":"x+1"}]',
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_edit.assert_called_once_with(
+            "nb.ipynb",
+            [{"op": "insert", "source": "# hi", "cell_type": "markdown", "at_index": -1}],
+            owner_session_id="sess-1",
+        )
+        self.assertEqual(
+            core.notebook_insert_execute.call_args_list,
+            [
+                mock.call("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30, owner_session_id="sess-1"),
+                mock.call("nb.ipynb", "x+1", at_index=-1, wait=True, timeout=30, owner_session_id="sess-1"),
+            ],
+        )
+        bridge.insert_and_execute.assert_not_called()
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["operation"], "batch-insert-execute")
+        self.assertEqual(len(payload["results"]), 3)
+
+    def test_ix_batch_no_wait_rejected(self):
+        client = self._mock_client()
+        with self.assertRaises(SystemExit) as exited:
+            self._run([
+                "ix",
+                "nb.ipynb",
+                "--cells-json",
+                '[{"type":"code","source":"x=1"},{"type":"code","source":"x+1"}]',
+                "--no-wait",
+            ], client)
+        self.assertIn("batch ix does not support --no-wait", str(exited.exception))
+
     def test_exec_with_code(self):
         client = self._mock_client()
         code, _ = self._run(["exec", "nb.ipynb", "-c", "x=1"], client)
@@ -2926,7 +3424,14 @@ class TestCommands(unittest.TestCase):
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
-        core.notebook_execute_cell.assert_called_once_with("nb.ipynb", cell_id="abc", wait=True, timeout=30)
+        core.notebook_execute_cell.assert_called_once_with(
+            "nb.ipynb",
+            cell_id="abc",
+            wait=True,
+            timeout=30,
+            owner_session_id="sess-1",
+        )
+        core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.execute_cell.assert_not_called()
 
     def test_exec_passes_session_id_to_core_execution_surface(self):
@@ -2950,6 +3455,81 @@ class TestCommands(unittest.TestCase):
             wait=True,
             timeout=30,
             owner_session_id="sess-1",
+        )
+        bridge.execute_cell.assert_not_called()
+
+    def test_exec_reuses_preferred_human_session_when_session_id_is_omitted(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client(list_sessions={
+            "status": "ok",
+            "sessions": [
+                {
+                    "session_id": "sess-browser",
+                    "actor": "human",
+                    "client": "browser",
+                    "status": "attached",
+                    "capabilities": ["projection", "presence"],
+                    "last_seen_at": 10,
+                    "created_at": 1,
+                },
+                {
+                    "session_id": "sess-vscode",
+                    "actor": "human",
+                    "client": "vscode",
+                    "status": "attached",
+                    "capabilities": ["projection", "editor", "presence"],
+                    "last_seen_at": 9,
+                    "created_at": 2,
+                },
+            ],
+        })
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["exec", "nb.ipynb", "--cell-id", "abc"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_execute_cell.assert_called_once_with(
+            "nb.ipynb",
+            cell_id="abc",
+            wait=True,
+            timeout=30,
+            owner_session_id="sess-vscode",
+        )
+        core.start_session.assert_not_called()
+        bridge.execute_cell.assert_not_called()
+
+    def test_exec_starts_human_cli_session_when_no_reusable_session_exists(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client(
+            list_sessions={"status": "ok", "sessions": []},
+            start_session={"status": "ok", "session": {"session_id": "sess-cli"}},
+        )
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["exec", "nb.ipynb", "--cell-id", "abc"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
+        core.notebook_execute_cell.assert_called_once_with(
+            "nb.ipynb",
+            cell_id="abc",
+            wait=True,
+            timeout=30,
+            owner_session_id="sess-cli",
         )
         bridge.execute_cell.assert_not_called()
 
@@ -2981,6 +3561,7 @@ class TestCommands(unittest.TestCase):
         code, _ = self._run(["new", "nb.ipynb"], client)
         self.assertEqual(code, 0)
         client.create.assert_called_once_with("nb.ipynb", cells=None, kernel_id=None)
+        client.open.assert_not_called()
 
     def test_new_prefers_core_notebook_projection(self):
         bridge = self._mock_client()
@@ -2999,6 +3580,7 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         core.notebook_create.assert_called_once_with("nb.ipynb", cells=None, kernel_id=None)
         bridge.create.assert_not_called()
+        bridge.open.assert_not_called()
 
     def test_new_with_kernel_and_cells_json(self):
         client = self._mock_client()
@@ -3010,6 +3592,72 @@ class TestCommands(unittest.TestCase):
             "nb.ipynb",
             cells=[{"type": "code", "source": "x=1"}],
             kernel_id="/tmp/.venv/bin/python",
+        )
+
+    def test_new_with_open_uses_canvas_editor_by_default(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client(notebook_create={"status": "ok", "path": "nb.ipynb"})
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["new", "nb.ipynb", "--open"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_create.assert_called_once_with("nb.ipynb", cells=None, kernel_id=None)
+        bridge.open.assert_called_once_with("nb.ipynb", editor="canvas", target="vscode", browser_url=None)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["open"]["editor"], "canvas")
+        self.assertEqual(payload["open"]["target"], "vscode")
+
+    def test_new_with_open_can_target_browser(self):
+        bridge = self._mock_client(open={"status": "ok", "path": "nb.ipynb", "editor": "canvas", "target": "browser", "url": "http://127.0.0.1:4183/preview.html?path=nb.ipynb"})
+        core = self._mock_core_client(notebook_create={"status": "ok", "path": "nb.ipynb"})
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["new", "nb.ipynb", "--open", "--target", "browser", "--browser-url", "http://127.0.0.1:4183/preview.html"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        bridge.open.assert_called_once_with(
+            "nb.ipynb",
+            editor="canvas",
+            target="browser",
+            browser_url="http://127.0.0.1:4183/preview.html",
+        )
+
+    def test_open_uses_canvas_editor_by_default(self):
+        client = self._mock_client(open={"status": "ok", "path": "nb.ipynb", "editor": "canvas"})
+        code, _ = self._run(["open", "nb.ipynb"], client)
+        self.assertEqual(code, 0)
+        client.open.assert_called_once_with("nb.ipynb", editor="canvas", target="vscode", browser_url=None)
+
+    def test_open_can_target_jupyter(self):
+        client = self._mock_client(open={"status": "ok", "path": "nb.ipynb", "editor": "jupyter"})
+        code, _ = self._run(["open", "nb.ipynb", "--editor", "jupyter"], client)
+        self.assertEqual(code, 0)
+        client.open.assert_called_once_with("nb.ipynb", editor="jupyter", target="vscode", browser_url=None)
+
+    def test_open_can_target_browser(self):
+        client = self._mock_client(open={"status": "ok", "path": "nb.ipynb", "editor": "canvas", "target": "browser"})
+        code, _ = self._run(["open", "nb.ipynb", "--target", "browser", "--browser-url", "http://127.0.0.1:4183/preview.html"], client)
+        self.assertEqual(code, 0)
+        client.open.assert_called_once_with(
+            "nb.ipynb",
+            editor="canvas",
+            target="browser",
+            browser_url="http://127.0.0.1:4183/preview.html",
         )
 
     def test_edit_prefers_core_execution_surface(self):
@@ -3030,7 +3678,43 @@ class TestCommands(unittest.TestCase):
         core.notebook_edit.assert_called_once_with(
             "nb.ipynb",
             [{"op": "replace-source", "source": "x=2", "cell_id": "abc"}],
+            owner_session_id="sess-1",
         )
+        core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
+        bridge.edit.assert_not_called()
+
+    def test_edit_insert_batch_prefers_core_execution_surface(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client()
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main([
+                    "edit",
+                    "nb.ipynb",
+                    "insert",
+                    "--cells-json",
+                    '[{"type":"markdown","source":"# hi"},{"type":"code","source":"x=1"}]',
+                    "--at-index",
+                    "2",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_edit.assert_called_once_with(
+            "nb.ipynb",
+            [
+                {"op": "insert", "source": "# hi", "cell_type": "markdown", "at_index": 2},
+                {"op": "insert", "source": "x=1", "cell_type": "code", "at_index": 3},
+            ],
+            owner_session_id="sess-1",
+        )
+        core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.edit.assert_not_called()
 
     def test_run_all_prefers_core_execution_surface(self):
@@ -3048,7 +3732,40 @@ class TestCommands(unittest.TestCase):
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
-        core.notebook_execute_all.assert_called_once_with("nb.ipynb")
+        core.notebook_execute_all.assert_called_once_with("nb.ipynb", owner_session_id="sess-1")
+        core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
+        bridge.execute_all.assert_not_called()
+
+    def test_run_all_reuses_preferred_human_session(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client(list_sessions={
+            "status": "ok",
+            "sessions": [
+                {
+                    "session_id": "sess-vscode",
+                    "actor": "human",
+                    "client": "vscode",
+                    "status": "attached",
+                    "capabilities": ["projection", "editor", "presence"],
+                    "last_seen_at": 42,
+                    "created_at": 24,
+                },
+            ],
+        })
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["run-all", "nb.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_execute_all.assert_called_once_with("nb.ipynb", owner_session_id="sess-vscode")
+        core.start_session.assert_not_called()
         bridge.execute_all.assert_not_called()
 
     def test_restart_prefers_core_execution_surface(self):
@@ -3084,7 +3801,40 @@ class TestCommands(unittest.TestCase):
         finally:
             sys.stdout = old
         self.assertEqual(code, 0)
-        core.notebook_restart_and_run_all.assert_called_once_with("nb.ipynb")
+        core.notebook_restart_and_run_all.assert_called_once_with("nb.ipynb", owner_session_id="sess-1")
+        core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
+        bridge.restart_and_run_all.assert_not_called()
+
+    def test_restart_run_all_reuses_preferred_human_session(self):
+        bridge = self._mock_client()
+        core = self._mock_core_client(list_sessions={
+            "status": "ok",
+            "sessions": [
+                {
+                    "session_id": "sess-browser",
+                    "actor": "human",
+                    "client": "browser",
+                    "status": "stale",
+                    "capabilities": ["projection", "presence"],
+                    "last_seen_at": 42,
+                    "created_at": 24,
+                },
+            ],
+        })
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._client", return_value=bridge),
+                mock.patch("agent_repl.cli._notebook_client", return_value=core),
+            ):
+                code = main(["restart-run-all", "nb.ipynb"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        core.notebook_restart_and_run_all.assert_called_once_with("nb.ipynb", owner_session_id="sess-browser")
+        core.start_session.assert_not_called()
         bridge.restart_and_run_all.assert_not_called()
 
     def test_reload_outputs_response(self):
@@ -3432,7 +4182,9 @@ class TestCommands(unittest.TestCase):
         client.notebook_project_visible.assert_called_once_with(
             "notebooks/demo.ipynb",
             cells=[{"cell_type": "code", "source": "x = 1"}],
+            owner_session_id="sess-1",
         )
+        client.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
 
     def test_core_project_visible_notebook_with_session_id(self):
         client = self._mock_core_client()
@@ -3473,7 +4225,9 @@ class TestCommands(unittest.TestCase):
             "notebooks/demo.ipynb",
             cell_index=2,
             source="x = 1",
+            owner_session_id="sess-1",
         )
+        client.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
 
     def test_core_execute_visible_cell_with_session_id(self):
         client = self._mock_core_client()

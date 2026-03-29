@@ -1,17 +1,31 @@
 # Development Docs
 
-**Internal reference** - This folder contains engineering, architecture, and design docs for contributors.
+**Internal reference** - This folder explains how the current system is built, where the compatibility seams still are, and which design docs are aspirational rather than shipped.
 
-**Not the public surface** - End-user guides live under `docs/`. This folder is for how the system is built and where it is going.
+**Not the public surface** - End-user guides live under `docs/` and should describe the supported workflow only.
 
-**Runtime-first framing** - The current codebase is centered on a shared notebook runtime with an optional editor projection layer.
+**Runtime-first framing** - The product now centers on a shared workspace runtime. VS Code, Cursor, and the browser preview are clients of that runtime rather than the primary source of truth.
 
-## Current Engineering Docs
+## Read These First
 
-- [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md)
-- [North-Star Design Set](/Users/giladrubin/python_workspace/agent-repl/dev/design/README.md)
+- [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md) - shipped topology, live module boundaries, runtime/session model, and preview/editor split
+- [VS Code Jupyter Parity Checklist](/Users/giladrubin/python_workspace/agent-repl/dev/jupyter-parity-checklist.md) - integration gaps and parity work against native notebooks
+
+## Design Docs
+
+- [North-Star Design Set](/Users/giladrubin/python_workspace/agent-repl/dev/design/README.md) - aspirational UX and architecture direction, not a guarantee of current behavior
+- [Architecture Modernization Plan](/Users/giladrubin/python_workspace/agent-repl/dev/architecture-modernization-plan.md) - recommended path to reduce bespoke infrastructure while preserving current CLI, VS Code, and browser behavior
+- [Architecture Modernization Rollout](/Users/giladrubin/python_workspace/agent-repl/dev/implementation-chain/architecture-modernization-rollout.md) - implementation slices with HLD, acceptance criteria, and test gates for the modernization chain
+- [Behavior Locks](/Users/giladrubin/python_workspace/agent-repl/dev/behavior-locks/README.md) - preserved product behaviors and their regression-test anchors so modernization does not silently erase interaction decisions
 
 ## Historical Notes
 
 - [Early v2 plan](/Users/giladrubin/python_workspace/agent-repl/dev/history/agent-repl-v2.md)
 - [Early v2 architecture draft](/Users/giladrubin/python_workspace/agent-repl/dev/history/agent-repl-v2-architecture.md)
+
+## Working Rules
+
+- When a feature, workflow, architecture note, or developer loop changes, update the affected durable docs in the same change: `AGENTS.md`, `SKILL.md`, `docs/`, and `dev/`.
+- Update this folder when the runtime surface, preview/editor topology, or extension build loop changes in a user-visible way
+- Prefer [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md) for shipped details and keep design docs clearly labeled as targets
+- When preview and installed VS Code behavior differ, document which asset source is authoritative and how to verify sync

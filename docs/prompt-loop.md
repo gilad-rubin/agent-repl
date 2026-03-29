@@ -46,7 +46,7 @@ agent-repl respond notebooks/demo.ipynb --to abc123 -s 'df = df.dropna()\nprint(
 - inserts a response cell
 - executes that response cell, then marks the prompt answered
 
-This is an editor-assisted flow today, not the same headless core path as `new`, `ix`, `edit`, or `exec`.
+This is an editor-assisted flow today, not the same headless core path as `new`, `open`, `ix`, `edit`, or `exec`.
 
 ## When to Use This
 
@@ -71,6 +71,8 @@ That means:
 - the human creates prompts from the editor
 - the agent answers from the CLI
 - the notebook remains the shared conversation surface
+
+The shared runtime can still own the notebook execution itself, but prompt discovery and prompt-state updates are currently routed through the editor integration.
 
 ## Next Steps
 

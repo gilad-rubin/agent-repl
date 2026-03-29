@@ -12,6 +12,7 @@ export type WebViewRequest =
     | LoadContentsRequest
     | EditRequest
     | ExecuteCellRequest
+    | InterruptExecutionRequest
     | ExecuteAllRequest
     | SelectKernelRequest
     | RestartKernelRequest
@@ -19,11 +20,13 @@ export type WebViewRequest =
     | GetKernelsRequest
     | GetRuntimeRequest
     | FlushDraftRequest
+    | LspSyncCellRequest
+    | LspCompletionRequest
     | OpenExternalLinkRequest;
 
 interface BaseRequest {
     requestId: string;
-    path: string;
+    path?: string;
 }
 
 export interface LoadContentsRequest extends BaseRequest {
@@ -39,11 +42,17 @@ export type EditOperation =
     | { op: 'insert'; source: string; cell_type: 'code' | 'markdown'; at_index: number }
     | { op: 'delete'; cell_id: string }
     | { op: 'replace-source'; cell_id: string; source: string }
+    | { op: 'change-cell-type'; cell_id: string; cell_type: 'code' | 'markdown'; source?: string }
     | { op: 'move'; cell_id: string; to_index: number };
 
 export interface ExecuteCellRequest extends BaseRequest {
     type: 'execute-cell';
     cell_id: string;
+    source?: string;
+}
+
+export interface InterruptExecutionRequest extends BaseRequest {
+    type: 'interrupt-execution';
 }
 
 export interface ExecuteAllRequest extends BaseRequest {
@@ -78,6 +87,21 @@ export interface FlushDraftRequest extends BaseRequest {
     source: string;
 }
 
+export interface LspSyncCellRequest extends BaseRequest {
+    type: 'lsp-sync-cell';
+    cell_id: string;
+    source: string;
+}
+
+export interface LspCompletionRequest extends BaseRequest {
+    type: 'lsp-complete';
+    cell_id: string;
+    source: string;
+    offset: number;
+    explicit?: boolean;
+    trigger_character?: string;
+}
+
 export interface OpenExternalLinkRequest {
     type: 'open-external-link';
     requestId: string;
@@ -92,9 +116,14 @@ export type ExtensionMessage =
     | ContentsResponse
     | EditResponse
     | ExecuteStartedResponse
+    | ExecuteFinishedResponse
+    | ExecuteFailedResponse
     | KernelsResponse
     | RuntimeResponse
     | ActivityUpdate
+    | LspDiagnosticsMessage
+    | LspCompletionMessage
+    | LspStatusMessage
     | ErrorResponse
     | GenericOkResponse;
 
@@ -112,6 +141,7 @@ export interface CellData {
     outputs: CellOutput[];
     execution_count: number | null;
     display_number: number | null;
+    metadata?: Record<string, any>;
 }
 
 export interface CellOutput {
@@ -138,6 +168,20 @@ export interface ExecuteStartedResponse {
     cell_id?: string;
 }
 
+export interface ExecuteFinishedResponse {
+    type: 'execute-finished';
+    requestId: string;
+    cell_id?: string;
+    ok?: boolean;
+}
+
+export interface ExecuteFailedResponse {
+    type: 'execute-failed';
+    requestId: string;
+    cell_id?: string;
+    message: string;
+}
+
 export interface KernelsResponse {
     type: 'kernels';
     requestId: string;
@@ -148,17 +192,52 @@ export interface KernelsResponse {
 export interface RuntimeResponse {
     type: 'runtime';
     requestId?: string;
+    active?: boolean;
     busy: boolean;
     kernel_label?: string;
+    runtime_id?: string;
+    kernel_generation?: number | null;
     current_execution?: { cell_id?: string; cell_index?: number } | null;
 }
+
+export interface LspDiagnosticsMessage {
+    type: 'lsp-diagnostics';
+    diagnostics_by_cell: Record<string, Array<{
+        from: number;
+        to: number;
+        severity: 'error' | 'warning' | 'info' | 'hint';
+        message: string;
+        source?: string;
+    }>>;
+}
+
+export interface LspStatusMessage {
+    type: 'lsp-status';
+    state: 'starting' | 'ready' | 'unavailable';
+    message: string;
+}
+
+export interface LspCompletionMessage {
+    type: 'lsp-completions';
+    requestId: string;
+    cell_id: string;
+    items: Array<{
+        label: string;
+        kind?: string;
+        detail?: string;
+        documentation?: string;
+        apply?: string;
+        sortText?: string;
+        filterText?: string;
+    }>;
+ }
 
 export interface ActivityUpdate {
     type: 'activity-update';
     events: ActivityEvent[];
     presence: PresenceRecord[];
     leases: LeaseRecord[];
-    runtime: { busy: boolean; current_execution?: any } | null;
+    runtime: { busy: boolean; kernel_label?: string; current_execution?: any } | null;
     cursor: number;
 }
 

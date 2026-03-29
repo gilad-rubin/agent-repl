@@ -7,5 +7,9 @@ dist/
 *.egg-info/
 .env
 extension/out/
+extension/media/canvas.css
+extension/media/canvas.js
+extension/media/preview-python-worker.js
+extension/media/fonts/
 notebooks/
 .agent-repl/

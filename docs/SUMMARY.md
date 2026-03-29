@@ -12,3 +12,4 @@ Public documentation for `agent-repl`:
 Internal architecture and development docs live under:
 
 - [dev/README](/Users/giladrubin/python_workspace/agent-repl/dev/README.md)
+- [dev/current-architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md)

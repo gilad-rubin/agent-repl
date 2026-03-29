@@ -366,8 +366,19 @@ class CoreClient:
     def notebook_execution(self, execution_id: str) -> dict[str, Any]:
         return self._post("/api/notebooks/execution", {"execution_id": execution_id})
 
-    def notebook_execute_all(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/execute-all", {"path": path}, timeout=120)
+    def notebook_execute_all(
+        self,
+        path: str,
+        *,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path}
+        if owner_session_id is not None:
+            body["owner_session_id"] = owner_session_id
+        return self._post("/api/notebooks/execute-all", body, timeout=120)
+
+    def notebook_interrupt(self, path: str) -> dict[str, Any]:
+        return self._post("/api/notebooks/interrupt", {"path": path}, timeout=30)
 
     def notebook_runtime(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/runtime", {"path": path}, timeout=120)
@@ -443,8 +454,16 @@ class CoreClient:
     def notebook_restart(self, path: str) -> dict[str, Any]:
         return self._post("/api/notebooks/restart", {"path": path}, timeout=120)
 
-    def notebook_restart_and_run_all(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/restart-and-run-all", {"path": path}, timeout=120)
+    def notebook_restart_and_run_all(
+        self,
+        path: str,
+        *,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"path": path}
+        if owner_session_id is not None:
+            body["owner_session_id"] = owner_session_id
+        return self._post("/api/notebooks/restart-and-run-all", body, timeout=120)
 
     def list_branches(self) -> dict[str, Any]:
         return self._get("/api/branches")

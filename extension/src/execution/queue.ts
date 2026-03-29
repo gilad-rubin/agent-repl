@@ -2,6 +2,18 @@ import * as vscode from 'vscode';
 import { resolveCell, getCellId } from '../notebook/identity';
 import { AGENT_REPL_OUTPUT_METADATA_KEY, JupyterOutput, toJupyter, stripForAgent, toVSCode } from '../notebook/outputs';
 import { resolveNotebook, ensureNotebookEditor, captureEditorFocus, restoreEditorFocus } from '../notebook/resolver';
+import { logNotebookDiagnostic } from '../debug';
+
+function queueDebug(path: string, event: string, data: Record<string, unknown> = {}): void {
+    const queue = queues.get(path) ?? [];
+    const snapshot = {
+        executingCells: [...executingCells.entries()].map(([k, v]) => ({ key: k, cellId: v.cellId, preview: v.sourcePreview })),
+        kernelState,
+        queueEntries: queue.map(e => ({ id: e.id, cellId: e.cellId, status: e.status, preview: e.sourcePreview })),
+        ...data,
+    };
+    logNotebookDiagnostic(path, `queue:${event}`, snapshot);
+}
 
 let executionCounter = 0;
 type ExecutionMode = 'no-yank' | 'native';
@@ -11,6 +23,8 @@ interface QueueEntry {
     path: string;
     cellId: string;
     sourcePreview: string;
+    batchId?: string;
+    stopBatchOnError?: boolean;
     queuedAt: Date;
     startedAt?: Date;
     status: 'queued' | 'running' | 'completed' | 'error';
@@ -83,25 +97,50 @@ export function initExecutionMonitor(): vscode.Disposable {
 
             if (executionSummaryIndicatesCompletion(summary)) {
                 // Execution completed
+                const wasTracked = executingCells.has(key);
                 executingCells.delete(key);
                 updateKernelState();
-                processNext(fsPath);
 
-                // Fire completion callback (used by runCell)
                 const cb = completionCallbacks.get(key);
+                queueDebug(fsPath, 'monitor:completed', {
+                    cellKey: key,
+                    wasTracked,
+                    hasCallback: !!cb,
+                    summary: {
+                        success: summary?.success,
+                        executionOrder: summary?.executionOrder,
+                        endTime: summary?.timing?.endTime,
+                    },
+                });
+
                 if (cb) {
                     completionCallbacks.delete(key);
                     cb('completed');
+                } else {
+                    processNext(fsPath);
                 }
             } else if (summary) {
                 // Execution started (summary set/cleared without endTime)
+                const cellId = getCellId(change.cell) ?? `index-${change.cell.index}`;
+                const sourcePreview = change.cell.document.getText().split('\n')[0].slice(0, 80);
                 executingCells.set(key, {
                     fsPath,
                     cellIndex: change.cell.index,
-                    cellId: getCellId(change.cell) ?? `index-${change.cell.index}`,
-                    sourcePreview: change.cell.document.getText().split('\n')[0].slice(0, 80),
+                    cellId,
+                    sourcePreview,
                 });
                 updateKernelState();
+
+                queueDebug(fsPath, 'monitor:started', {
+                    cellKey: key,
+                    cellId,
+                    sourcePreview,
+                    summary: {
+                        success: summary?.success,
+                        executionOrder: summary?.executionOrder,
+                        endTime: summary?.timing?.endTime,
+                    },
+                });
             }
         }
     });
@@ -117,6 +156,12 @@ export function resetExecutionState(
     fsPath?: string,
     reason: string = 'Execution canceled due to kernel restart'
 ): void {
+    queueDebug(fsPath ?? 'global', 'resetExecutionState', {
+        reason,
+        executingCellCount: executingCells.size,
+        completionCallbackCount: completionCallbacks.size,
+    });
+
     for (const key of [...executingCells.keys()]) {
         if (matchesCellKeyPath(key, fsPath)) {
             executingCells.delete(key);
@@ -243,22 +288,32 @@ async function reconcileKernelState(path: string): Promise<void> {
         entry.startedAt &&
         Date.now() - entry.startedAt.getTime() > 300_000
     )) {
+        queueDebug(path, 'reconcile:expired');
         resetExecutionState(path, 'Execution tracking expired');
         return;
     }
 
-    if (!hasExecutingCell(path) && !hasRunningQueueEntry) { return; }
+    if (!hasExecutingCell(path) && !hasRunningQueueEntry) {
+        queueDebug(path, 'reconcile:skip-nothing-running');
+        return;
+    }
 
     try {
         const doc = resolveNotebook(path);
         const realStatus = await queryKernelStatus(doc);
 
-        // If kernel is idle, dead, restarting, or unreachable — our "busy" is stale
+        queueDebug(path, 'reconcile:kernel-check', {
+            realStatus,
+            hasExecutingCell: hasExecutingCell(path),
+            hasRunningQueueEntry,
+        });
+
         if (realStatus !== 'busy' && realStatus !== 'starting') {
+            queueDebug(path, 'reconcile:reset-stale', { realStatus });
             resetExecutionState(path, 'Execution tracking reset after kernel became idle');
         }
-    } catch {
-        // Can't resolve notebook or check kernel — leave state as-is
+    } catch (err: any) {
+        queueDebug(path, 'reconcile:error', { error: err?.message ?? String(err) });
     }
 }
 
@@ -295,15 +350,30 @@ export async function executeCell(
     queues.set(path, queue);
 
     const running = describeRunningExecutions(path, doc, queue);
+    const busy = isNotebookBusy(path);
 
-    if (running.length === 0 && !isNotebookBusy(path)) {
+    queueDebug(path, 'executeCell:entry', {
+        execId,
+        cellId,
+        cellIndex: idx,
+        preview,
+        runningCount: running.length,
+        busy,
+        hasExecutingCell: hasExecutingCell(path),
+    });
+
+    if (running.length === 0 && !busy) {
+        queueDebug(path, 'executeCell:immediate', { execId, cellId });
         return runCell(path, doc, idx, cellId, execId, preview);
     }
 
     // Something running — queue it
     if (queue.filter(e => e.status === 'queued').length >= maxQueue) {
+        queueDebug(path, 'executeCell:queue-full', { execId, cellId, maxQueue });
         throw Object.assign(new Error(`Queue full (max ${maxQueue})`), { statusCode: 429 });
     }
+
+    queueDebug(path, 'executeCell:queued', { execId, cellId, running });
 
     return new Promise((resolve) => {
         const entry: QueueEntry = {
@@ -331,9 +401,14 @@ export async function executeCell(
 export async function startExecution(
     path: string,
     selector: { cell_id?: string; cell_index?: number },
-    maxQueue: number
+    maxQueue: number,
+    options?: {
+        batchId?: string;
+        stopBatchOnError?: boolean;
+        forceQueue?: boolean;
+    },
 ): Promise<any> {
-    return enqueueExecution(path, selector, maxQueue);
+    return enqueueExecution(path, selector, maxQueue, options);
 }
 
 /** Get an execution result by ID (for polling). */
@@ -407,13 +482,23 @@ export async function insertAndExecute(
 export async function startNotebookExecutionAll(path: string, maxQueue: number): Promise<any[]> {
     const doc = resolveNotebook(path);
     const executions: any[] = [];
+    const batchId = `run-all-${++executionCounter}`;
 
     for (let index = 0; index < doc.cellCount; index++) {
         const cell = doc.cellAt(index);
         if (cell.kind !== vscode.NotebookCellKind.Code) {
             continue;
         }
-        executions.push(await startExecution(path, { cell_index: index }, maxQueue));
+        const forceQueue = (queues.get(path) ?? []).some((entry) =>
+            entry.batchId === batchId && (entry.status === 'queued' || entry.status === 'running'),
+        );
+        executions.push(
+            await enqueueExecution(path, { cell_index: index }, maxQueue, {
+                batchId,
+                stopBatchOnError: true,
+                forceQueue,
+            }),
+        );
     }
 
     return executions;
@@ -446,7 +531,12 @@ async function runCell(
 async function enqueueExecution(
     path: string,
     selector: { cell_id?: string; cell_index?: number },
-    maxQueue: number
+    maxQueue: number,
+    options?: {
+        batchId?: string;
+        stopBatchOnError?: boolean;
+        forceQueue?: boolean;
+    },
 ): Promise<any> {
     await reconcileKernelState(path);
 
@@ -461,13 +551,29 @@ async function enqueueExecution(
     queues.set(path, queue);
 
     const running = describeRunningExecutions(path, doc, queue);
+    const busy = isNotebookBusy(path);
 
-    if (running.length === 0 && !isNotebookBusy(path)) {
+    queueDebug(path, 'enqueue:entry', {
+        execId,
+        cellId,
+        cellIndex: idx,
+        preview,
+        runningCount: running.length,
+        busy,
+        hasExecutingCell: hasExecutingCell(path),
+        forceQueue: options?.forceQueue ?? false,
+        batchId: options?.batchId,
+    });
+
+    if (!options?.forceQueue && running.length === 0 && !busy) {
+        queueDebug(path, 'enqueue:immediate-start', { execId, cellId });
         const entry: QueueEntry = {
             id: execId,
             path,
             cellId,
             sourcePreview: preview,
+            batchId: options?.batchId,
+            stopBatchOnError: options?.stopBatchOnError,
             queuedAt: new Date(),
             startedAt: new Date(),
             status: 'running',
@@ -489,14 +595,19 @@ async function enqueueExecution(
     }
 
     if (queue.filter(e => e.status === 'queued').length >= maxQueue) {
+        queueDebug(path, 'enqueue:queue-full', { execId, cellId, maxQueue });
         throw Object.assign(new Error(`Queue full (max ${maxQueue})`), { statusCode: 429 });
     }
+
+    queueDebug(path, 'enqueue:queued', { execId, cellId, running });
 
     const entry: QueueEntry = {
         id: execId,
         path,
         cellId,
         sourcePreview: preview,
+        batchId: options?.batchId,
+        stopBatchOnError: options?.stopBatchOnError,
         queuedAt: new Date(),
         status: 'queued',
         resolve: () => {},
@@ -525,23 +636,40 @@ async function runCellEntry(
     cellIndex: number,
     entry: QueueEntry
 ): Promise<any> {
+    queueDebug(path, 'runCellEntry:start', {
+        execId: entry.id,
+        cellId: entry.cellId,
+        cellIndex,
+        entryStatus: entry.status,
+    });
+
     try {
         const executionPreference = getExecutionMode();
         if (executionPreference === 'native') {
+            queueDebug(path, 'runCellEntry:native-mode', { execId: entry.id });
             return await runCellViaNotebookCommand(path, doc, cellIndex, entry, {
                 executionPreference,
             });
         }
 
+        queueDebug(path, 'runCellEntry:trying-kernel-api', { execId: entry.id });
         const directAttempt = await runCellViaJupyterKernelApi(doc, cellIndex, entry);
         if (directAttempt.result) {
             directAttempt.result.execution_preference = executionPreference;
-            entry.status = 'completed';
+            entry.status = executionResultIndicatesError(directAttempt.result) ? 'error' : 'completed';
             entry.result = directAttempt.result;
+            queueDebug(path, 'runCellEntry:kernel-api-done', {
+                execId: entry.id,
+                status: entry.status,
+            });
             processNext(path);
             return directAttempt.result;
         }
 
+        queueDebug(path, 'runCellEntry:fallback-to-command', {
+            execId: entry.id,
+            fallbackReason: directAttempt.fallbackReason,
+        });
         return await runCellViaNotebookCommand(path, doc, cellIndex, entry, {
             executionPreference,
             fallbackReason: directAttempt.fallbackReason,
@@ -549,6 +677,10 @@ async function runCellEntry(
     } catch (err: any) {
         entry.status = 'error';
         entry.result = { status: 'error', execution_id: entry.id, error: err.message };
+        queueDebug(path, 'runCellEntry:error', {
+            execId: entry.id,
+            error: err.message,
+        });
         processNext(path);
         throw err;
     }
@@ -614,9 +746,11 @@ async function runCellViaNotebookCommand(
     const outputs = toJupyter(cell);
     const stripped = stripForAgent(outputs);
     const execCount = cell.executionSummary?.executionOrder ?? null;
+    const success = cell.executionSummary?.success !== false && !hasErrorOutput(stripped);
+    const errorMessage = success ? undefined : getFirstErrorMessage(stripped) ?? 'Execution failed';
 
     const result = {
-        status: 'ok',
+        status: success ? 'ok' : 'error',
         execution_id: entry.id,
         cell_id: entry.cellId,
         cell_index: cellIndex,
@@ -625,10 +759,11 @@ async function runCellViaNotebookCommand(
         execution_mode: 'notebook-command',
         execution_preference: options.executionPreference,
         execution_fallback_reason: options.fallbackReason ?? null,
+        ...(errorMessage ? { error: errorMessage } : {}),
         ...(restoreFocusWarning ? { focus_restore_warning: restoreFocusWarning } : {}),
     };
 
-    entry.status = 'completed';
+    entry.status = success ? 'completed' : 'error';
     entry.result = result;
     processNext(path);
     return result;
@@ -1173,21 +1308,39 @@ function waitForCompletion(
 
 function processNext(path: string): void {
     const queue = queues.get(path);
-    if (!queue) { return; }
+    if (!queue) {
+        queueDebug(path, 'processNext:no-queue');
+        return;
+    }
 
     const now = Date.now();
+    const beforeCount = queue.length;
     const active = queue.filter(e =>
         e.status === 'queued' || e.status === 'running' ||
         (e.result && now - e.queuedAt.getTime() < 60_000)
     );
     queues.set(path, active);
 
+    pauseQueuedBatchEntries(active);
+
     const next = active.find(e => e.status === 'queued');
+
+    queueDebug(path, 'processNext', {
+        beforeCount,
+        activeCount: active.length,
+        prunedCount: beforeCount - active.length,
+        nextExecId: next?.id ?? null,
+        nextCellId: next?.cellId ?? null,
+        activeEntries: active.map(e => ({ id: e.id, cellId: e.cellId, status: e.status })),
+    });
+
     if (!next) { return; }
 
     // Mark as running BEFORE calling runCell to prevent re-entry loops
     next.status = 'running';
     next.startedAt = new Date();
+
+    queueDebug(path, 'processNext:starting', { execId: next.id, cellId: next.cellId });
 
     const doc = resolveNotebook(path);
     try {
@@ -1198,5 +1351,51 @@ function processNext(path: string): void {
     } catch {
         next.status = 'error';
         next.result = { status: 'error', execution_id: next.id, error: 'Cell no longer exists' };
+        queueDebug(path, 'processNext:cell-gone', { execId: next.id, cellId: next.cellId });
+    }
+}
+
+function executionResultIndicatesError(result: any): boolean {
+    return result?.status === 'error';
+}
+
+function hasErrorOutput(outputs: any[]): boolean {
+    return outputs.some((output) => output?.output_type === 'error');
+}
+
+function getFirstErrorMessage(outputs: any[]): string | undefined {
+    const errorOutput = outputs.find((output) => output?.output_type === 'error');
+    if (!errorOutput) {
+        return undefined;
+    }
+    return errorOutput.evalue || errorOutput.ename || 'Execution failed';
+}
+
+function pauseQueuedBatchEntries(entries: QueueEntry[]): void {
+    const haltedBatches = new Map<string, QueueEntry>();
+    for (const entry of entries) {
+        if (entry.status !== 'error' || !entry.stopBatchOnError || !entry.batchId) {
+            continue;
+        }
+        haltedBatches.set(entry.batchId, entry);
+    }
+
+    for (const entry of entries) {
+        if (entry.status !== 'queued' || !entry.batchId) {
+            continue;
+        }
+        const haltedBy = haltedBatches.get(entry.batchId);
+        if (!haltedBy) {
+            continue;
+        }
+        entry.status = 'completed';
+        entry.result = {
+            status: 'paused',
+            execution_id: entry.id,
+            cell_id: entry.cellId,
+            error: `Paused after ${haltedBy.cellId} failed`,
+            stopped_by_execution_id: haltedBy.id,
+            stopped_by_cell_id: haltedBy.cellId,
+        };
     }
 }

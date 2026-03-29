@@ -6,6 +6,7 @@ import * as util from 'util';
 import * as vscode from 'vscode';
 import { toJupyter, toVSCode } from './notebook/outputs';
 import { pushActivityEvent } from './routes';
+import { logNotebookDiagnostic } from './debug';
 
 const execFile = util.promisify(childProcess.execFile);
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -23,6 +24,19 @@ type SessionRef = {
     sessionId: string;
 };
 
+const SESSION_STATUS_RANK: Record<string, number> = {
+    attached: 3,
+    stale: 2,
+    detached: 1,
+};
+
+const SESSION_CLIENT_RANK: Record<string, number> = {
+    vscode: 3,
+    browser: 2,
+    cli: 1,
+    worker: 0,
+};
+
 export function primaryWorkspaceRoot(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
@@ -35,6 +49,60 @@ export function workspaceRootForPath(fsPath: string): string | undefined {
         }
     }
     return primaryWorkspaceRoot();
+}
+
+export function sessionIdForWorkspaceState(
+    context: vscode.ExtensionContext,
+    workspaceRoot: string,
+): string | undefined {
+    return context.workspaceState.get<string>(sessionStorageKey(workspaceRoot))
+        ?? context.workspaceState.get<string>(legacySessionStorageKey(workspaceRoot));
+}
+
+function chooseReusableHumanSessionId(payload: any): string | undefined {
+    const sessions = payload?.sessions;
+    if (!Array.isArray(sessions)) {
+        return undefined;
+    }
+
+    let bestSessionId: string | undefined;
+    let bestKey: [number, number, number, number, number] | undefined;
+    for (const session of sessions) {
+        if (!session || typeof session !== 'object') {
+            continue;
+        }
+        if (session.actor !== 'human' || typeof session.session_id !== 'string' || !session.session_id) {
+            continue;
+        }
+        const statusRank = SESSION_STATUS_RANK[String(session.status ?? '')] ?? 0;
+        if (statusRank === 0) {
+            continue;
+        }
+        const clientRank = SESSION_CLIENT_RANK[String(session.client ?? '')] ?? 0;
+        const capabilities = Array.isArray(session.capabilities) ? session.capabilities : [];
+        const editorRank = capabilities.includes('editor') || session.client === 'vscode' ? 1 : 0;
+        const lastSeenAt = typeof session.last_seen_at === 'number' ? session.last_seen_at : 0;
+        const createdAt = typeof session.created_at === 'number' ? session.created_at : 0;
+        const sortKey: [number, number, number, number, number] = [
+            statusRank,
+            editorRank,
+            clientRank,
+            lastSeenAt,
+            createdAt,
+        ];
+        if (
+            bestKey === undefined
+            || sortKey[0] > bestKey[0]
+            || (sortKey[0] === bestKey[0] && sortKey[1] > bestKey[1])
+            || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] > bestKey[2])
+            || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] === bestKey[2] && sortKey[3] > bestKey[3])
+            || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] === bestKey[2] && sortKey[3] === bestKey[3] && sortKey[4] > bestKey[4])
+        ) {
+            bestKey = sortKey;
+            bestSessionId = session.session_id;
+        }
+    }
+    return bestSessionId;
 }
 
 function workspaceExecutable(workspaceRoot: string, executable: string): string {
@@ -104,6 +172,7 @@ export class SessionAutoAttach implements vscode.Disposable {
         const storedSessionId =
             this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot)) ??
             this.context.workspaceState.get<string>(legacySessionStorageKey(workspaceRoot));
+        const preferredSessionId = storedSessionId ?? await this.findReusableSessionId(workspaceRoot);
         const result = await this.runCli(
             workspaceRoot,
             [
@@ -115,7 +184,7 @@ export class SessionAutoAttach implements vscode.Disposable {
                 '--capability', 'projection',
                 '--capability', 'editor',
                 '--capability', 'presence',
-                ...(storedSessionId ? ['--session-id', storedSessionId] : []),
+                ...(preferredSessionId ? ['--session-id', preferredSessionId] : []),
             ],
         );
         const sessionId = result?.session?.session_id;
@@ -180,6 +249,18 @@ export class SessionAutoAttach implements vscode.Disposable {
             ]);
         } catch (err: any) {
             console.warn('[agent-repl] session auto-attach heartbeat failed:', err?.message ?? String(err));
+        }
+    }
+
+    private async findReusableSessionId(workspaceRoot: string): Promise<string | undefined> {
+        try {
+            const payload = await this.runCli(workspaceRoot, [
+                'core', 'sessions',
+                '--workspace-root', workspaceRoot,
+            ]);
+            return chooseReusableHumanSessionId(payload);
+        } catch {
+            return undefined;
         }
     }
 
@@ -317,6 +398,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
     private readonly disposables: vscode.Disposable[] = [];
     private readonly attaching = new Set<string>();
     private readonly tracked = new Map<string, TrackedProjection>();
+    private readonly userClosed = new Set<string>();
     private syncTimer: NodeJS.Timeout | undefined;
 
     constructor(
@@ -345,18 +427,44 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         );
         this.disposables.push(
             vscode.workspace.onDidOpenNotebookDocument((notebook) => {
+                if (this.userClosed.has(notebook.uri.fsPath)) {
+                    this.userClosed.delete(notebook.uri.fsPath);
+                }
+                logNotebookDiagnostic(notebook.uri.fsPath, 'workspace.onDidOpenNotebookDocument', {
+                    notebookType: notebook.notebookType,
+                    dirty: notebook.isDirty,
+                    cellCount: notebook.cellCount,
+                });
                 void this.attachNotebookIfRunning(notebook);
             }),
         );
         this.disposables.push(
             vscode.workspace.onDidCloseNotebookDocument((notebook) => {
+                this.userClosed.add(notebook.uri.fsPath);
+                logNotebookDiagnostic(notebook.uri.fsPath, 'workspace.onDidCloseNotebookDocument', {
+                    notebookType: notebook.notebookType,
+                    dirty: notebook.isDirty,
+                    cellCount: notebook.cellCount,
+                });
                 this.untrackNotebook(notebook.uri.fsPath);
             }),
         );
         this.disposables.push(
             vscode.window.onDidChangeVisibleNotebookEditors((editors) => {
+                const visiblePaths = editors.map((editor) => editor.notebook.uri.fsPath);
                 for (const editor of editors) {
-                    void this.attachNotebookIfRunning(editor.notebook, editor);
+                    logNotebookDiagnostic(editor.notebook.uri.fsPath, 'window.onDidChangeVisibleNotebookEditors', {
+                        visible: true,
+                        dirty: editor.notebook.isDirty,
+                        cellCount: editor.notebook.cellCount,
+                        visibleNotebookCount: editors.length,
+                        visibleNotebookPaths: visiblePaths,
+                    });
+                }
+                for (const editor of editors) {
+                    if (!this.userClosed.has(editor.notebook.uri.fsPath)) {
+                        void this.attachNotebookIfRunning(editor.notebook, editor);
+                    }
                 }
             }),
         );
@@ -415,6 +523,14 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
                 action === 'attach-with-warning' ||
                 action === 'observe-or-queue'
             );
+            logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.attachNotebookIfRunning', {
+                active: state.active,
+                mode: state.mode ?? null,
+                reattachAction: action,
+                shouldAttach,
+                runtimeBusy: state.runtime?.busy ?? null,
+                selectedRuntimeId: state.reattach_policy?.selected_runtime_id ?? null,
+            });
             if (!shouldAttach) {
                 return false;
             }
@@ -449,6 +565,15 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             '--workspace-root', workspaceRoot,
             notebook.uri.fsPath,
         ]);
+        logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.state', {
+            active: state.active,
+            mode: state.mode ?? null,
+            notebookDirty: notebook.isDirty,
+            notebookCellCount: notebook.cellCount,
+            projectionCellCount: state.contents?.cells?.length ?? null,
+            runtimeBusy: state.runtime?.busy ?? null,
+            currentExecutionCellId: state.runtime?.current_execution?.cell_id ?? null,
+        });
         if (!state.active || state.mode !== 'headless' || !state.contents) {
             this.finishTrackedExecution(tracked, undefined);
             return false;
@@ -458,12 +583,33 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         const signature = projectionSignature(state.contents.cells);
         const activityState = await this.syncNotebookActivity(tracked, state);
 
+        // Never replay runtime-owned snapshots over a dirty notebook. The local
+        // editor may be mid-edit or closing, and forcing replaceCells() here
+        // causes the visible cell churn and save/close races we're trying to avoid.
+        if (notebook.isDirty) {
+            logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.skipDirty', {
+                signatureLength: signature.length,
+                activityChanged: activityState.changed,
+                activityNeedsSnapshot: activityState.needsSnapshot,
+            });
+            return false;
+        }
+
         let changed = false;
-        if (
-            !notebook.isDirty &&
-            tracked.lastAppliedSignature !== signature &&
-            (!activityState.changed || activityState.needsSnapshot)
-        ) {
+        if (tracked.lastAppliedSignature === signature) {
+            // Nothing changed since last apply — skip entirely.
+            logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.skipSignatureMatch', {
+                activityChanged: activityState.changed,
+                activityNeedsSnapshot: activityState.needsSnapshot,
+            });
+        } else if (!activityState.changed || activityState.needsSnapshot) {
+            logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.applySnapshot', {
+                previousSignatureLength: tracked.lastAppliedSignature?.length ?? 0,
+                nextSignatureLength: signature.length,
+                projectionCellCount: state.contents.cells.length,
+                activityChanged: activityState.changed,
+                activityNeedsSnapshot: activityState.needsSnapshot,
+            });
             await applyProjectionSnapshot(notebook, state.contents.cells);
             tracked.lastAppliedSignature = signature;
             changed = true;
@@ -611,6 +757,11 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         }
         const activity = await runCliJson<NotebookActivityState>(workspaceRoot, config, args);
         const events = activity.recent_events ?? [];
+        logNotebookDiagnostic(tracked.notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookActivity', {
+            sinceCursor: tracked.lastActivityCursor ?? null,
+            nextCursor: activity.cursor ?? null,
+            eventTypes: events.map((event) => event.type ?? 'unknown'),
+        });
         const applyResult = await applyIncrementalActivityEvents(tracked, events);
         for (const event of events) {
             pushActivityEvent(event);
@@ -646,8 +797,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
     }
 
     private sessionIdForWorkspace(workspaceRoot: string): string | undefined {
-        return this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot))
-            ?? this.context.workspaceState.get<string>(legacySessionStorageKey(workspaceRoot));
+        return sessionIdForWorkspaceState(this.context, workspaceRoot);
     }
 
     private syncTrackedExecution(tracked: TrackedProjection, state: NotebookProjectionState): void {
@@ -701,7 +851,6 @@ async function applyProjectionSnapshot(
     cells: ProjectionCell[],
 ): Promise<void> {
     await replaceProjectionCells(notebook, 0, notebook.cellCount, cells);
-    await notebook.save();
 }
 
 async function applyIncrementalActivityEvents(
@@ -710,6 +859,9 @@ async function applyIncrementalActivityEvents(
 ): Promise<{ changed: boolean; needsSnapshot: boolean }> {
     const notebook = tracked.notebook;
     if (notebook.isDirty) {
+        logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.applyIncrementalActivityEvents.skipDirty', {
+            eventTypes: events.map((event) => event.type ?? 'unknown'),
+        });
         return { changed: false, needsSnapshot: true };
     }
     let documentChanged = false;
@@ -783,8 +935,14 @@ async function applyIncrementalActivityEvents(
         }
     }
     if (documentChanged) {
-        await notebook.save();
+        // No save — the headless runtime owns the disk file.
     }
+    logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.applyIncrementalActivityEvents.result', {
+        eventTypes: events.map((event) => event.type ?? 'unknown'),
+        documentChanged,
+        needsSnapshot,
+        cellCount: notebook.cellCount,
+    });
     return { changed: documentChanged, needsSnapshot };
 }
 

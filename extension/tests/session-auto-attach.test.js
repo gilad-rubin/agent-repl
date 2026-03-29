@@ -177,6 +177,8 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
                                 ? 'notebook-activity'
                             : args.includes('notebook-projection')
                                 ? 'notebook-projection'
+                                : args.includes('sessions')
+                                    ? 'sessions'
                                 : args.includes('session-presence-upsert')
                                     ? 'session-presence-upsert'
                                     : args.includes('session-presence-clear')
@@ -273,6 +275,67 @@ test('SessionAutoAttach preserves the active session id when legacy and current 
     try {
         await attach.attachIfEnabled({ get: (_name, fallback) => fallback });
         assert.equal(store.get('agent-repl.session:/workspace'), 'sess-1');
+    } finally {
+        await attach.detachIfAttached();
+        attach.dispose();
+    }
+});
+
+test('SessionAutoAttach reuses the preferred human session when no workspace session is stored', async () => {
+    const store = new Map();
+    const context = {
+        workspaceState: {
+            get: (key) => store.get(key),
+            update: async (key, value) => {
+                if (typeof value === 'undefined') {
+                    store.delete(key);
+                } else {
+                    store.set(key, value);
+                }
+            },
+        },
+    };
+    const {
+        module: { SessionAutoAttach },
+        execCalls,
+    } = loadSessionModule(
+        [{ uri: { fsPath: '/workspace' } }],
+        {
+            execResponses: {
+                sessions: {
+                    status: 'ok',
+                    sessions: [
+                        {
+                            session_id: 'sess-browser',
+                            actor: 'human',
+                            client: 'browser',
+                            status: 'attached',
+                            capabilities: ['projection', 'presence'],
+                            last_seen_at: 10,
+                            created_at: 1,
+                        },
+                        {
+                            session_id: 'sess-vscode',
+                            actor: 'human',
+                            client: 'vscode',
+                            status: 'attached',
+                            capabilities: ['projection', 'editor', 'presence'],
+                            last_seen_at: 9,
+                            created_at: 2,
+                        },
+                    ],
+                },
+                default: { status: 'ok', session: { session_id: 'sess-vscode' } },
+            },
+        },
+    );
+    const attach = new SessionAutoAttach(context);
+    try {
+        await attach.attachIfEnabled({ get: (_name, fallback) => fallback });
+        assert.deepEqual(execCalls[0][1], ['core', 'sessions', '--workspace-root', '/workspace']);
+        assert.ok(execCalls[1][1].includes('--session-id'));
+        assert.ok(execCalls[1][1].includes('sess-vscode'));
+        assert.equal(store.get('agent-repl.session:/workspace'), 'sess-vscode');
     } finally {
         await attach.detachIfAttached();
         attach.dispose();
@@ -378,7 +441,91 @@ test('HeadlessNotebookProjection syncs agent-created cells and outputs into an a
         assert.equal(doc.cells[0].outputs[0].items[0].value, '1');
         assert.equal(doc.cells[1].document.getText(), 'y = x + 1\ny');
         assert.equal(doc.cells[1].outputs[0].items[0].value, '2');
-        assert.equal(doc.saveCalls, 1);
+        assert.equal(doc.saveCalls, 0);
+    } finally {
+        projection.dispose();
+    }
+});
+
+test('HeadlessNotebookProjection does not replay remote snapshots over a dirty notebook', async () => {
+    const doc = {
+        notebookType: 'jupyter-notebook',
+        uri: { fsPath: '/workspace/notebooks/demo.ipynb' },
+        isDirty: true,
+        saveCalls: 0,
+        save: async function save() {
+            this.saveCalls += 1;
+            return true;
+        },
+        cells: [
+            {
+                kind: 2,
+                document: { getText: () => 'x = 1\nx', languageId: 'python' },
+                metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
+                outputs: [],
+                index: 0,
+            },
+        ],
+    };
+    doc.cellCount = doc.cells.length;
+    doc.cellAt = (index) => doc.cells[index];
+
+    const {
+        module: { HeadlessNotebookProjection },
+        docsByPath,
+        notebookEdits,
+    } = loadSessionModule(
+        [{ uri: { fsPath: '/workspace' } }],
+        {
+            execResponses: {
+                'notebook-projection': {
+                    status: 'ok',
+                    path: 'notebooks/demo.ipynb',
+                    active: true,
+                    mode: 'headless',
+                    runtime: { busy: false, current_execution: null },
+                    contents: {
+                        path: 'notebooks/demo.ipynb',
+                        cells: [
+                            {
+                                index: 0,
+                                cell_id: 'cell-1',
+                                cell_type: 'code',
+                                source: 'x = 1\nx',
+                                outputs: [],
+                                execution_count: null,
+                                metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
+                            },
+                            {
+                                index: 1,
+                                cell_id: 'cell-2',
+                                cell_type: 'code',
+                                source: 'y = x + 1\ny',
+                                outputs: [],
+                                execution_count: null,
+                                metadata: { custom: { 'agent-repl': { cell_id: 'cell-2' } } },
+                            },
+                        ],
+                    },
+                },
+                'notebook-activity': {
+                    status: 'ok',
+                    path: 'notebooks/demo.ipynb',
+                    cursor: 1,
+                    recent_events: [],
+                },
+            },
+        },
+    );
+    docsByPath.set(doc.uri.fsPath, doc);
+    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl');
+    try {
+        const changed = await projection.syncNotebookProjection(doc);
+        assert.equal(changed, false);
+        assert.equal(notebookEdits.length, 0);
+        assert.equal(doc.cells.length, 1);
+        assert.equal(doc.cells[0].metadata.custom['agent-repl'].cell_id, 'cell-1');
+        assert.equal(doc.saveCalls, 0);
     } finally {
         projection.dispose();
     }
@@ -753,7 +900,7 @@ test('HeadlessNotebookProjection applies incremental inserted-cell activity with
         assert.equal(notebookEdits.length, 2);
         assert.equal(notebookEdits[1].range.start, 1);
         assert.equal(notebookEdits[1].range.end, 1);
-        assert.equal(doc.saveCalls, 2);
+        assert.equal(doc.saveCalls, 0);
     } finally {
         projection.dispose();
     }
@@ -907,7 +1054,7 @@ test('HeadlessNotebookProjection applies output-append activity without falling 
         assert.equal(notebookEdits[1].range.start, 0);
         assert.equal(notebookEdits[1].range.end, 1);
         assert.equal(doc.cells[0].outputs[0].items[0].value, 'start\n');
-        assert.equal(doc.saveCalls, 2);
+        assert.equal(doc.saveCalls, 0);
     } finally {
         projection.dispose();
     }

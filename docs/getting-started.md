@@ -1,18 +1,18 @@
 # Getting Started
 
-**Headless first** - You can create and run notebooks from the CLI without opening VS Code or Cursor.
+**Headless first** - the public notebook workflow runs against the shared runtime, so you can create and execute notebooks without opening VS Code or Cursor.
 
-**Minimal happy path** - The common flow is `new`, then `ix`, then `edit` or `exec` only when you need to change or rerun code.
+**Canvas by default** - when you open a notebook through `agent-repl`, the default editor is the Agent REPL canvas, not the native Jupyter notebook UI.
 
-**Optional live projection** - If the notebook is open in the editor, humans should see the same cells and outputs update live.
+**Projection optional** - if the same notebook is open in the canvas while the agent works, the editor should project the shared runtime state live.
 
 ## Prerequisites
 
 - **CLI installed** - `uv tool install /path/to/agent-repl --reinstall`
-- **Python environment** - a workspace `.venv` is the default runtime when it exists
-- **Optional editor projection** - install the VS Code/Cursor extension only if you want live notebook projection or prompt cells
+- **Python environment** - a workspace `.venv` is preferred automatically when it exists
+- **Optional editor** - install the VS Code or Cursor extension only when you want live projection, prompt cells, or the canvas UI
 
-Verify the installed CLI first:
+Verify the installed CLI:
 
 ```bash
 agent-repl --version
@@ -25,13 +25,13 @@ agent-repl --help
 agent-repl new tmp/validation.ipynb
 ```
 
-What to expect:
+Expected result:
 
 - `status: "ok"`
 - `kernel_status: "selected"`
 - `ready: true`
 
-If a workspace `.venv` exists, `new` uses it automatically. If no workspace `.venv` exists, `new` should fail clearly unless you pass `--kernel`.
+If the workspace has no `.venv`, pass `--kernel /absolute/path/to/python`.
 
 ## 2. Insert and Run a Cell
 
@@ -39,13 +39,13 @@ If a workspace `.venv` exists, `new` uses it automatically. If no workspace `.ve
 agent-repl ix tmp/validation.ipynb -s 'x = 2\nx * 3'
 ```
 
-What to expect:
+Expected result:
 
-- the cell is inserted into the notebook
-- the code is executed
-- the JSON response contains the result directly
+- a real code cell is inserted into the notebook
+- the code is executed against the shared runtime
+- the JSON response includes the outputs directly
 
-Use `ix` for the default “do notebook work” path. You should not need `cat` just to see the result of a normal `ix`.
+Use `ix` as the default notebook primitive. `cat` is usually unnecessary in the normal happy path.
 
 ## 3. Edit and Re-Run
 
@@ -67,62 +67,81 @@ If you need the `cell_id`, fetch it with:
 agent-repl cat tmp/validation.ipynb --no-outputs
 ```
 
-`cat` and `status` are diagnostics. They are useful, but they are not part of the minimal happy path.
+## 4. Open the Notebook
 
-## 4. Work on an Existing Notebook
-
-Inspect structure only when needed:
+Open it in the Agent REPL canvas:
 
 ```bash
-agent-repl cat notebooks/demo.ipynb --no-outputs
+agent-repl open tmp/validation.ipynb
 ```
 
-Edit a cell:
+Open it in the native Jupyter editor instead:
 
 ```bash
-agent-repl edit notebooks/demo.ipynb replace-source --cell-id <id> -s 'print(\"updated\")'
+agent-repl open tmp/validation.ipynb --editor jupyter
 ```
 
-Run a new cell:
+Open it in the standalone browser canvas:
 
 ```bash
-agent-repl ix notebooks/demo.ipynb -s 'x + 1'
+agent-repl open tmp/validation.ipynb --target browser
 ```
 
-## 5. Open the Notebook Later
+The browser canvas includes a minimal notebook explorer for other `*.ipynb` files in the same workspace. Use `Cmd+B` on macOS or `Ctrl+B` elsewhere to collapse or reopen it.
 
-If you open the notebook after headless agent work, you should immediately see:
+Use the Save button in the browser toolbar or press `Cmd+S` on macOS / `Ctrl+S` elsewhere when you want to flush the current in-browser drafts immediately instead of waiting for the editor to blur.
 
-- the created or edited cells
-- the latest source
-- the persisted outputs
+`new --open` accepts the same `--target` and `--editor` choices.
 
-If the runtime is still alive, the next manual cell should continue naturally from the same in-memory objects.
+When the notebook is already attached in VS Code, the standalone browser canvas reuses that same human session by default, so execution and edit leases stay aligned across both surfaces.
 
-## 6. Work With the Notebook Already Open
+## 5. Work With the Notebook Already Open
 
-If the notebook is already open in VS Code or Cursor while the agent works, the editor should behave like a live projection:
+If the notebook is already open in the canvas while the agent works, the editor should behave like a projection client:
 
-- new cells appear in place
-- edited source updates in place
-- running cells show execution state
-- outputs update when execution completes
+- inserted cells appear in place
+- source edits update in place
+- execution status updates without intentionally stealing focus
+- outputs are persisted back to disk
 
 What should not happen:
 
-- focus steal
 - notebook tabs jumping to the foreground
-- kernel restart prompts
-- manual kernel picker interruptions
+- kernel picker interruptions during the normal headless path
+- manual restart prompts during ordinary agent execution
+
+The browser preview is useful for renderer-only work, but it is not a substitute for one final in-editor check when the change touches VS Code messaging, session auto-attach, or custom-editor lifecycle.
+
+## 6. Use Diagnostics Only When Needed
+
+Use `cat` when you need structure or IDs:
+
+```bash
+agent-repl cat tmp/validation.ipynb --no-outputs
+```
+
+Use `status` when you need execution diagnostics:
+
+```bash
+agent-repl status tmp/validation.ipynb
+```
+
+Use `reload` during extension development:
+
+```bash
+agent-repl reload --pretty
+```
+
+`reload` hot-reloads installed extension routes and returns the live `extension_root` and `routes_module`. It does not fully restart the VS Code extension host.
 
 ## Prompt Cells
 
-Prompt cells are the one workflow that still starts from the editor today.
+Prompt cells are still an editor-started workflow.
 
 Human in the editor:
 
 ```text
-Click “Ask Agent” in the notebook toolbar
+Click "Ask Agent" in the notebook toolbar
 ```
 
 Agent in the CLI:
@@ -132,7 +151,7 @@ agent-repl prompts notebooks/demo.ipynb
 agent-repl respond notebooks/demo.ipynb --to <cell_id> -s 'df = df.dropna()'
 ```
 
-Use this when the human is explicitly driving a notebook-as-conversation flow.
+Use prompt cells when the notebook itself should behave like the conversation surface. Use `new` + `ix` for the normal notebook workflow.
 
 ## Next Steps
 

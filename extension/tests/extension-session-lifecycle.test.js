@@ -80,7 +80,9 @@ function loadExtensionModule() {
         workspace: {
             workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
             getConfiguration: () => config,
+            onDidChangeConfiguration: () => ({ dispose() {} }),
             onDidChangeNotebookDocument: () => ({ dispose() {} }),
+            onDidSaveNotebookDocument: () => ({ dispose() {} }),
         },
         notebooks: {
             registerNotebookCellStatusBarItemProvider: () => ({ dispose() {} }),
@@ -94,6 +96,7 @@ function loadExtensionModule() {
                 dispose() {},
             }),
             registerWebviewViewProvider: () => ({ dispose() {} }),
+            registerCustomEditorProvider: () => ({ dispose() {} }),
             showInformationMessage: (message) => {
                 infoMessages.push(message);
             },
@@ -191,6 +194,7 @@ test('extension lifecycle auto-attaches to the shared core on start and detaches
     assert.equal(errors.length, 0);
     assert.equal(attachCalls.length, 1);
     assert.equal(connectionWrites.length, 1);
+    assert.equal(registeredCommands.has('agent-repl.reload'), true);
     assert.match(infoMessages[0], /Agent REPL started/);
 
     await registeredCommands.get('agent-repl.start')();

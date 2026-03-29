@@ -9,6 +9,7 @@ import { ActivityPanelProvider } from './activity/panel';
 import { initExecutionMonitor } from './execution/queue';
 import { HeadlessNotebookProjection, SessionAutoAttach } from './session';
 import { CanvasEditorProvider } from './editor/provider';
+import { logNotebookDiagnostic } from './debug';
 
 let server: BridgeServer | undefined;
 let statusBarItem: vscode.StatusBarItem;
@@ -16,6 +17,7 @@ let extensionContext: vscode.ExtensionContext | undefined;
 let executionMonitorDisposable: vscode.Disposable | undefined;
 let sessionAutoAttach: SessionAutoAttach | undefined;
 let headlessProjection: HeadlessNotebookProjection | undefined;
+let canvasEditorProvider: CanvasEditorProvider | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     extensionContext = context;
@@ -49,10 +51,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
 
     // Canvas editor for .ipynb files
+    canvasEditorProvider = new CanvasEditorProvider(context);
     context.subscriptions.push(
         vscode.window.registerCustomEditorProvider(
             CanvasEditorProvider.viewType,
-            new CanvasEditorProvider(context),
+            canvasEditorProvider,
             { webviewOptions: { retainContextWhenHidden: true } }
         )
     );
@@ -61,7 +64,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(
         vscode.commands.registerCommand('agent-repl.start', () => startBridge(config, promptProvider)),
         vscode.commands.registerCommand('agent-repl.stop', () => stopBridge()),
-        vscode.commands.registerCommand('agent-repl.askAgent', () => insertPromptCell())
+        vscode.commands.registerCommand('agent-repl.askAgent', () => insertPromptCell()),
+        vscode.commands.registerCommand('agent-repl.reload', async () => reloadBridge())
+    );
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(async (event) => {
+            if (event.affectsConfiguration('agent-repl.browserCanvasUrl')) {
+                await canvasEditorProvider?.refreshOpenEditors();
+            }
+        })
     );
 
     // Auto-start
@@ -71,6 +82,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void { stopBridge(); }
+
+async function reloadBridge(): Promise<void> {
+    if (!server) {
+        vscode.window.showInformationMessage('Agent REPL is not running.');
+        return;
+    }
+    const reloadRoute = server.getRoute('POST /api/reload');
+    if (!reloadRoute) {
+        vscode.window.showErrorMessage('Agent REPL reload route is unavailable.');
+        return;
+    }
+    try {
+        const result = await reloadRoute({}, new URLSearchParams());
+        await canvasEditorProvider?.refreshOpenEditors();
+        vscode.window.showInformationMessage(result?.message ?? 'Agent REPL reloaded');
+    } catch (err: any) {
+        vscode.window.showErrorMessage(`Agent REPL reload failed: ${err?.message ?? String(err)}`);
+    }
+}
 
 async function startBridge(
     config: vscode.WorkspaceConfiguration,
@@ -135,7 +165,39 @@ async function startBridge(
         // Refresh prompt badges on notebook changes
         context_subscriptions_push(
             vscode.workspace.onDidChangeNotebookDocument(e => {
+                logNotebookDiagnostic(e.notebook.uri.fsPath, 'workspace.onDidChangeNotebookDocument', {
+                    notebookType: e.notebook.notebookType,
+                    dirty: e.notebook.isDirty,
+                    cellCount: e.notebook.cellCount,
+                    contentChanges: (e.contentChanges ?? []).map((change: any) => ({
+                        start: change.range?.start ?? null,
+                        end: change.range?.end ?? null,
+                        deletedCellCount: change.range
+                            ? Math.max(0, (change.range.end ?? 0) - (change.range.start ?? 0))
+                            : null,
+                        addedCellCount: change.addedCells?.length ?? 0,
+                        addedCellKinds: (change.addedCells ?? []).map((cell: any) => cell.kind),
+                        addedCellIds: (change.addedCells ?? []).map((cell: any) => cell.metadata?.custom?.['agent-repl']?.cell_id ?? null),
+                    })),
+                    cellChanges: (e.cellChanges ?? []).map((change: any) => ({
+                        index: change.cell?.index ?? null,
+                        cellId: change.cell?.metadata?.custom?.['agent-repl']?.cell_id ?? null,
+                        executionSummaryChanged: change.executionSummary !== undefined,
+                        documentChanged: change.document !== undefined,
+                        metadataChanged: change.metadata !== undefined,
+                        outputsChanged: change.outputs !== undefined,
+                    })),
+                });
                 if (e.notebook.notebookType === 'jupyter-notebook') { promptProvider.refresh(); }
+            })
+        );
+        context_subscriptions_push(
+            vscode.workspace.onDidSaveNotebookDocument(notebook => {
+                logNotebookDiagnostic(notebook.uri.fsPath, 'workspace.onDidSaveNotebookDocument', {
+                    notebookType: notebook.notebookType,
+                    dirty: notebook.isDirty,
+                    cellCount: notebook.cellCount,
+                });
             })
         );
 
@@ -160,6 +222,7 @@ function stopBridge(): void {
     void sessionAutoAttach?.detachIfAttached();
     headlessProjection?.dispose();
     headlessProjection = undefined;
+    canvasEditorProvider = undefined;
     server?.dispose();
     server = undefined;
     removeConnectionFile();

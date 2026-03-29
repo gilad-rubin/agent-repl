@@ -95,3 +95,130 @@ test('replace-source clears stale outputs while preserving metadata', async () =
     assert.deepEqual(appliedEdits.edits[0].cells[0].outputs, []);
     assert.deepEqual(appliedEdits.edits[0].cells[0].metadata, cell.metadata);
 });
+
+test('insert clamps an out-of-range index when the notebook is empty', async () => {
+    let appliedEdits = null;
+
+    class WorkspaceEdit {
+        set(uri, edits) {
+            appliedEdits = { uri, edits };
+        }
+    }
+
+    const vscode = {
+        NotebookCellKind: {
+            Code: 1,
+            Markup: 2,
+        },
+        NotebookCellData: class NotebookCellData {
+            constructor(kind, value, languageId) {
+                this.kind = kind;
+                this.value = value;
+                this.languageId = languageId;
+                this.metadata = undefined;
+                this.outputs = undefined;
+            }
+        },
+        NotebookEdit: {
+            insertCells(index, cells) {
+                return { kind: 'insertCells', index, cells };
+            },
+        },
+        WorkspaceEdit,
+        workspace: {
+            applyEdit: async () => true,
+        },
+    };
+
+    const operations = loadOperations(vscode);
+    const doc = {
+        uri: { fsPath: '/tmp/demo.ipynb' },
+        cellCount: 0,
+        isUntitled: true,
+    };
+
+    const [result] = await operations.applyEdits(doc, [
+        { op: 'insert', cell_type: 'code', source: '', at_index: 1 },
+    ]);
+
+    assert.equal(result.changed, true);
+    assert.equal(appliedEdits.edits[0].kind, 'insertCells');
+    assert.equal(appliedEdits.edits[0].index, 0);
+});
+
+test('change-cell-type preserves metadata and uses the provided source', async () => {
+    let appliedEdits = null;
+
+    class WorkspaceEdit {
+        set(uri, edits) {
+            appliedEdits = { uri, edits };
+        }
+    }
+
+    const vscode = {
+        NotebookCellKind: {
+            Code: 1,
+            Markup: 2,
+        },
+        NotebookCellData: class NotebookCellData {
+            constructor(kind, value, languageId) {
+                this.kind = kind;
+                this.value = value;
+                this.languageId = languageId;
+                this.metadata = undefined;
+                this.outputs = undefined;
+            }
+        },
+        NotebookRange: class NotebookRange {
+            constructor(start, end) {
+                this.start = start;
+                this.end = end;
+            }
+        },
+        NotebookEdit: {
+            replaceCells(range, cells) {
+                return { kind: 'replaceCells', range, cells };
+            },
+        },
+        WorkspaceEdit,
+        workspace: {
+            applyEdit: async () => true,
+        },
+    };
+
+    const operations = loadOperations(vscode);
+    const cell = {
+        kind: vscode.NotebookCellKind.Code,
+        document: {
+            getText: () => 'stale = true',
+            languageId: 'python',
+        },
+        metadata: {
+            custom: {
+                'agent-repl': {
+                    cell_id: 'cell-2',
+                },
+            },
+        },
+        outputs: [{ old: true }],
+    };
+    const doc = {
+        uri: { fsPath: '/tmp/demo.ipynb' },
+        cellCount: 1,
+        isUntitled: true,
+        cellAt: () => cell,
+    };
+
+    const [result] = await operations.applyEdits(doc, [
+        { op: 'change-cell-type', cell_id: 'cell-2', cell_type: 'markdown', source: '# updated' },
+    ]);
+
+    assert.equal(result.changed, true);
+    assert.equal(result.op, 'change-cell-type');
+    assert.equal(appliedEdits.edits[0].kind, 'replaceCells');
+    assert.equal(appliedEdits.edits[0].cells[0].kind, vscode.NotebookCellKind.Markup);
+    assert.equal(appliedEdits.edits[0].cells[0].languageId, 'markdown');
+    assert.equal(appliedEdits.edits[0].cells[0].value, '# updated');
+    assert.deepEqual(appliedEdits.edits[0].cells[0].outputs, []);
+    assert.deepEqual(appliedEdits.edits[0].cells[0].metadata, cell.metadata);
+});

@@ -1,0 +1,283 @@
+/* ─────────────────────────────────────────────────────────
+ * Agent REPL Canvas — Cursor Dark Theme
+ *
+ * Palette: github.com/ydkulks/cursor-dark.nvim
+ * Imported by main.tsx, bundled by esbuild into canvas.css
+ * alongside @carbon/styles/css/styles.css.
+ * ───────────────────────────────────────────────────────── */
+
+/* ── Base resets ── */
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+::selection { background: rgba(135,195,255,0.24); }
+
+/* ── Warm light overrides on Carbon tokens ── */
+
+.cds--white, .cds--g10,
+[data-carbon-theme="g10"], [data-carbon-theme="white"] {
+  --cds-background: #ffffff !important;
+  --cds-layer: #ffffff;
+  --cds-layer-accent: #f5f5f4;
+  --cds-border-subtle: #ece9e7;
+  --cds-border-interactive: #d97706;
+  --cds-focus: #d97706;
+  --cds-text-primary: #1c1917;
+  --cds-text-secondary: #57534e;
+  --cds-text-helper: #a8a29e;
+  --cds-interactive: #d97706;
+  --cds-button-primary: #d97706;
+  --cds-button-primary-hover: #b45309;
+  --cds-button-primary-active: #92400e;
+  --cds-button-tertiary: #d97706;
+  --cds-link-primary: #b45309;
+  --cds-support-success: #16a34a;
+  --cds-support-error: #dc2626;
+  --cds-support-warning: #d97706;
+  --cds-support-info: #0369a1;
+}
+
+/* ── Dark overrides — Cursor Dark (ydkulks/cursor-dark.nvim) ── */
+
+.cds--g90, .cds--g100,
+[data-carbon-theme="g90"], [data-carbon-theme="g100"] {
+  --cds-background: #121314 !important;
+  --cds-layer: #191A1B !important;
+  --cds-layer-accent: #242526 !important;
+  --cds-border-subtle: #2e2e2e !important;
+  --cds-border-interactive: #d97706 !important;
+  --cds-focus: #d97706 !important;
+  --cds-interactive: #d97706 !important;
+  --cds-text-primary: #d8dee9 !important;
+  --cds-text-secondary: #b0b8c4 !important;
+  --cds-text-helper: #505050 !important;
+  --cds-button-primary: #d97706 !important;
+  --cds-button-primary-hover: #b45309 !important;
+  --cds-button-primary-active: #92400e !important;
+  --cds-button-tertiary: #d97706 !important;
+  --cds-link-primary: #d97706 !important;
+  --cds-support-warning: #efb080 !important;
+  --cds-support-success: #a3be8c !important;
+  --cds-support-error: #bf616a !important;
+  --cds-text-error: #bf616a !important;
+}
+
+/* ── Header — Cursor Dark title bar ── */
+
+.cds--header {
+  background: #1a1a1a !important;
+  border-bottom-color: #2e2e2e !important;
+}
+
+/* ── CodeMirror overrides ── */
+.cm-editor { background: transparent !important; }
+.cm-editor .cm-gutters { background: transparent !important; }
+.cm-editor,
+.cm-editor .cm-scroller,
+.cm-editor .cm-content,
+.cm-editor .cm-line,
+.cm-editor .cm-gutter,
+.cm-editor .cm-gutterElement,
+.cm-editor .cm-tooltip,
+.cm-editor .cm-tooltip * {
+  font-family: "IBM Plex Mono", "SF Mono", Monaco, Menlo, Consolas, monospace !important;
+  font-variant-ligatures: none !important;
+  font-feature-settings: "liga" 0, "calt" 0 !important;
+}
+
+/* ── Interface Kit overlay stacking ── */
+[data-interface-kit] {
+  z-index: 10001 !important;
+}
+
+/* ── Animations ── */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes borderShimmer {
+  0%   { border-color: var(--cds-border-subtle) !important; box-shadow: none !important; }
+  50%  { border-color: #d97706 !important; box-shadow: 0 0 0 2px rgba(217,119,6,0.12) !important; }
+  100% { border-color: var(--cds-border-subtle) !important; box-shadow: none !important; }
+}
+@keyframes outputCopyPulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
+.cell-executing {
+  animation: borderShimmer 1.5s ease-in-out infinite !important;
+}
+
+.output-copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--cds-text-helper);
+  padding: 0;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color 140ms ease,
+    border-color 140ms ease,
+    background-color 140ms ease,
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.output-copy-button:hover {
+  color: var(--cds-text-primary);
+}
+
+.output-copy-button:focus-visible {
+  outline: none;
+  color: var(--cds-border-interactive);
+  box-shadow: none;
+}
+
+.output-copy-button[data-copied="true"] {
+  color: var(--cds-support-success);
+  animation: outputCopyPulse 180ms ease;
+}
+
+.output-copy-button__icon-stack {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.output-copy-button__icon {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 160ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.output-copy-button__icon--copy {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.output-copy-button__icon--check {
+  opacity: 0;
+  transform: scale(0.72) rotate(-10deg);
+}
+
+.output-copy-button[data-copied="true"] .output-copy-button__icon--copy {
+  opacity: 0;
+  transform: scale(0.72) rotate(10deg);
+}
+
+.output-copy-button[data-copied="true"] .output-copy-button__icon--check {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+/* ── Toolbar kernel menu ── */
+.toolbar-kernel-button,
+.toolbar-kernel-option {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    color 120ms ease;
+}
+
+.toolbar-kernel-button:hover {
+  background: var(--cds-layer-accent) !important;
+  color: var(--cds-text-primary) !important;
+}
+
+.toolbar-kernel-button:focus-visible,
+.toolbar-kernel-option:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.16);
+}
+
+.toolbar-kernel-button:focus-visible {
+  border-color: var(--cds-border-interactive) !important;
+}
+
+.toolbar-kernel-menu {
+  overflow: hidden;
+}
+
+.toolbar-kernel-option:hover {
+  background: var(--cds-layer-accent) !important;
+  color: var(--cds-text-primary) !important;
+}
+
+/* ── Markdown content ── */
+.markdown-content {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--cds-text-secondary);
+}
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  color: var(--cds-text-primary);
+  font-weight: 600;
+}
+.markdown-content h1 { font-size: 1.75rem; margin-bottom: 0.5rem; }
+.markdown-content h2 { font-size: 1.4rem; margin-bottom: 0.375rem; }
+.markdown-content h3 { font-size: 1.125rem; margin-bottom: 0.375rem; }
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content blockquote { margin: 0.5rem 0; }
+.markdown-content code {
+  border-radius: 4px;
+  border: 1px solid var(--cds-border-subtle);
+  background: var(--cds-layer-accent);
+  padding: 0.1rem 0.35rem;
+  font-family: "IBM Plex Mono", "SF Mono", Monaco, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+.markdown-content pre {
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  border-radius: 4px;
+  border: 1px solid var(--cds-border-subtle);
+  background: var(--cds-layer);
+  padding: 1rem;
+}
+.markdown-content pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+.markdown-content a {
+  color: var(--cds-link-primary);
+  text-decoration: none;
+}
+.markdown-content a:hover { text-decoration: underline; }
+.markdown-content blockquote {
+  border-left: 3px solid var(--cds-border-subtle);
+  padding-left: 1rem;
+}
+
+/* ── Rich output tables ── */
+.rich-output table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+.rich-output th,
+.rich-output td {
+  border: 1px solid var(--cds-border-subtle);
+  padding: 0.375rem 0.75rem;
+}

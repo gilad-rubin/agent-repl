@@ -157,6 +157,21 @@ class BridgeClient:
             body["kernel_id"] = kernel_id
         return self._post("/api/notebook/create", body)
 
+    def open(
+        self,
+        path: str,
+        *,
+        editor: str = "canvas",
+        target: str = "vscode",
+        browser_url: str | None = None,
+    ) -> dict[str, Any]:
+        body = self._path_body(path)
+        body["editor"] = editor
+        body["target"] = target
+        if browser_url is not None:
+            body["browser_url"] = browser_url
+        return self._post("/api/notebook/open", body)
+
     def kernels(self) -> dict[str, Any]:
         return self._get("/api/notebook/kernels", params={"cwd": os.getcwd()})
 
