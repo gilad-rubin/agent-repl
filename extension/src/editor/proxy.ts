@@ -6,6 +6,7 @@ import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as util from 'util';
 import { coreCliPlans, sessionIdForWorkspaceState } from '../session';
+import { buildReplaceSourceOperation } from '../shared/notebookEditPayload';
 import { buildActivitySnapshot, buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
 import { NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
 import type { CellData } from './protocol';
@@ -241,7 +242,7 @@ export class DaemonProxy {
                     body.operations = [{ op: 'delete', cell_id: op.cell_id }];
                     break;
                 case 'replace-source':
-                    body.operations = [{ op: 'replace-source', cell_id: op.cell_id, source: op.source }];
+                    body.operations = [buildReplaceSourceOperation({ cell_id: op.cell_id, source: op.source })];
                     break;
                 case 'change-cell-type':
                     body.operations = [{
@@ -264,7 +265,7 @@ export class DaemonProxy {
     private async handleFlushDraft(msg: any): Promise<void> {
         const body: any = {
             path: this.notebookPath,
-            operations: [{ op: 'replace-source', cell_id: msg.cell_id, source: msg.source }],
+            operations: [buildReplaceSourceOperation({ cell_id: msg.cell_id, source: msg.source })],
         };
         const ownerSessionId = this.ownerSessionId();
         if (ownerSessionId) {
@@ -332,7 +333,7 @@ export class DaemonProxy {
             if (sourceOverride !== undefined) {
                 const editBody: any = {
                     path: this.notebookPath,
-                    operations: [{ op: 'replace-source', cell_id: msg.cell_id, source: sourceOverride }],
+                    operations: [buildReplaceSourceOperation({ cell_id: msg.cell_id, source: sourceOverride })],
                 };
                 if (ownerSessionId) {
                     editBody.owner_session_id = ownerSessionId;

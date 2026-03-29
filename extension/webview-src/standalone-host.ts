@@ -1,3 +1,7 @@
+import {
+  buildReplaceSourceOperation,
+  buildReplaceSourceOperations,
+} from '../src/shared/notebookEditPayload';
 import { buildActivitySnapshot, buildRuntimeSnapshot } from '../src/shared/runtimeSnapshot';
 
 type NotebookOutput = {
@@ -450,16 +454,19 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               await loadRuntime(message.requestId);
               break;
             case 'flush-draft':
-              await postJson('/api/standalone/notebook/edit', {
-                client_id: clientId,
-                path: requireNotebookPath(),
-                operations: [{
-                  op: 'replace-source',
-                  cell_id: message.cell_id,
-                  ...(typeof message.cell_index === 'number' ? { cell_index: message.cell_index } : {}),
-                  source: message.source,
-                }],
-              });
+              {
+                const cellId = typeof message.cell_id === 'string' ? message.cell_id : '';
+                const source = typeof message.source === 'string' ? message.source : '';
+                await postJson('/api/standalone/notebook/edit', {
+                  client_id: clientId,
+                  path: requireNotebookPath(),
+                  operations: [buildReplaceSourceOperation({
+                    cell_id: cellId,
+                    ...(typeof message.cell_index === 'number' ? { cell_index: message.cell_index } : {}),
+                    source,
+                  })],
+                });
+              }
               await loadContents();
               dispatch({ type: 'ok', requestId: message.requestId });
               break;
@@ -473,11 +480,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
                 await postJson('/api/standalone/notebook/edit', {
                   client_id: clientId,
                   path: requireNotebookPath(),
-                  operations: changes.map((change) => ({
-                    op: 'replace-source',
-                    cell_id: change.cell_id,
-                    source: change.source,
-                  })),
+                  operations: buildReplaceSourceOperations(changes),
                 });
                 await loadContents(message.requestId);
                 dispatch({ type: 'ok', requestId: message.requestId });
@@ -499,15 +502,15 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
                 hasSourceOverride: typeof message.source === 'string',
               });
               if (typeof message.source === 'string') {
+                const cellId = typeof message.cell_id === 'string' ? message.cell_id : '';
                 await postJson('/api/standalone/notebook/edit', {
                   client_id: clientId,
                   path: requireNotebookPath(),
-                  operations: [{
-                    op: 'replace-source',
-                    cell_id: message.cell_id,
+                  operations: [buildReplaceSourceOperation({
+                    cell_id: cellId,
                     ...(typeof message.cell_index === 'number' ? { cell_index: message.cell_index } : {}),
                     source: message.source,
-                  }],
+                  })],
                 });
               }
               console.debug('[queue-debug] host: dispatching execute-started', { cell_id: message.cell_id });
