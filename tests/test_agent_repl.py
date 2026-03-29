@@ -1815,6 +1815,17 @@ class TestCoreState(unittest.TestCase):
         payload = self.state.list_sessions_payload()
         self.assertEqual(payload["sessions"][0]["status"], "stale")
 
+    def test_resolve_preferred_session_prefers_attached_editor_capable_human(self):
+        self.state.start_session("human", "browser", "browser", "sess-browser", ["projection", "presence"])
+        self.state.start_session("human", "vscode", "editor", "sess-vscode", ["projection", "editor", "presence"])
+        payload = self.state.resolve_preferred_session("human")
+        self.assertEqual(payload["session"]["session_id"], "sess-vscode")
+
+    def test_resolve_preferred_session_returns_none_when_no_matching_actor_exists(self):
+        self.state.start_session("agent", "cli", "worker", "sess-agent", ["projection", "ops"])
+        payload = self.state.resolve_preferred_session("human")
+        self.assertIsNone(payload["session"])
+
     def test_branch_can_be_owned_and_finished(self):
         session = self.state.start_session("agent", "cli", "worker", "sess-1")
         opened, status = self.state.open_document("notebooks/demo.ipynb")
@@ -2983,6 +2994,11 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.actor, "agent")
         self.assertEqual(args.client_type, "cli")
 
+    def test_core_session_resolve(self):
+        args = build_parser().parse_args(["core", "session-resolve", "--actor", "human"])
+        self.assertEqual(args.core_command, "session-resolve")
+        self.assertEqual(args.actor, "human")
+
     def test_core_session_touch(self):
         args = build_parser().parse_args(["core", "session-touch", "--session-id", "sess-1"])
         self.assertEqual(args.core_command, "session-touch")
@@ -3999,6 +4015,22 @@ class TestCommands(unittest.TestCase):
             capabilities=None,
             session_id=None,
         )
+
+    def test_core_session_resolve(self):
+        client = self._mock_core_client(resolve_preferred_session={
+            "status": "ok",
+            "session": {"session_id": "sess-vscode"},
+        })
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "session-resolve", "--actor", "human"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.resolve_preferred_session.assert_called_once_with(actor="human")
 
     def test_core_session_touch(self):
         client = self._mock_core_client()
