@@ -42,6 +42,20 @@ export type CommandExecutionReduction = {
     failedIds: string[];
 };
 
+export type RuntimeExecutionLike = {
+    busy?: boolean;
+    current_execution?: unknown;
+    running_cell_ids?: string[];
+    queued_cell_ids?: string[];
+};
+
+export type RuntimeExecutionReduction = {
+    buckets: ExecutionBuckets;
+    startedIds: string[];
+    completedIds: string[];
+    pausedIds: string[];
+};
+
 export function queueExecutionBuckets(
     current: ExecutionBuckets,
     cellIds: string[],
@@ -197,6 +211,60 @@ export function reduceCommandExecution(
         startedIds: [],
         completedIds: [],
         failedIds: [],
+    };
+}
+
+export function reduceRuntimeExecution(
+    current: ExecutionBuckets,
+    runtime: RuntimeExecutionLike,
+): RuntimeExecutionReduction {
+    const executingIds = Array.isArray(runtime.running_cell_ids)
+        ? runtime.running_cell_ids
+        : [];
+    const queuedIds = Array.isArray(runtime.queued_cell_ids)
+        ? runtime.queued_cell_ids.filter((cellId) => !executingIds.includes(cellId))
+        : [];
+
+    if (executingIds.length > 0 || queuedIds.length > 0) {
+        const buckets = syncExecutionBuckets(current, {
+            queuedIds,
+            executingIds,
+        });
+        return {
+            buckets,
+            startedIds: executingIds.filter((cellId) => !current.executingIds.includes(cellId)),
+            completedIds: [],
+            pausedIds: [],
+        };
+    }
+
+    if (!runtime.busy && !runtime.current_execution && (current.executingIds.length > 0 || current.queuedIds.length > 0)) {
+        const { completedIds, pausedIds } = resolveIdleExecutionTransition({
+            queuedIds: current.queuedIds,
+            executingIds: current.executingIds,
+            failedCellIds: current.failedCellIds,
+        });
+        return {
+            buckets: {
+                queuedIds: [],
+                executingIds: [],
+                failedCellIds: current.failedCellIds,
+                pausedCellIds: Array.from(new Set([
+                    ...current.pausedCellIds.filter((cellId) => !current.executingIds.includes(cellId)),
+                    ...pausedIds,
+                ])),
+            },
+            startedIds: [],
+            completedIds,
+            pausedIds,
+        };
+    }
+
+    return {
+        buckets: current,
+        startedIds: [],
+        completedIds: [],
+        pausedIds: [],
     };
 }
 

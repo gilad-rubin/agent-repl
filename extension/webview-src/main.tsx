@@ -41,9 +41,8 @@ import {
   queueExecutionBuckets,
   reduceCommandExecution,
   reduceActivityExecution,
-  resolveIdleExecutionTransition,
+  reduceRuntimeExecution,
   startExecutionBuckets,
-  syncExecutionBuckets,
 } from '../src/shared/executionState';
 import { decideNotebookCommandKeyAction } from '../src/shared/notebookCommandController';
 import '@carbon/styles/css/styles.css';
@@ -2984,63 +2983,49 @@ function App() {
 
   const handleRuntimeUpdate = useCallback((runtime: RuntimeInfo) => {
     setKernelStatus(runtime);
-    const nextExecutingIds = runtimeCellIds(runtime, 'running');
-    const nextQueuedIds = runtimeCellIds(runtime, 'queued').filter((cellId) => !nextExecutingIds.includes(cellId));
-    if (nextExecutingIds.length > 0 || nextQueuedIds.length > 0) {
-      const startedAt = Date.now();
-      for (const cellId of nextExecutingIds) {
-        executionStartRef.current.set(
-          cellId,
-          executionStartRef.current.get(cellId) ?? startedAt,
-        );
-      }
-      const nextState = syncExecutionBuckets(stateRef.current, {
-        queuedIds: nextQueuedIds,
-        executingIds: nextExecutingIds,
-      });
-      setQueuedIds(nextState.queuedIds);
-      setExecutingIds(nextState.executingIds);
-      setFailedCellIds(nextState.failedCellIds);
-      setPausedCellIds(nextState.pausedCellIds);
-      updateExecutionStateRef(nextState);
+    const reduction = reduceRuntimeExecution(stateRef.current, {
+      busy: runtime.busy,
+      current_execution: runtime.current_execution,
+      running_cell_ids: runtimeCellIds(runtime, 'running'),
+      queued_cell_ids: runtimeCellIds(runtime, 'queued'),
+    });
+    if (
+      reduction.startedIds.length === 0 &&
+      reduction.completedIds.length === 0 &&
+      reduction.pausedIds.length === 0 &&
+      reduction.buckets === stateRef.current
+    ) {
+      return;
     }
-    if (!runtime.busy && !runtime.current_execution) {
-      const current = stateRef.current;
-      if (current.executingIds.length > 0 || current.queuedIds.length > 0) {
-        const { completedIds, pausedIds } = resolveIdleExecutionTransition({
-          queuedIds: current.queuedIds,
-          executingIds: current.executingIds,
-          failedCellIds: current.failedCellIds,
-        });
-        const finishedAt = Date.now();
-        setQueuedIds([]);
-        setExecutingIds([]);
-        setPausedCellIds((existing) => Array.from(new Set([
-          ...existing.filter((cellId) => !current.executingIds.includes(cellId)),
-          ...pausedIds,
-        ])));
-        setCompletedTimes((prev) => {
-          const next = { ...prev };
-          for (const cellId of pausedIds) {
-            delete next[cellId];
-          }
-          for (const cellId of completedIds) {
-            const startTime = executionStartRef.current.get(cellId);
-            executionStartRef.current.delete(cellId);
-            next[cellId] = startTime != null ? finishedAt - startTime : next[cellId] ?? 0;
-          }
-          return next;
-        });
-        updateExecutionStateRef({
-          queuedIds: [],
-          executingIds: [],
-          failedCellIds: current.failedCellIds,
-          pausedCellIds: Array.from(new Set([
-            ...current.pausedCellIds.filter((cellId) => !current.executingIds.includes(cellId)),
-            ...pausedIds,
-          ])),
-        });
-      }
+    const now = Date.now();
+    for (const cellId of reduction.startedIds) {
+      executionStartRef.current.set(
+        cellId,
+        executionStartRef.current.get(cellId) ?? now,
+      );
+    }
+    const completedStartTimes = new Map<string, number | undefined>();
+    for (const cellId of reduction.completedIds) {
+      completedStartTimes.set(cellId, executionStartRef.current.get(cellId));
+      executionStartRef.current.delete(cellId);
+    }
+    updateExecutionStateRef(reduction.buckets);
+    setQueuedIds(reduction.buckets.queuedIds);
+    setExecutingIds(reduction.buckets.executingIds);
+    setFailedCellIds(reduction.buckets.failedCellIds);
+    setPausedCellIds(reduction.buckets.pausedCellIds);
+    if (reduction.completedIds.length > 0 || reduction.pausedIds.length > 0) {
+      setCompletedTimes((prev) => {
+        const next = { ...prev };
+        for (const cellId of reduction.pausedIds) {
+          delete next[cellId];
+        }
+        for (const cellId of reduction.completedIds) {
+          const startTime = completedStartTimes.get(cellId);
+          next[cellId] = startTime != null ? now - startTime : next[cellId] ?? 0;
+        }
+        return next;
+      });
     }
   }, [updateExecutionStateRef]);
 

@@ -78,6 +78,7 @@ Notebook files + headless kernels
 - In the canvas renderer, prefer extracting pure execution-bucket helpers (`queued`, `executing`, `failed`, `paused`) into shared modules before editing event handlers in place. That makes queue/running refactors easier to verify and reduces accidental drift between runtime updates, activity updates, and local command starts.
 - For canvas activity polling, prefer a pure reducer-style helper for execution event transitions (`execution-started`, output-appended, finished, structural reload triggers) instead of mutating queued/executing/paused sets inline inside `main.tsx`.
 - Apply the same reducer-style rule to direct canvas execution messages too. `execute-started`, `execute-finished`, and `execute-failed` should flow through a shared transition helper before the renderer updates timing/error UI.
+- Treat `handleRuntimeUpdate` the same way: runtime-active sync and idle resolution should come from a shared reduction helper, with `main.tsx` only committing buckets plus timing side effects.
 - Before deleting an old helper, search tests for direct patching or mocking of that helper. Some internal methods are part of the regression harness even if they are not public APIs.
 - If a refactor touches run-all, restart-and-run-all, save/flush, notebook switching, or trailing-cell reuse, update the matching behavior-lock docs under `dev/behavior-locks/` in the same change.
 

@@ -229,3 +229,58 @@ test('reduceCommandExecution marks successful direct executions as completed and
         failedIds: [],
     });
 });
+
+test('reduceRuntimeExecution syncs server-owned running and queued ids while only marking newly running cells as started', () => {
+    const { reduceRuntimeExecution } = loadExecutionStateModule();
+
+    const result = reduceRuntimeExecution({
+        queuedIds: ['cell-queued-old'],
+        executingIds: ['cell-running-still'],
+        failedCellIds: ['cell-running-new', 'cell-failed'],
+        pausedCellIds: ['cell-queued-new', 'cell-paused'],
+    }, {
+        busy: true,
+        running_cell_ids: ['cell-running-still', 'cell-running-new'],
+        queued_cell_ids: ['cell-queued-new', 'cell-running-new'],
+    });
+
+    assert.deepEqual(result, {
+        buckets: {
+            queuedIds: ['cell-queued-new'],
+            executingIds: ['cell-running-still', 'cell-running-new'],
+            failedCellIds: ['cell-failed'],
+            pausedCellIds: ['cell-paused'],
+        },
+        startedIds: ['cell-running-new'],
+        completedIds: [],
+        pausedIds: [],
+    });
+});
+
+test('reduceRuntimeExecution resolves queued and running work into completed and paused buckets when runtime goes idle', () => {
+    const { reduceRuntimeExecution } = loadExecutionStateModule();
+
+    const result = reduceRuntimeExecution({
+        queuedIds: ['cell-queued'],
+        executingIds: ['cell-running', 'cell-failed'],
+        failedCellIds: ['cell-failed'],
+        pausedCellIds: ['cell-paused-existing', 'cell-running'],
+    }, {
+        busy: false,
+        current_execution: null,
+        running_cell_ids: [],
+        queued_cell_ids: [],
+    });
+
+    assert.deepEqual(result, {
+        buckets: {
+            queuedIds: [],
+            executingIds: [],
+            failedCellIds: ['cell-failed'],
+            pausedCellIds: ['cell-paused-existing', 'cell-queued'],
+        },
+        startedIds: [],
+        completedIds: ['cell-running'],
+        pausedIds: ['cell-queued'],
+    });
+});
