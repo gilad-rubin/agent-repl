@@ -29,6 +29,19 @@ export type ActivityExecutionReduction = {
     needsFullReload: boolean;
 };
 
+export type CommandExecutionMessageLike = {
+    type?: string;
+    cell_id?: string | null;
+    ok?: boolean | null;
+};
+
+export type CommandExecutionReduction = {
+    buckets: ExecutionBuckets;
+    startedIds: string[];
+    completedIds: string[];
+    failedIds: string[];
+};
+
 export function queueExecutionBuckets(
     current: ExecutionBuckets,
     cellIds: string[],
@@ -134,6 +147,56 @@ export function reduceActivityExecution(
         startedIds,
         finishedIds,
         needsFullReload,
+    };
+}
+
+export function reduceCommandExecution(
+    current: ExecutionBuckets,
+    message: CommandExecutionMessageLike,
+): CommandExecutionReduction {
+    const cellId = typeof message.cell_id === 'string' && message.cell_id ? message.cell_id : null;
+    if (!cellId) {
+        return {
+            buckets: current,
+            startedIds: [],
+            completedIds: [],
+            failedIds: [],
+        };
+    }
+
+    if (message.type === 'execute-started') {
+        return {
+            buckets: startExecutionBuckets(current, [cellId]),
+            startedIds: [cellId],
+            completedIds: [],
+            failedIds: [],
+        };
+    }
+
+    const failed = message.type === 'execute-failed' || (message.type === 'execute-finished' && message.ok === false);
+    if (message.type === 'execute-finished' || message.type === 'execute-failed') {
+        return {
+            buckets: {
+                queuedIds: current.queuedIds.filter((entry) => entry !== cellId),
+                executingIds: current.executingIds.filter((entry) => entry !== cellId),
+                failedCellIds: failed
+                    ? current.failedCellIds.includes(cellId)
+                        ? current.failedCellIds
+                        : [...current.failedCellIds, cellId]
+                    : current.failedCellIds.filter((entry) => entry !== cellId),
+                pausedCellIds: current.pausedCellIds.filter((entry) => entry !== cellId),
+            },
+            startedIds: [],
+            completedIds: failed ? [] : [cellId],
+            failedIds: failed ? [cellId] : [],
+        };
+    }
+
+    return {
+        buckets: current,
+        startedIds: [],
+        completedIds: [],
+        failedIds: [],
     };
 }
 

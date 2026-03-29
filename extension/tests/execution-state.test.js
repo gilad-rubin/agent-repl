@@ -149,3 +149,83 @@ test('reduceActivityExecution clears execution buckets on finished events', () =
         needsFullReload: false,
     });
 });
+
+test('reduceCommandExecution promotes a directly started cell into executing and clears queued failure state', () => {
+    const { reduceCommandExecution } = loadExecutionStateModule();
+
+    const result = reduceCommandExecution({
+        queuedIds: ['cell-1', 'cell-2'],
+        executingIds: ['cell-3'],
+        failedCellIds: ['cell-1', 'cell-4'],
+        pausedCellIds: ['cell-1', 'cell-5'],
+    }, {
+        type: 'execute-started',
+        cell_id: 'cell-1',
+    });
+
+    assert.deepEqual(result, {
+        buckets: {
+            queuedIds: ['cell-2'],
+            executingIds: ['cell-3', 'cell-1'],
+            failedCellIds: ['cell-4'],
+            pausedCellIds: ['cell-5'],
+        },
+        startedIds: ['cell-1'],
+        completedIds: [],
+        failedIds: [],
+    });
+});
+
+test('reduceCommandExecution marks failed direct executions without leaving stale queued or paused state', () => {
+    const { reduceCommandExecution } = loadExecutionStateModule();
+
+    const result = reduceCommandExecution({
+        queuedIds: ['cell-1'],
+        executingIds: ['cell-2'],
+        failedCellIds: ['cell-3'],
+        pausedCellIds: ['cell-2', 'cell-4'],
+    }, {
+        type: 'execute-finished',
+        cell_id: 'cell-2',
+        ok: false,
+    });
+
+    assert.deepEqual(result, {
+        buckets: {
+            queuedIds: ['cell-1'],
+            executingIds: [],
+            failedCellIds: ['cell-3', 'cell-2'],
+            pausedCellIds: ['cell-4'],
+        },
+        startedIds: [],
+        completedIds: [],
+        failedIds: ['cell-2'],
+    });
+});
+
+test('reduceCommandExecution marks successful direct executions as completed and clears old failures', () => {
+    const { reduceCommandExecution } = loadExecutionStateModule();
+
+    const result = reduceCommandExecution({
+        queuedIds: ['cell-1'],
+        executingIds: ['cell-2'],
+        failedCellIds: ['cell-2', 'cell-3'],
+        pausedCellIds: ['cell-4'],
+    }, {
+        type: 'execute-finished',
+        cell_id: 'cell-2',
+        ok: true,
+    });
+
+    assert.deepEqual(result, {
+        buckets: {
+            queuedIds: ['cell-1'],
+            executingIds: [],
+            failedCellIds: ['cell-3'],
+            pausedCellIds: ['cell-4'],
+        },
+        startedIds: [],
+        completedIds: ['cell-2'],
+        failedIds: [],
+    });
+});

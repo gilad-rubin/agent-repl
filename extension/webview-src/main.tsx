@@ -39,6 +39,7 @@ import { createStandaloneHost, readStandaloneConfig } from './standalone-host';
 import { deriveCellStatusKind, type CellStatusKind } from '../src/shared/cellStatus';
 import {
   queueExecutionBuckets,
+  reduceCommandExecution,
   reduceActivityExecution,
   resolveIdleExecutionTransition,
   startExecutionBuckets,
@@ -3379,13 +3380,19 @@ function App() {
           currentExecutingIds: stateRef.current.executingIds,
           currentQueuedIds: stateRef.current.queuedIds,
         });
-        executionStartRef.current.set(message.cell_id, Date.now());
-        setQueuedIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-        setExecutingIds((existing) =>
-          existing.includes(message.cell_id) ? existing : [...existing, message.cell_id],
-        );
-        setFailedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-        setPausedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
+        const reduction = reduceCommandExecution(stateRef.current, message);
+        const startedAt = Date.now();
+        updateExecutionStateRef(reduction.buckets);
+        for (const cellId of reduction.startedIds) {
+          executionStartRef.current.set(
+            cellId,
+            executionStartRef.current.get(cellId) ?? startedAt,
+          );
+        }
+        setQueuedIds(reduction.buckets.queuedIds);
+        setExecutingIds(reduction.buckets.executingIds);
+        setFailedCellIds(reduction.buckets.failedCellIds);
+        setPausedCellIds(reduction.buckets.pausedCellIds);
         return;
       }
 
@@ -3396,28 +3403,38 @@ function App() {
           currentExecutingIds: stateRef.current.executingIds,
           currentQueuedIds: stateRef.current.queuedIds,
         });
-        setQueuedIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-        setExecutingIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-        const startTime = executionStartRef.current.get(message.cell_id);
-        executionStartRef.current.delete(message.cell_id);
-        const failed = message.type === 'execute-failed' || message.ok === false;
-        if (!failed && message.type === 'execute-finished' && startTime != null) {
-          const elapsed = startTime != null ? Date.now() - startTime : 0;
-          setCompletedTimes((prev) => ({ ...prev, [message.cell_id]: elapsed }));
+        const reduction = reduceCommandExecution(stateRef.current, message);
+        const finishedAt = Date.now();
+        updateExecutionStateRef(reduction.buckets);
+        const completedStartTimes = new Map<string, number | undefined>();
+        for (const cellId of reduction.completedIds) {
+          completedStartTimes.set(cellId, executionStartRef.current.get(cellId));
         }
-        if (failed) {
-          setFailedCellIds((existing) =>
-            existing.includes(message.cell_id) ? existing : [...existing, message.cell_id],
-          );
-          setPausedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
+        for (const cellId of [...reduction.completedIds, ...reduction.failedIds]) {
+          executionStartRef.current.delete(cellId);
+        }
+        setQueuedIds(reduction.buckets.queuedIds);
+        setExecutingIds(reduction.buckets.executingIds);
+        setFailedCellIds(reduction.buckets.failedCellIds);
+        setPausedCellIds(reduction.buckets.pausedCellIds);
+        if (reduction.completedIds.length > 0) {
           setCompletedTimes((prev) => {
             const next = { ...prev };
-            delete next[message.cell_id];
+            for (const cellId of reduction.completedIds) {
+              const startTime = completedStartTimes.get(cellId);
+              next[cellId] = startTime != null ? finishedAt - startTime : next[cellId] ?? 0;
+            }
             return next;
           });
-        } else {
-          setFailedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-          setPausedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
+        }
+        if (reduction.failedIds.length > 0) {
+          setCompletedTimes((prev) => {
+            const next = { ...prev };
+            for (const cellId of reduction.failedIds) {
+              delete next[cellId];
+            }
+            return next;
+          });
         }
         if (message.type === 'execute-failed') {
           setErrorMessage(
