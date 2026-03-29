@@ -8,32 +8,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-import requests
+from agent_repl.http_api import JsonApiClient, json_error_message
 
 
-def _bridge_error_message(response: requests.Response) -> str | None:
-    try:
-        payload = response.json()
-    except ValueError:
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-
-    error = payload.get("error")
-    if isinstance(error, str) and error.strip():
-        return error.strip()
-    return None
+def _bridge_error_message(response) -> str | None:
+    return json_error_message(response)
 
 
-class BridgeClient:
+class BridgeClient(JsonApiClient):
     """HTTP client for the agent-repl bridge server."""
-
-    def __init__(self, base_url: str, token: str):
-        self.base_url = base_url.rstrip("/")
-        self.token = token
-        self._session = requests.Session()
-        self._session.headers["Authorization"] = f"token {token}"
 
     # ------------------------------------------------------------------
     # Discovery
@@ -225,28 +208,8 @@ class BridgeClient:
             interval = min(interval * 1.5, 1.0)
         return {**initial, "status": "timeout", "timeout_seconds": timeout}
 
-    def _get(self, endpoint: str, params: dict[str, str] | None = None) -> dict[str, Any]:
-        r = self._session.get(f"{self.base_url}{endpoint}", params=params, timeout=10)
-        self._raise_for_status(r)
-        return r.json()
-
     def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
-        r = self._session.post(f"{self.base_url}{endpoint}", json=body, timeout=30)
-        self._raise_for_status(r)
-        return r.json()
-
-    def _raise_for_status(self, response: requests.Response) -> None:
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            detail = _bridge_error_message(response)
-            if detail:
-                status = getattr(response, "status_code", "HTTP error")
-                reason = getattr(response, "reason", "") or "HTTP error"
-                url = getattr(response, "url", None)
-                location = f" for url: {url}" if url else ""
-                raise RuntimeError(f"{status} {reason}{location}: {detail}") from exc
-            raise
+        return super()._post(endpoint, body, timeout=30)
 
     def _path_params(self, path: str) -> dict[str, str]:
         return {"path": path, "cwd": os.getcwd()}
