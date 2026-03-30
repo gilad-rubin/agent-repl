@@ -4,41 +4,50 @@ import unittest
 from http import HTTPStatus
 from unittest import mock
 
-from agent_repl.core.collaboration_http_routes import (
-    handle_collaboration_get,
-    handle_collaboration_post,
-)
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
+
+from agent_repl.core.collaboration_http_routes import routes
+
+
+def _make_client(state: mock.MagicMock) -> TestClient:
+    app = Starlette(routes=routes(state))
+    return TestClient(app, raise_server_exceptions=False)
 
 
 class TestCollaborationHttpRoutes(unittest.TestCase):
-    def test_returns_none_for_unknown_path(self):
-        self.assertIsNone(handle_collaboration_get(mock.Mock(), "/api/nope"))
-        self.assertIsNone(handle_collaboration_post(mock.Mock(), "/api/nope", {}))
+    def test_unknown_route_returns_404(self):
+        client = _make_client(mock.MagicMock())
+        resp = client.get("/api/nope")
+        self.assertEqual(resp.status_code, 404)
 
     def test_dispatches_sessions_get_route(self):
-        state = mock.Mock()
+        state = mock.MagicMock()
         state.list_sessions_payload.return_value = {"status": "ok", "sessions": []}
+        client = _make_client(state)
 
-        status, body = handle_collaboration_get(state, "/api/sessions")
+        resp = client.get("/api/sessions")
 
-        self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(body["status"], "ok")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "ok")
         state.list_sessions_payload.assert_called_once_with()
 
     def test_validates_missing_session_id_for_presence_clear(self):
-        status, body = handle_collaboration_post(mock.Mock(), "/api/sessions/presence/clear", {})
+        client = _make_client(mock.MagicMock())
 
-        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
-        self.assertEqual(body, {"error": "Missing session_id"})
+        resp = client.post("/api/sessions/presence/clear", json={})
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json(), {"error": "Missing session_id"})
 
     def test_dispatches_branch_review_resolve_route(self):
-        state = mock.Mock()
+        state = mock.MagicMock()
         state.resolve_branch_review.return_value = ({"status": "ok"}, HTTPStatus.OK)
+        client = _make_client(state)
 
-        status, body = handle_collaboration_post(
-            state,
+        resp = client.post(
             "/api/branches/review-resolve",
-            {
+            json={
                 "branch_id": "branch-1",
                 "resolved_by_session_id": "sess-1",
                 "resolution": "approved",
@@ -46,8 +55,8 @@ class TestCollaborationHttpRoutes(unittest.TestCase):
             },
         )
 
-        self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(body, {"status": "ok"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "ok"})
         state.resolve_branch_review.assert_called_once_with(
             branch_id="branch-1",
             resolved_by_session_id="sess-1",

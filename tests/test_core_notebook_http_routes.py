@@ -4,31 +4,43 @@ import unittest
 from http import HTTPStatus
 from unittest import mock
 
-from agent_repl.core.notebook_http_routes import handle_notebook_post
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
+
+from agent_repl.core.notebook_http_routes import routes
+
+
+def _make_client(state: mock.MagicMock) -> TestClient:
+    app = Starlette(routes=routes(state))
+    return TestClient(app, raise_server_exceptions=False)
 
 
 class TestNotebookHttpRoutes(unittest.TestCase):
-    def test_returns_none_for_unknown_path(self):
-        self.assertIsNone(handle_notebook_post(mock.Mock(), "/api/notebooks/nope", {}))
+    def test_unknown_route_returns_404(self):
+        client = _make_client(mock.MagicMock())
+        resp = client.post("/api/notebooks/nope", json={})
+        self.assertEqual(resp.status_code, 404)
 
     def test_validates_missing_path_with_shared_request_contract(self):
-        status, body = handle_notebook_post(mock.Mock(), "/api/notebooks/contents", {})
+        client = _make_client(mock.MagicMock())
 
-        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
-        self.assertEqual(body, {"error": "Missing path"})
+        resp = client.post("/api/notebooks/contents", json={})
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json(), {"error": "Missing path"})
 
     def test_dispatches_execute_visible_cell_route(self):
-        state = mock.Mock()
+        state = mock.MagicMock()
         state.notebook_execute_visible_cell.return_value = ({"status": "ok"}, HTTPStatus.OK)
+        client = _make_client(state)
 
-        status, body = handle_notebook_post(
-            state,
+        resp = client.post(
             "/api/notebooks/execute-visible-cell",
-            {"path": "nb.ipynb", "cell_index": 2, "source": "x = 1", "owner_session_id": "sess-1"},
+            json={"path": "nb.ipynb", "cell_index": 2, "source": "x = 1", "owner_session_id": "sess-1"},
         )
 
-        self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(body, {"status": "ok"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "ok"})
         state.notebook_execute_visible_cell.assert_called_once_with(
             "nb.ipynb",
             cell_index=2,
