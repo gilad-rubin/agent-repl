@@ -670,17 +670,6 @@ def cmd_core(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
-    if args.core_command == "mcp-stdio":
-        from agent_repl.core.client import _runtime_dir
-        from agent_repl.core.mcp_adapter import create_mcp_server
-        from agent_repl.core.server import create_state
-
-        rd = runtime_dir or _runtime_dir()
-        state = create_state(workspace_root, runtime_dir=rd)
-        mcp = create_mcp_server(state)
-        mcp.run(transport="stdio")
-        return 0
-
     if args.core_command == "serve":
         serve_forever(workspace_root, runtime_dir=args.runtime_dir)
         return 0
@@ -1122,10 +1111,6 @@ def build_parser() -> argparse.ArgumentParser:
     vp = coresub.add_parser("serve", help=argparse.SUPPRESS)
     vp.add_argument("--workspace-root", required=True)
     vp.add_argument("--runtime-dir", required=True)
-
-    vp = coresub.add_parser("mcp-stdio", help="Run the MCP server over stdin/stdout for this workspace")
-    vp.add_argument("--workspace-root", help="Workspace root to bind (default: cwd)")
-    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     public_commands = [
         "reload",
