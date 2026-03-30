@@ -72,6 +72,48 @@ def create_mcp_server(state: Any) -> FastMCP:
         body, status = state.notebook_activity(path, since=since)
         return body
 
+    @mcp.tool
+    def notebook_interrupt(path: str) -> dict[str, Any]:
+        """Interrupt the currently executing cell in a notebook."""
+        body, status = state.notebook_interrupt(path)
+        return body
+
+    @mcp.tool
+    def notebook_select_kernel(path: str, kernel_id: str | None = None) -> dict[str, Any]:
+        """Select or change the kernel for a notebook."""
+        body, status = state.notebook_select_kernel(path, kernel_id=kernel_id)
+        return body
+
+    @mcp.tool
+    def notebook_projection(path: str) -> dict[str, Any]:
+        """Get the projected state of a notebook (cells with outputs and execution state)."""
+        body, status = state.notebook_projection(path)
+        return body
+
+    @mcp.tool
+    def notebook_insert_execute(path: str, source: str, cell_type: str = "code", at_index: int = -1, owner_session_id: str | None = None) -> dict[str, Any]:
+        """Insert a new cell and execute it immediately."""
+        body, status = state.notebook_insert_execute(path, source=source, cell_type=cell_type, at_index=at_index, owner_session_id=owner_session_id)
+        return body
+
+    @mcp.tool
+    def notebook_execution_lookup(execution_id: str) -> dict[str, Any]:
+        """Look up the status and result of an execution by its ID."""
+        body, status = state.notebook_execution(execution_id)
+        return body
+
+    @mcp.tool
+    def notebook_project_visible(path: str, cells: list[dict[str, Any]], owner_session_id: str | None = None) -> dict[str, Any]:
+        """Project visible cells into a notebook, syncing editor state."""
+        body, status = state.notebook_project_visible(path, cells=cells, owner_session_id=owner_session_id)
+        return body
+
+    @mcp.tool
+    def notebook_execute_visible_cell(path: str, cell_index: int, source: str, owner_session_id: str | None = None) -> dict[str, Any]:
+        """Execute a visible cell in a notebook by index with updated source."""
+        body, status = state.notebook_execute_visible_cell(path, cell_index=cell_index, source=source, owner_session_id=owner_session_id)
+        return body
+
     # ------------------------------------------------------------------
     # Runtime tools
     # ------------------------------------------------------------------
