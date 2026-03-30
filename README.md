@@ -43,6 +43,7 @@ For guided onboarding after the CLI is installed:
 ```bash
 agent-repl setup --smoke-test
 agent-repl doctor --probe-mcp
+agent-repl editor dev --editor vscode
 ```
 
 ## What `agent-repl` Does Automatically
@@ -74,7 +75,7 @@ agent-repl doctor --probe-mcp
 | `respond` | Answer a prompt cell from the CLI |
 | `setup` | Run onboarding checks and optional workspace setup actions |
 | `doctor` | Inspect CLI, workspace, editor, and optional MCP readiness |
-| `editor` | Configure workspace editor defaults for VS Code-family editors |
+| `editor` | Configure workspace editor defaults or launch the extension dev host |
 | `mcp` | Start, configure, and verify the MCP server for this workspace |
 | `reload` | Hot-reload installed extension routes during development |
 
@@ -132,6 +133,14 @@ cd extension && node --test tests/*.test.js
 
 Useful loops:
 
+- **Preferred extension development loop**:
+
+```bash
+agent-repl editor dev --editor vscode
+```
+
+That command compiles the repo extension, opens VS Code in an Extension Development Host, and avoids installed-extension drift.
+
 - **Reinstall CLI**:
 
 ```bash
@@ -155,7 +164,7 @@ npm run compile
 agent-repl reload --pretty
 ```
 
-Then run `Agent REPL: Reload` in VS Code. Changes to `extension.ts` or `server.ts` still require a full window reload.
+Then run `Agent REPL: Reload` in VS Code. `reload --pretty` now also reports build-sync status for the live installed extension. Changes to `extension.ts` or `server.ts` still require a full window reload.
 
 - **Browser preview with the same shared canvas bundle**:
 
@@ -172,7 +181,7 @@ In browser mode the canvas now includes a minimal VS Code-like explorer for `*.i
 
 The browser canvas also exposes an explicit Save action in the toolbar. Use that button or press `Cmd+S` on macOS / `Ctrl+S` elsewhere to flush the current browser drafts into the notebook file without waiting for the editor to blur.
 
-When comparing preview and VS Code UI, rebuild before packaging so the installed extension and the repo bundle stay in sync.
+When comparing preview and an installed VS Code extension, treat the Extension Development Host as the preferred source of truth. `agent-repl doctor` and `agent-repl reload --pretty` now warn when the installed extension build drifts from the workspace repo build.
 
 ## License
 

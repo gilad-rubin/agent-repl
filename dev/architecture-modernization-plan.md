@@ -9,7 +9,7 @@ Updated 2026-03-29
 - **ASGI host shell (Phase 3)**: Starlette app served by uvicorn (`src/agent_repl/core/asgi.py`), with `TokenAuthMiddleware` for auth. The old `ThreadingHTTPServer` handler has been fully removed.
 - **SQLite persistence (Phase 4)**: Operational state persisted to `{workspace}/.agent-repl/core-state.db` via `src/agent_repl/core/db.py` with WAL mode.
 - **FastMCP mount (Phase 5, partial)**: MCP server mounted into the Starlette ASGI host via `src/agent_repl/core/mcp_adapter.py`, with the canonical public endpoint at `/mcp` and `/mcp/mcp` retained as a compatibility alias. MCP tools call through to `CoreState` with shared lifespan.
-- **Public onboarding CLI surface**: `agent-repl setup`, `agent-repl doctor`, and `agent-repl editor configure --default-canvas` are shipped public commands. `setup` and `doctor` are JSON-first onboarding and verification helpers, and `editor configure` updates workspace `.vscode/settings.json` to prefer `agent-repl.canvasEditor` for `*.ipynb`.
+- **Public onboarding CLI surface**: `agent-repl setup`, `agent-repl doctor`, `agent-repl editor configure --default-canvas`, and `agent-repl editor dev` are shipped public commands. `setup` and `doctor` are JSON-first onboarding and verification helpers, `editor configure` updates workspace `.vscode/settings.json` to prefer `agent-repl.canvasEditor` for `*.ipynb`, and `editor dev` launches the workspace extension in an Extension Development Host.
 
 ### In Progress
 
@@ -374,6 +374,7 @@ The broader CLI onboarding surface is also now partially shipped:
 - `agent-repl setup`
 - `agent-repl doctor`
 - `agent-repl editor configure --default-canvas`
+- `agent-repl editor dev --editor vscode`
 
 Remaining work:
 

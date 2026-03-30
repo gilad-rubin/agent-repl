@@ -103,22 +103,12 @@ def routes(state: Any) -> list[Route]:
         if isinstance(req, tuple):
             return JSONResponse(req[1], status_code=req[0].value)
         if not req.wait:
-            start_background_task(
-                "agent-repl-execute-cell",
-                state.notebook_execute_cell,
+            return await respond_from_threadpool(
+                state.notebook_enqueue_execute_cell,
                 req.path,
                 cell_id=req.cell_id,
                 cell_index=req.cell_index,
                 owner_session_id=req.owner_session_id,
-            )
-            return JSONResponse(
-                {
-                    "status": "started",
-                    "path": req.path,
-                    "cell_id": req.cell_id,
-                    "cell_index": req.cell_index,
-                },
-                status_code=200,
             )
         return await respond_from_threadpool(
             state.notebook_execute_cell,

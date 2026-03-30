@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from typing import Any
@@ -205,15 +206,16 @@ class NotebookExecutionService:
         cell_id: str | None,
         cell_index: int | None,
         owner_session_id: str | None = None,
+        execution_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, _changed = self.state._load_notebook(real_path)
+        notebook, changed = self.state._load_notebook(real_path)
+        if changed:
+            self.state._save_notebook(real_path, notebook)
         index = self.state._find_cell_index(notebook, cell_id=cell_id, cell_index=cell_index)
         cell = notebook.cells[index]
         if cell.cell_type != "code":
             raise RuntimeError("Only code cells can be executed")
-        runtime = self.state._ensure_headless_runtime(real_path)
         stable_cell_id = self.state._cell_id(cell, index)
-        execution_id = str(uuid.uuid4())
         self.state._assert_cell_not_leased(
             relative_path=relative_path,
             cell_id=stable_cell_id,
@@ -227,6 +229,111 @@ class NotebookExecutionService:
                 cell_id=stable_cell_id,
                 kind="edit",
             )
+        return self._execute_cell_by_id(
+            real_path,
+            relative_path,
+            stable_cell_id=stable_cell_id,
+            owner_session_id=owner_session_id,
+            execution_id=execution_id or str(uuid.uuid4()),
+        )
+
+    def enqueue_execute_cell(
+        self,
+        real_path: str,
+        relative_path: str,
+        *,
+        cell_id: str | None,
+        cell_index: int | None,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        notebook, changed = self.state._load_notebook(real_path)
+        if changed:
+            self.state._save_notebook(real_path, notebook)
+        index = self.state._find_cell_index(notebook, cell_id=cell_id, cell_index=cell_index)
+        cell = notebook.cells[index]
+        if cell.cell_type != "code":
+            raise RuntimeError("Only code cells can be executed")
+        runtime = self.state._ensure_headless_runtime(real_path)
+        stable_cell_id = self.state._cell_id(cell, index)
+        self.state._assert_cell_not_leased(
+            relative_path=relative_path,
+            cell_id=stable_cell_id,
+            owner_session_id=owner_session_id,
+            operation="execute-cell",
+        )
+        if owner_session_id is not None:
+            self.state.acquire_cell_lease(
+                session_id=owner_session_id,
+                path=relative_path,
+                cell_id=stable_cell_id,
+                kind="edit",
+            )
+        execution_id = str(uuid.uuid4())
+        is_active = runtime.busy or runtime.current_execution is not None or self.state._execution_ledger_service.has_active_notebook_execution(
+            runtime_id=runtime.runtime_id,
+            path=relative_path,
+        )
+        record = self.state._execution_ledger_service.start_notebook_execution(
+            execution_id=execution_id,
+            path=relative_path,
+            runtime_id=runtime.runtime_id,
+            cell_id=stable_cell_id,
+            cell_index=index,
+            source_preview=cell.source.splitlines()[0][:80] if cell.source else "",
+            owner=self.state._session_actor(owner_session_id, "agent"),
+            session_id=owner_session_id,
+            operation="execute-cell",
+            status="queued" if is_active else "running",
+        )
+        with runtime.async_queue_lock:
+            runtime.async_queue.append(execution_id)
+        self._ensure_async_worker(
+            runtime=runtime,
+            real_path=real_path,
+            relative_path=relative_path,
+        )
+        self.state.persist()
+        if record["status"] == "queued":
+            queued = [
+                queued_record
+                for queued_record in self.state._execution_ledger_service.notebook_execution_status(
+                    runtime_id=runtime.runtime_id,
+                    path=relative_path,
+                )[1]
+                if queued_record.get("execution_id") == execution_id
+            ]
+            queue_position = queued[0].get("queue_position") if queued else None
+            return {
+                "status": "queued",
+                "path": relative_path,
+                "execution_id": execution_id,
+                "cell_id": stable_cell_id,
+                "cell_index": index,
+                "queue_position": queue_position,
+            }
+        return {
+            "status": "started",
+            "path": relative_path,
+            "execution_id": execution_id,
+            "cell_id": stable_cell_id,
+            "cell_index": index,
+        }
+
+    def _execute_cell_by_id(
+        self,
+        real_path: str,
+        relative_path: str,
+        *,
+        stable_cell_id: str,
+        owner_session_id: str | None,
+        execution_id: str,
+    ) -> dict[str, Any]:
+        notebook, _changed = self.state._load_notebook(real_path)
+        index = self.state._find_cell_index(notebook, cell_id=stable_cell_id)
+        cell = notebook.cells[index]
+        if cell.cell_type != "code":
+            raise RuntimeError("Only code cells can be executed")
+        runtime = self.state._ensure_headless_runtime(real_path)
         outputs, execution_count, error_text = self.state._execute_source(
             runtime,
             cell.source,
@@ -291,6 +398,74 @@ class NotebookExecutionService:
             "execution_preference": "headless",
             **({"error": error_text} if error_text else {}),
         }
+
+    def _ensure_async_worker(
+        self,
+        *,
+        runtime: Any,
+        real_path: str,
+        relative_path: str,
+    ) -> None:
+        with runtime.async_queue_lock:
+            worker = runtime.async_worker
+            if worker is not None and worker.is_alive():
+                return
+            worker = threading.Thread(
+                target=self._drain_async_execution_queue,
+                kwargs={
+                    "runtime": runtime,
+                    "real_path": real_path,
+                    "relative_path": relative_path,
+                },
+                name=f"agent-repl-exec-queue-{runtime.runtime_id}",
+                daemon=True,
+            )
+            runtime.async_worker = worker
+            worker.start()
+
+    def _drain_async_execution_queue(
+        self,
+        *,
+        runtime: Any,
+        real_path: str,
+        relative_path: str,
+    ) -> None:
+        while True:
+            with runtime.async_queue_lock:
+                if not runtime.async_queue:
+                    runtime.async_worker = None
+                    return
+                execution_id = runtime.async_queue.pop(0)
+            record = self.state._execution_ledger_service.notebook_execution(execution_id)
+            if record is None:
+                continue
+            try:
+                self._execute_cell_by_id(
+                    real_path,
+                    relative_path,
+                    stable_cell_id=record["cell_id"],
+                    owner_session_id=record.get("session_id"),
+                    execution_id=execution_id,
+                )
+            except Exception as err:
+                self.state._execution_ledger_service.finish_notebook_execution(
+                    execution_id,
+                    status="error",
+                    outputs=[],
+                    execution_count=None,
+                    error=str(err),
+                )
+                self.state._append_activity_event(
+                    path=relative_path,
+                    event_type="execution-finished",
+                    detail=f"Failed queued execution for {record['cell_id']}",
+                    actor=record.get("owner"),
+                    session_id=record.get("session_id"),
+                    runtime_id=record.get("runtime_id"),
+                    cell_id=record.get("cell_id"),
+                    cell_index=record.get("cell_index"),
+                )
+                self.state.persist()
 
     def insert_execute(
         self,
@@ -370,10 +545,7 @@ class NotebookExecutionService:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, _ = self.state._load_notebook(real_path)
-        identity_changed = False
-        for index, cell in enumerate(notebook.cells):
-            identity_changed = self.state._ensure_cell_identity(cell, index) or identity_changed
+        notebook, identity_changed = self.state._load_notebook(real_path)
         if identity_changed:
             self.state._save_notebook(real_path, notebook)
         executions = []

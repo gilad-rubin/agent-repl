@@ -21,7 +21,9 @@ type NotebookOutput = {
   ename?: string;
   evalue?: string;
   traceback?: string[];
-  data?: Record<string, string | string[]>;
+  data?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  transient?: Record<string, unknown>;
 };
 
 type NotebookCell = {

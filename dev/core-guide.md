@@ -59,6 +59,7 @@ Typed dataclasses with `from_payload()` for request validation:
 - `CoreState` is an orchestrator. Business logic lives in service modules.
 - Notebook mutations route through `YDocService` (CRDT) then mirror to nbformat for disk persistence.
 - Execution truth is server-owned. Clients derive queued/running state from daemon, not local inference.
+- Async notebook execution is FIFO and server-owned. `wait=false` notebook execution calls may return `started` or `queued`, and status/activity endpoints are the source of truth for promotion from queued to running.
 - Leases remain for concurrency control alongside YDoc — eventual decommission once CRDT path is proven.
 - MCP tools call the same `CoreState` methods as CLI and REST. Keep them in sync.
 - Public onboarding commands should stay JSON-first so coding agents can execute and verify them without scraping prose output.

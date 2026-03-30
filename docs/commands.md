@@ -259,6 +259,37 @@ Inspect CLI, workspace, editor, and optional MCP readiness.
 agent-repl doctor [--workspace-root PATH] [--probe-mcp] [--smoke-test] [--smoke-test-path PATH]
 ```
 
+Notes:
+
+- reports editor development status for repo and installed extension builds when the workspace contains `extension/`
+- recommends `agent-repl editor dev --editor vscode` when the workspace is a source checkout
+- warns when an installed VS Code-family extension build differs from the workspace repo build
+
+### `editor`
+
+Configure workspace editor defaults or launch the repo extension in an Extension Development Host.
+
+```bash
+agent-repl editor configure --default-canvas [--workspace-root PATH]
+agent-repl editor dev [--workspace-root PATH] [--editor vscode|cursor|windsurf] [--reuse-window] [--skip-compile]
+```
+
+Examples:
+
+```bash
+agent-repl editor configure --default-canvas
+agent-repl editor dev --editor vscode
+agent-repl editor dev --editor cursor --reuse-window
+```
+
+Notes:
+
+- `editor configure --default-canvas` writes the workspace `workbench.editorAssociations` setting for `*.ipynb`
+- `editor dev` is the preferred extension development loop
+- by default `editor dev` runs `cd extension && npm run compile` before launching the editor
+- `editor dev` opens the workspace in an Extension Development Host using `--extensionDevelopmentPath`
+- use `--skip-compile` only when you intentionally want to launch the current repo build as-is
+
 Examples:
 
 ```bash
@@ -419,6 +450,7 @@ Source-accepting commands support three input modes:
 | `setup` | Yes | No |
 | `doctor` | Yes | No |
 | `editor configure` | Yes | No |
+| `editor dev` | Yes | No |
 | `mcp setup` | Yes | No |
 | `mcp status` | Yes | No |
 | `mcp config` | Yes | No |

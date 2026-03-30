@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -212,6 +213,202 @@ def _detect_installed_extensions() -> dict[str, Any]:
     return result
 
 
+def _workspace_extension_root(workspace_root: str) -> Path | None:
+    candidate = Path(workspace_root) / "extension"
+    if (candidate / "scripts" / "preview-webview.mjs").exists():
+        return candidate
+    return None
+
+
+def _extension_build_fingerprint(extension_root: str | Path | None) -> dict[str, Any]:
+    if extension_root is None:
+        return {"status": "skip", "message": "No extension root detected."}
+    root = Path(extension_root)
+    if not root.exists():
+        return {
+            "status": "missing",
+            "root": str(root),
+            "message": "Extension root does not exist.",
+        }
+
+    required_paths = [
+        root / "package.json",
+        root / "out" / "extension.js",
+        root / "out" / "routes.js",
+        root / "media" / "canvas.js",
+        root / "media" / "canvas.css",
+    ]
+    missing = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
+    if missing:
+        return {
+            "status": "missing",
+            "root": str(root),
+            "missing": missing,
+            "message": "Extension build artifacts are missing. Run `cd extension && npm run compile`.",
+        }
+
+    hasher = hashlib.sha256()
+    file_count = 0
+    for relative_name in ("package.json",):
+        path = root / relative_name
+        hasher.update(relative_name.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+        file_count += 1
+    for relative_dir in ("out", "media"):
+        base = root / relative_dir
+        for path in sorted(candidate for candidate in base.rglob("*") if candidate.is_file()):
+            relative_name = path.relative_to(root).as_posix()
+            hasher.update(relative_name.encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(path.read_bytes())
+            file_count += 1
+    return {
+        "status": "ok",
+        "root": str(root),
+        "fingerprint": f"sha256:{hasher.hexdigest()}",
+        "file_count": file_count,
+    }
+
+
+def _select_primary_installed_extension(paths: list[str]) -> str | None:
+    if not paths:
+        return None
+    return paths[-1]
+
+
+def _extension_build_sync_status(
+    *,
+    repo_extension_root: str | Path | None,
+    installed_extension_root: str | Path | None,
+) -> dict[str, Any]:
+    repo_build = _extension_build_fingerprint(repo_extension_root)
+    installed_build = _extension_build_fingerprint(installed_extension_root)
+    payload: dict[str, Any] = {
+        "repo": repo_build,
+        "installed": installed_build,
+    }
+    if repo_build["status"] == "skip":
+        payload.update({
+            "status": "skip",
+            "message": "No workspace extension source checkout detected.",
+        })
+        return payload
+    if repo_build["status"] != "ok":
+        payload.update({
+            "status": "warn",
+            "message": repo_build.get("message", "Workspace extension build is unavailable."),
+        })
+        return payload
+    if installed_build["status"] == "skip":
+        payload.update({
+            "status": "skip",
+            "message": "No installed extension detected for this editor.",
+        })
+        return payload
+    if installed_build["status"] != "ok":
+        payload.update({
+            "status": "warn",
+            "message": installed_build.get("message", "Installed extension build is unavailable."),
+        })
+        return payload
+    if repo_build["fingerprint"] == installed_build["fingerprint"]:
+        payload.update({
+            "status": "ok",
+            "message": "Installed extension build matches the workspace repo build.",
+        })
+        return payload
+    payload.update({
+        "status": "warn",
+        "message": "Installed extension build differs from the workspace repo build.",
+    })
+    return payload
+
+
+def _editor_development_status(workspace_root: str) -> dict[str, Any]:
+    repo_extension_root = _workspace_extension_root(workspace_root)
+    installed = _detect_installed_extensions()
+    sync: dict[str, Any] = {}
+    mismatch_editors: list[str] = []
+    for editor, payload in installed.items():
+        primary = _select_primary_installed_extension(payload.get("installed", []))
+        comparison = _extension_build_sync_status(
+            repo_extension_root=repo_extension_root,
+            installed_extension_root=primary,
+        )
+        comparison["installed_root"] = primary
+        sync[editor] = comparison
+        if comparison["status"] == "warn":
+            mismatch_editors.append(editor)
+    return {
+        "preferred_loop": "extension-development-host",
+        "recommended_command": "agent-repl editor dev --editor vscode",
+        "repo_extension": _extension_build_fingerprint(repo_extension_root),
+        "sync": sync,
+        "mismatch_editors": mismatch_editors,
+    }
+
+
+def _resolve_extension_dev_root(workspace_root: str) -> Path:
+    repo_extension_root = _workspace_extension_root(workspace_root)
+    if repo_extension_root is not None:
+        return repo_extension_root
+    return _find_extension_root()
+
+
+def _launch_extension_development_host(
+    *,
+    workspace_root: str,
+    editor: str,
+    reuse_window: bool,
+    compile_extension: bool,
+) -> dict[str, Any]:
+    editor_clis = _detect_editor_clis()
+    editor_info = editor_clis.get(editor)
+    editor_path = editor_info.get("path") if isinstance(editor_info, dict) else None
+    if not editor_path:
+        raise RuntimeError(f"No `{editor}` CLI detected on PATH.")
+
+    extension_root = _resolve_extension_dev_root(workspace_root)
+    if compile_extension:
+        npm_path = shutil.which("npm")
+        if not npm_path:
+            raise RuntimeError("`npm` is required to compile the extension before launching the development host.")
+        subprocess.run(
+            [npm_path, "run", "compile"],
+            cwd=str(extension_root),
+            check=True,
+        )
+
+    build = _extension_build_fingerprint(extension_root)
+    if build["status"] != "ok":
+        raise RuntimeError(build.get("message", "Extension build artifacts are unavailable."))
+
+    command = [
+        editor_path,
+        "--extensionDevelopmentPath",
+        str(extension_root),
+        "--reuse-window" if reuse_window else "--new-window",
+        workspace_root,
+    ]
+    subprocess.Popen(
+        command,
+        cwd=workspace_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {
+        "status": "ok",
+        "editor": editor,
+        "workspace_root": workspace_root,
+        "extension_root": str(extension_root),
+        "compiled": compile_extension,
+        "build": build,
+        "command": command,
+    }
+
+
 def _doctor_payload(
     *,
     workspace_root: str,
@@ -222,6 +419,7 @@ def _doctor_payload(
     kernel_probe = _probe_kernel_capability(python_candidates[0]) if python_candidates else None
     editor_config = _workspace_editor_config_status(workspace_root)
     cli_executable = _detect_cli_executable()
+    editor_dev = _editor_development_status(workspace_root)
 
     checks = [
         {
@@ -256,6 +454,23 @@ def _doctor_payload(
             "status": "ok" if editor_config["default_canvas_configured"] else "warn",
             "detail": editor_config["settings_path"],
         },
+        {
+            "name": "editor-build-sync",
+            "status": (
+                "warn"
+                if editor_dev["mismatch_editors"]
+                else (
+                    "ok"
+                    if editor_dev["repo_extension"]["status"] == "ok"
+                    else "skip"
+                )
+            ),
+            "detail": (
+                ", ".join(editor_dev["mismatch_editors"])
+                if editor_dev["mismatch_editors"]
+                else editor_dev["repo_extension"].get("root", "No workspace extension source checkout detected")
+            ),
+        },
     ]
 
     payload: dict[str, Any] = {
@@ -283,6 +498,7 @@ def _doctor_payload(
             "workspace": editor_config,
             "clis": _detect_editor_clis(),
             "installed_extensions": _detect_installed_extensions(),
+            "development": editor_dev,
         },
         "checks": checks,
         "recommendations": [],
@@ -299,6 +515,18 @@ def _doctor_payload(
     if not editor_config["default_canvas_configured"]:
         payload["recommendations"].append(
             "Run `agent-repl editor configure --default-canvas` to open *.ipynb files in the Agent REPL canvas by default for this workspace."
+        )
+    if editor_dev["repo_extension"]["status"] == "ok":
+        payload["recommendations"].append(
+            "Prefer `agent-repl editor dev --editor vscode` for extension development so VS Code runs the workspace repo extension directly."
+        )
+    elif editor_dev["repo_extension"]["status"] == "missing":
+        payload["recommendations"].append(
+            "Run `cd extension && npm run compile` before launching an Extension Development Host or comparing repo and installed extension builds."
+        )
+    for editor in editor_dev["mismatch_editors"]:
+        payload["recommendations"].append(
+            f"The installed {editor} extension build differs from the workspace repo build. Prefer `agent-repl editor dev --editor {editor}` or reinstall/sync the installed copy before comparing behavior."
         )
 
     if probe_mcp:
@@ -516,6 +744,13 @@ def cmd_reload(args: argparse.Namespace) -> int:
         # Bridge unreachable (port changed after VS Code reload) — re-discover
         client = BridgeClient.discover()
         result = client.reload()
+    build_sync = _extension_build_sync_status(
+        repo_extension_root=_workspace_extension_root(_workspace_root()),
+        installed_extension_root=result.get("extension_root"),
+    )
+    result["build_sync"] = build_sync
+    if build_sync["status"] == "warn":
+        result["warning"] = build_sync.get("message")
     _out(result, args.pretty)
     return 0
 
@@ -1347,6 +1582,15 @@ def cmd_editor(args: argparse.Namespace) -> int:
         result = _configure_workspace_editor_defaults(workspace_root)
         _out(result, args.pretty)
         return 0
+    if args.editor_command == "dev":
+        result = _launch_extension_development_host(
+            workspace_root=workspace_root,
+            editor=getattr(args, "editor_name", "vscode"),
+            reuse_window=getattr(args, "reuse_window", False),
+            compile_extension=not getattr(args, "skip_compile", False),
+        )
+        _out(result, args.pretty)
+        return 0
     raise RuntimeError("Unknown editor command")
 
 
@@ -1577,6 +1821,12 @@ def build_parser() -> argparse.ArgumentParser:
     ep = esub.add_parser("configure", help="Update workspace settings for VS Code-family editors")
     ep.add_argument("--workspace-root", help="Workspace root to configure (default: cwd)")
     ep.add_argument("--default-canvas", action="store_true", help="Set *.ipynb to open in the Agent REPL canvas for this workspace")
+
+    ep = esub.add_parser("dev", help="Compile the repo extension and open it in an Extension Development Host")
+    ep.add_argument("--workspace-root", help="Workspace root to open (default: cwd)")
+    ep.add_argument("--editor", dest="editor_name", choices=["vscode", "cursor", "windsurf"], default="vscode")
+    ep.add_argument("--reuse-window", action="store_true", help="Reuse the last active editor window instead of opening a new one")
+    ep.add_argument("--skip-compile", action="store_true", help="Skip `npm run compile` before launching the development host")
 
     # mcp
     p = sub.add_parser("mcp", help="Use agent-repl as an MCP server")

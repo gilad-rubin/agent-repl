@@ -8,6 +8,7 @@ Runtime-first notebook system for agents and humans.
 uv run agent-repl <command>              # CLI from source
 uv run agent-repl setup --smoke-test     # onboarding checks + notebook smoke test
 uv run agent-repl doctor --probe-mcp     # install/workspace/editor/MCP readiness
+uv run agent-repl editor dev --editor vscode  # preferred extension dev loop
 uv run agent-repl core status            # daemon diagnostics
 uv run pytest                            # Python tests
 cd extension && npm run compile          # rebuild extension
@@ -59,6 +60,7 @@ Key points:
 - `execution/queue.ts` is the most complex module — read fully before modifying
 - Execution paths must stay background-safe (no focus stealing)
 - Use `npm run preview:webview` for renderer work, Extension Development Host for integration
+- Prefer `agent-repl editor dev --editor vscode` over testing an installed extension during normal development
 - When claiming a browser fix, verify it with the browser workflow in [dev/browser-verification-guide.md](dev/browser-verification-guide.md), including intermediate cell output when execution/rendering changed
 - Prefer `@carbon/icons-react` over custom SVG for notebook chrome icons
 - `npm run compile` rebuilds the repo copy only. It does not update an installed extension under `~/.vscode/extensions/` or `~/.cursor/extensions/`
@@ -78,7 +80,7 @@ Read [dev/core-guide.md](dev/core-guide.md) for the full module map, route struc
 Key points:
 - `client.py` = extension bridge; `core/client.py` = shared runtime client; `cli.py` = public surface
 - Hidden `agent-repl core ...` commands are the diagnostics surface
-- Public onboarding commands are `agent-repl setup`, `agent-repl doctor`, and `agent-repl editor configure --default-canvas`
+- Public onboarding commands are `agent-repl setup`, `agent-repl doctor`, `agent-repl editor configure --default-canvas`, and `agent-repl editor dev`
 - `setup` should report post-action state in JSON so agents can continue safely after editor or MCP configuration
 - When stale server, workspace mismatch, route mismatch, or lease/runtime conflicts are detected, prefer structured recovery metadata and safe automatic fallback over bare string errors
 - Source input pattern (`-s`, `--source-file`, stdin) is shared across `ix`, `respond`, `edit` — keep consistent
@@ -96,6 +98,7 @@ Key points:
 - Stale files from dead processes are the most common failure
 - `agent-repl core status` for daemon issues; `agent-repl core sessions` for session disagreements
 - `agent-repl reload --pretty` reports `extension_root` and `routes_module` paths
+- `agent-repl doctor` and `agent-repl reload --pretty` now report repo-vs-installed extension build drift when the workspace contains `extension/`
 - Browser preview and IDE canvases should treat refresh/reload as part of recovery: refresh the notebook surface when local state is stale, reload the bridge or preview when server/module state is stale, and explain which action the user should take when auto-recovery is not possible
 - If hot reload appears to succeed but the UI still behaves like old code, compare the live installed extension under `extension_root` with the repo build. The running copy may still be stale
 - For installed-extension debugging, prefer syncing the entire compiled `out/` and `media/` directories instead of patching individual files

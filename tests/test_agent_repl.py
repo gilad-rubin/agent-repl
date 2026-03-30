@@ -3472,6 +3472,14 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.editor_command, "configure")
         self.assertTrue(args.default_canvas)
 
+    def test_editor_dev(self):
+        args = build_parser().parse_args(["editor", "dev", "--editor", "cursor", "--reuse-window", "--skip-compile"])
+        self.assertEqual(args.command, "editor")
+        self.assertEqual(args.editor_command, "dev")
+        self.assertEqual(args.editor_name, "cursor")
+        self.assertTrue(args.reuse_window)
+        self.assertTrue(args.skip_compile)
+
     def test_reload(self):
         args = build_parser().parse_args(["reload"])
         self.assertEqual(args.command, "reload")
@@ -5193,6 +5201,139 @@ class TestCommands(unittest.TestCase):
             any("agent-repl editor configure --default-canvas" in item for item in payload["recommendations"])
         )
 
+    def test_doctor_reports_extension_dev_loop_and_sync_mismatch(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        repo_extension = workspace_root / "extension"
+        (repo_extension / "scripts").mkdir(parents=True)
+        (repo_extension / "scripts" / "preview-webview.mjs").write_text("// preview\n", encoding="utf-8")
+        (repo_extension / "out").mkdir()
+        (repo_extension / "media").mkdir()
+        (repo_extension / "package.json").write_text(json.dumps({"version": "0.3.0"}), encoding="utf-8")
+        (repo_extension / "out" / "extension.js").write_text("repo extension\n", encoding="utf-8")
+        (repo_extension / "out" / "routes.js").write_text("repo routes\n", encoding="utf-8")
+        (repo_extension / "media" / "canvas.js").write_text("repo canvas js\n", encoding="utf-8")
+        (repo_extension / "media" / "canvas.css").write_text("repo canvas css\n", encoding="utf-8")
+
+        installed_root = workspace_root / "installed-vscode"
+        (installed_root / "out").mkdir(parents=True)
+        (installed_root / "media").mkdir()
+        (installed_root / "package.json").write_text(json.dumps({"version": "0.3.0"}), encoding="utf-8")
+        (installed_root / "out" / "extension.js").write_text("installed extension\n", encoding="utf-8")
+        (installed_root / "out" / "routes.js").write_text("installed routes\n", encoding="utf-8")
+        (installed_root / "media" / "canvas.js").write_text("installed canvas js\n", encoding="utf-8")
+        (installed_root / "media" / "canvas.css").write_text("installed canvas css\n", encoding="utf-8")
+
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli.shutil.which", side_effect=lambda name: "/usr/bin/code" if name == "code" else None),
+                mock.patch(
+                    "agent_repl.cli._detect_installed_extensions",
+                    return_value={
+                        "vscode": {"extensions_root": "/tmp/vscode", "installed": [str(installed_root)]},
+                        "cursor": {"extensions_root": "/tmp/cursor", "installed": []},
+                        "windsurf": {"extensions_root": "/tmp/windsurf", "installed": []},
+                    },
+                ),
+            ):
+                code = main(["doctor", "--workspace-root", str(workspace_root)])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["editor"]["development"]["repo_extension"]["status"], "ok")
+        self.assertEqual(payload["editor"]["development"]["sync"]["vscode"]["status"], "warn")
+        self.assertIn("vscode", payload["editor"]["development"]["mismatch_editors"])
+        self.assertTrue(
+            any("agent-repl editor dev --editor vscode" in item for item in payload["recommendations"])
+        )
+
+    def test_editor_dev_launches_extension_development_host(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        repo_extension = workspace_root / "extension"
+        (repo_extension / "scripts").mkdir(parents=True)
+        (repo_extension / "scripts" / "preview-webview.mjs").write_text("// preview\n", encoding="utf-8")
+        (repo_extension / "out").mkdir()
+        (repo_extension / "media").mkdir()
+        (repo_extension / "package.json").write_text(json.dumps({"version": "0.3.0"}), encoding="utf-8")
+        (repo_extension / "out" / "extension.js").write_text("repo extension\n", encoding="utf-8")
+        (repo_extension / "out" / "routes.js").write_text("repo routes\n", encoding="utf-8")
+        (repo_extension / "media" / "canvas.js").write_text("repo canvas js\n", encoding="utf-8")
+        (repo_extension / "media" / "canvas.css").write_text("repo canvas css\n", encoding="utf-8")
+
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli.shutil.which", side_effect=lambda name: "/usr/bin/code" if name == "code" else None),
+                mock.patch("agent_repl.cli.subprocess.Popen") as mock_popen,
+            ):
+                code = main(["editor", "dev", "--workspace-root", str(workspace_root), "--skip-compile"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["editor"], "vscode")
+        self.assertEqual(payload["extension_root"], os.path.realpath(str(repo_extension)))
+        self.assertFalse(payload["compiled"])
+        mock_popen.assert_called_once()
+        command = mock_popen.call_args.args[0]
+        self.assertIn("--extensionDevelopmentPath", command)
+        self.assertIn(os.path.realpath(str(repo_extension)), command)
+        self.assertIn(os.path.realpath(str(workspace_root)), command)
+
+    def test_reload_reports_build_sync_warning(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        repo_extension = workspace_root / "extension"
+        (repo_extension / "scripts").mkdir(parents=True)
+        (repo_extension / "scripts" / "preview-webview.mjs").write_text("// preview\n", encoding="utf-8")
+        (repo_extension / "out").mkdir()
+        (repo_extension / "media").mkdir()
+        (repo_extension / "package.json").write_text(json.dumps({"version": "0.3.0"}), encoding="utf-8")
+        (repo_extension / "out" / "extension.js").write_text("repo extension\n", encoding="utf-8")
+        (repo_extension / "out" / "routes.js").write_text("repo routes\n", encoding="utf-8")
+        (repo_extension / "media" / "canvas.js").write_text("repo canvas js\n", encoding="utf-8")
+        (repo_extension / "media" / "canvas.css").write_text("repo canvas css\n", encoding="utf-8")
+
+        installed_root = workspace_root / "installed-vscode"
+        (installed_root / "out").mkdir(parents=True)
+        (installed_root / "media").mkdir()
+        (installed_root / "package.json").write_text(json.dumps({"version": "0.3.0"}), encoding="utf-8")
+        (installed_root / "out" / "extension.js").write_text("installed extension\n", encoding="utf-8")
+        (installed_root / "out" / "routes.js").write_text("installed routes\n", encoding="utf-8")
+        (installed_root / "media" / "canvas.js").write_text("installed canvas js\n", encoding="utf-8")
+        (installed_root / "media" / "canvas.css").write_text("installed canvas css\n", encoding="utf-8")
+
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._workspace_root", return_value=os.path.realpath(str(workspace_root))),
+                mock.patch("agent_repl.cli._client") as mock_client_factory,
+            ):
+                mock_client_factory.return_value.reload.return_value = {
+                    "status": "ok",
+                    "extension_root": str(installed_root),
+                }
+                code = main(["reload"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["build_sync"]["status"], "warn")
+        self.assertIn("warning", payload)
+
     def test_editor_configure_sets_workspace_default_canvas(self):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -5436,6 +5577,106 @@ class TestServerRobustness(unittest.TestCase):
         self.assertEqual(result_holder["body"]["status"], "started")
         self.assertEqual(stream_event["data"]["output"]["output_type"], "stream")
         self.assertIn("start", stream_event["data"]["output"]["text"])
+
+    def test_asgi_execute_cell_reports_second_async_cell_as_queued(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        workspace_root = Path(tmpdir.name)
+        runtime_dir = workspace_root / "runtime"
+        runtime_dir.mkdir()
+        state = CoreState(
+            workspace_root=str(workspace_root),
+            runtime_dir=str(runtime_dir),
+            token="tok",
+            pid=1234,
+            started_at=1.0,
+        )
+
+        notebook_path = "notebooks/queued-http-stream.ipynb"
+        first_source = "import time\nprint('start', flush=True)\ntime.sleep(0.4)\nprint('done', flush=True)"
+        second_source = "21 * 2"
+
+        with mock.patch.object(state, "_projection_client", return_value=None):
+            create_body, create_status = state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": first_source},
+                    {"type": "code", "source": second_source},
+                ],
+                kernel_id=_python_with_ipykernel(),
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+        state.start_session("agent", "cli", "worker", "sess-agent", ["projection", "ops", "automation"])
+
+        import uvicorn
+        from agent_repl.core.asgi import create_app
+
+        app = create_app(state)
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            log_level="error",
+            ws="none",
+        )
+        uv_server = uvicorn.Server(config)
+        thread = threading.Thread(target=uv_server.run, daemon=True)
+        thread.start()
+        for _ in range(50):
+            if uv_server.started:
+                break
+            time.sleep(0.05)
+
+        def _stop_server() -> None:
+            uv_server.should_exit = True
+            thread.join(timeout=5)
+
+        self.addCleanup(_stop_server)
+
+        port = uv_server.servers[0].sockets[0].getsockname()[1]
+        client = CoreClient(f"http://127.0.0.1:{port}", "tok")
+
+        first = client.notebook_execute_cell(
+            notebook_path,
+            cell_index=0,
+            wait=False,
+            owner_session_id="sess-agent",
+        )
+        self.assertEqual(first["status"], "started")
+
+        second = client.notebook_execute_cell(
+            notebook_path,
+            cell_index=1,
+            wait=False,
+            owner_session_id="sess-agent",
+        )
+        self.assertEqual(second["status"], "queued")
+
+        status_body = client.notebook_status(notebook_path)
+        self.assertEqual([item["cell_id"] for item in status_body["running"]], [first["cell_id"]])
+        self.assertEqual([item["cell_id"] for item in status_body["queued"]], [second["cell_id"]])
+        self.assertEqual(status_body["queued"][0]["queue_position"], 1)
+
+        queued_lookup = client.notebook_execution(second["execution_id"])
+        self.assertEqual(queued_lookup["status"], "queued")
+
+        final_lookup: dict[str, Any] | None = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            final_lookup = client.notebook_execution(second["execution_id"])
+            if final_lookup["status"] in {"ok", "error"}:
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(final_lookup)
+        self.assertEqual(final_lookup["status"], "ok")
+
+        contents = client.notebook_contents(notebook_path)
+        second_cell = next(cell for cell in contents["cells"] if cell["cell_id"] == second["cell_id"])
+        self.assertEqual(second_cell["outputs"][0]["data"]["text/plain"], "42")
 
     def test_server_returns_json_error_when_run_finish_handler_raises(self):
         tmpdir = tempfile.TemporaryDirectory()

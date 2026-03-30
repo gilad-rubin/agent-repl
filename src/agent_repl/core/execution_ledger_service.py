@@ -116,7 +116,20 @@ class ExecutionLedgerService:
             "workspace_root": self.state.workspace_root,
         }, HTTPStatus.OK
 
-    def notebook_status(self, *, runtime: Any, runtime_record: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def notebook_status(
+        self,
+        *,
+        runtime: Any,
+        runtime_record: Any,
+        path: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if path:
+            running_execs, queued_execs = self._notebook_execution_status(
+                runtime_id=runtime_record.runtime_id,
+                path=path,
+            )
+            if running_execs or queued_execs:
+                return running_execs, queued_execs
         running = [record.payload() for record in self._runs_for_runtime(runtime_record.runtime_id, status="running")]
         if not running and runtime and runtime.current_execution:
             running.append(dict(runtime.current_execution))
@@ -135,10 +148,14 @@ class ExecutionLedgerService:
         owner: str,
         session_id: str | None,
         operation: str,
+        status: str = "running",
     ) -> dict[str, Any]:
+        now = time.time()
+        existing = self.state.execution_records.get(execution_id)
+        created_at = existing.get("created_at", now) if isinstance(existing, dict) else now
         record = {
             "execution_id": execution_id,
-            "status": "running",
+            "status": status,
             "path": path,
             "runtime_id": runtime_id,
             "cell_id": cell_id,
@@ -147,8 +164,8 @@ class ExecutionLedgerService:
             "owner": owner,
             "session_id": session_id,
             "operation": operation,
-            "created_at": time.time(),
-            "updated_at": time.time(),
+            "created_at": created_at,
+            "updated_at": now,
         }
         self.state.execution_records[execution_id] = record
         self._trim_notebook_execution_records()
@@ -181,6 +198,17 @@ class ExecutionLedgerService:
         if record is None:
             return None
         return dict(record)
+
+    def has_active_notebook_execution(self, *, runtime_id: str, path: str) -> bool:
+        return any(
+            record.get("runtime_id") == runtime_id
+            and record.get("path") == path
+            and record.get("status") in self.ACTIVE_RUN_STATUSES
+            for record in self.state.execution_records.values()
+        )
+
+    def notebook_execution_status(self, *, runtime_id: str, path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        return self._notebook_execution_status(runtime_id=runtime_id, path=path)
 
     def _runs_for_runtime(self, runtime_id: str, *, status: str | None = None) -> list[Any]:
         records = [
@@ -240,6 +268,32 @@ class ExecutionLedgerService:
             and live_runtime.runtime_id == runtime.runtime_id
             and (live_runtime.busy or live_runtime.current_execution)
         )
+
+    def _notebook_execution_status(
+        self,
+        *,
+        runtime_id: str,
+        path: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        active = [
+            dict(record)
+            for record in self.state.execution_records.values()
+            if record.get("runtime_id") == runtime_id
+            and record.get("path") == path
+            and record.get("status") in self.ACTIVE_RUN_STATUSES
+        ]
+        active.sort(
+            key=lambda record: (
+                record.get("status") != "running",
+                record.get("created_at", 0.0),
+                record.get("execution_id", ""),
+            )
+        )
+        running = [record for record in active if record.get("status") == "running"]
+        queued = [record for record in active if record.get("status") == "queued"]
+        for index, record in enumerate(queued, start=1):
+            record["queue_position"] = index
+        return running, queued
 
     def _trim_notebook_execution_records(self) -> None:
         overflow = len(self.state.execution_records) - self.MAX_NOTEBOOK_EXECUTION_RECORDS

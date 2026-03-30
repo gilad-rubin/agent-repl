@@ -291,6 +291,9 @@ class HeadlessNotebookRuntime:
     busy: bool = False
     current_execution: dict[str, Any] | None = None
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    async_queue: list[str] = field(default_factory=list, repr=False)
+    async_queue_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    async_worker: threading.Thread | None = field(default=None, repr=False)
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -726,6 +729,21 @@ class CoreState:
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         return self._notebook_write_service.execute_cell(
+            path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            owner_session_id=owner_session_id,
+        )
+
+    def notebook_enqueue_execute_cell(
+        self,
+        path: str,
+        *,
+        cell_id: str | None,
+        cell_index: int | None,
+        owner_session_id: str | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._notebook_write_service.enqueue_execute_cell(
             path,
             cell_id=cell_id,
             cell_index=cell_index,
@@ -1489,7 +1507,11 @@ class CoreState:
         running: list[dict[str, Any]]
         queued: list[dict[str, Any]]
         if runtime_record is not None:
-            running, queued = self._execution_ledger_service.notebook_status(runtime=runtime, runtime_record=runtime_record)
+            running, queued = self._execution_ledger_service.notebook_status(
+                runtime=runtime,
+                runtime_record=runtime_record,
+                path=relative_path,
+            )
         else:
             running = [dict(runtime.current_execution)] if runtime and runtime.current_execution else []
             queued = []
@@ -1581,6 +1603,23 @@ class CoreState:
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         return self._notebook_execution_service.execute_cell(
+            real_path,
+            relative_path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            owner_session_id=owner_session_id,
+        )
+
+    def _headless_notebook_enqueue_execute_cell(
+        self,
+        real_path: str,
+        relative_path: str,
+        *,
+        cell_id: str | None,
+        cell_index: int | None,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._notebook_execution_service.enqueue_execute_cell(
             real_path,
             relative_path,
             cell_id=cell_id,

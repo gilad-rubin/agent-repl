@@ -121,6 +121,8 @@ In browser mode, the shared bundle now renders a minimal VS Code-like shell arou
 
 The installed extension can optionally prefer preview-served assets through the `agent-repl.browserCanvasUrl` setting, but only from loopback origins and only with a packaged-asset fallback. If preview and VS Code diverge visually, the most likely cause is bundle drift rather than a separate UI codepath.
 
+For day-to-day development, the preferred integration path is now `agent-repl editor dev --editor vscode`, which compiles the workspace extension and launches an Extension Development Host from the repo checkout. Installed-extension comparisons remain supported, but `agent-repl doctor` and `agent-repl reload --pretty` should warn when the installed build drifts from the workspace repo build.
+
 ## CLI (`src/agent_repl/`)
 
 The CLI now has two surfaces:
@@ -234,6 +236,7 @@ There are two output views:
 
 - notebook persistence keeps full Jupyter outputs
 - agent-facing APIs strip rich media down to safe summaries or text placeholders
+- canvas/browser rendering prefers rich notebook mime bundles in a JupyterLab-like order: `text/html`, `text/markdown`, SVG/raster images, JSON, then plain text
 
 `toJupyter()` and `toVSCode()` bridge between VS Code notebook output objects and standard Jupyter structures.
 

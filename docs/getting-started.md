@@ -132,7 +132,13 @@ Use `reload` during extension development:
 agent-repl reload --pretty
 ```
 
-`reload` hot-reloads installed extension routes and returns the live `extension_root` and `routes_module`. It does not fully restart the VS Code extension host.
+`reload` hot-reloads installed extension routes and returns the live `extension_root`, `routes_module`, and build-sync status. It does not fully restart the VS Code extension host.
+
+If you are developing this repo itself, prefer launching the workspace extension in an Extension Development Host:
+
+```bash
+agent-repl editor dev --editor vscode
+```
 
 ## Prompt Cells
 

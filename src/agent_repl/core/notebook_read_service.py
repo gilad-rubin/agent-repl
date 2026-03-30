@@ -67,6 +67,7 @@ class NotebookReadService:
             running, queued = self.state._execution_ledger_service.notebook_status(
                 runtime=runtime,
                 runtime_record=runtime_record,
+                path=relative_path,
             )
         with self.state._lock:
             events = [

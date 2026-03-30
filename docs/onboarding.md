@@ -137,6 +137,14 @@ Install the extension when the user wants:
 - live notebook projection while the agent works
 - prompt-cell workflows
 
+If the user is developing this repo itself, prefer the workspace checkout in an Extension Development Host instead of testing an installed copy first:
+
+```bash
+agent-repl editor dev --editor vscode
+```
+
+That path compiles the repo extension, opens VS Code against the workspace checkout, and avoids installed-extension drift during normal development.
+
 Current install flow:
 
 ```bash
@@ -266,6 +274,7 @@ These commands now exist:
 agent-repl setup
 agent-repl doctor
 agent-repl editor configure --default-canvas
+agent-repl editor dev --editor vscode
 ```
 
 Recommended current usage:
@@ -274,6 +283,7 @@ Recommended current usage:
 - `agent-repl setup --with-mcp` when the user wants MCP immediately
 - `agent-repl doctor --probe-mcp` for diagnostics
 - `agent-repl editor configure --default-canvas` to make the canvas the workspace default
+- `agent-repl editor dev --editor vscode` for contributors working from the repo checkout
 
 ## Remaining Improvements
 
@@ -300,12 +310,15 @@ The current `doctor` command should report:
 - workspace runtime status
 - kernel availability
 - extension availability
+- repo-versus-installed extension build drift when the workspace contains an `extension/` checkout
 - whether the extension can launch the CLI
 - MCP endpoint and smoke-test result
 
 ### 3. Expand Editor Configuration
 
 `agent-repl editor configure --default-canvas` now handles the workspace-scoped default. The next step is to offer workspace versus user scope explicitly.
+
+`agent-repl editor dev` is now the preferred integration loop for contributors. The next step there is to make editor choice and workspace reuse feel more wizard-like inside `setup`.
 
 For VS Code, it should offer to update workspace or user settings so `*.ipynb` opens in the Agent REPL canvas by default. VS Code officially supports custom editors and `workbench.editorAssociations`, so this is a viable guided path.
 

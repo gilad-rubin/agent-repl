@@ -48,6 +48,11 @@ import {
 } from '../src/shared/executionState';
 import { normalizeMarkdownSource } from '../src/shared/markdown';
 import { decideNotebookCommandKeyAction } from '../src/shared/notebookCommandController';
+import {
+  getNotebookRichOutputRenderSpec,
+  normalizeNotebookMimeText,
+  stringifyNotebookJson,
+} from '../src/shared/notebookOutputRender';
 import type { RecoveryAdvice } from '../src/shared/recovery';
 import '@carbon/styles/css/styles.css';
 import './styles.css';
@@ -69,7 +74,9 @@ type NotebookOutput = {
   ename?: string;
   evalue?: string;
   traceback?: string[];
-  data?: Record<string, string | string[]>;
+  data?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  transient?: Record<string, unknown>;
 };
 
 type NotebookCell = {
@@ -822,12 +829,23 @@ function createPreviewHost(): HostApi {
         });
         return;
       }
+      if (payload.type === 'display_data' && payload.data && typeof payload.data === 'object') {
+        activeExecution.outputs.push({
+          output_type: 'display_data',
+          data: payload.data,
+          metadata: payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {},
+        });
+        return;
+      }
       if (payload.type === 'completed') {
         const outputs = [...activeExecution.outputs];
-        if (typeof payload.resultText === 'string' && payload.resultText.trim()) {
+        if (payload.resultPayload?.data && typeof payload.resultPayload.data === 'object' && Object.keys(payload.resultPayload.data).length > 0) {
           outputs.push({
             output_type: 'execute_result',
-            data: { 'text/plain': payload.resultText },
+            data: payload.resultPayload.data,
+            metadata: payload.resultPayload.metadata && typeof payload.resultPayload.metadata === 'object'
+              ? payload.resultPayload.metadata
+              : {},
           });
         }
         const { cellIndex, resolve } = activeExecution;
@@ -1300,9 +1318,27 @@ function getCopyableOutputText(output: NotebookOutput): string | null {
     return text.length > 0 ? text : null;
   }
   if (output.output_type === 'execute_result' || output.output_type === 'display_data') {
+    const markdown = output.data?.['text/markdown'];
+    if (markdown) {
+      const normalized = cleanTextOutput(normalizeNotebookMimeText(markdown));
+      return normalized.length > 0 ? normalized : null;
+    }
+
+    const html = output.data?.['text/html'];
+    if (html) {
+      const normalized = cleanTextOutput(copyTextFromRenderedHtml(normalizeNotebookMimeText(html)));
+      return normalized.length > 0 ? normalized : null;
+    }
+
+    const json = output.data?.['application/json'];
+    if (json) {
+      const normalized = cleanTextOutput(stringifyNotebookJson(json));
+      return normalized.length > 0 ? normalized : null;
+    }
+
     const text = output.data?.['text/plain'];
     if (text) {
-      const normalized = cleanTextOutput(text);
+      const normalized = cleanTextOutput(normalizeNotebookMimeText(text));
       return normalized.length > 0 ? normalized : null;
     }
   }
@@ -1331,7 +1367,106 @@ function renderMarkdown(source: unknown) {
 }
 
 function renderRichHtml(html: string) {
-  return DOMPurify.sanitize(html);
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+  });
+}
+
+function renderRichSvg(svg: string) {
+  return DOMPurify.sanitize(svg, {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+  });
+}
+
+function copyTextFromRenderedHtml(html: string): string {
+  const sanitized = renderRichHtml(html);
+  if (typeof DOMParser === 'undefined') {
+    return sanitized.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  const document = new DOMParser().parseFromString(sanitized, 'text/html');
+  const blocks = Array.from(document.body.childNodes)
+    .map((node) => extractCopyTextFromNode(node))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return blocks.join('\n\n').trim();
+}
+
+function extractCopyTextFromNode(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return normalizeInlineCopyText(node.textContent ?? '');
+  }
+
+  if (!(node instanceof HTMLElement)) {
+    return '';
+  }
+
+  if (node.tagName === 'TABLE') {
+    return tableToMarkdown(node as HTMLTableElement);
+  }
+  if (node.tagName === 'BR') {
+    return '\n';
+  }
+  if (node.tagName === 'PRE') {
+    return node.textContent?.trimEnd() ?? '';
+  }
+  if (node.tagName === 'UL') {
+    return Array.from(node.children)
+      .map((child) => `- ${extractCopyTextFromNode(child).trim()}`)
+      .join('\n');
+  }
+  if (node.tagName === 'OL') {
+    return Array.from(node.children)
+      .map((child, index) => `${index + 1}. ${extractCopyTextFromNode(child).trim()}`)
+      .join('\n');
+  }
+
+  const childText = Array.from(node.childNodes)
+    .map((child) => extractCopyTextFromNode(child))
+    .join(node.tagName === 'TR' ? ' | ' : '');
+
+  if (isBlockCopyElement(node.tagName)) {
+    return childText.trim();
+  }
+
+  return normalizeInlineCopyText(childText);
+}
+
+function normalizeInlineCopyText(value: string): string {
+  return value.replace(/\s+/g, ' ');
+}
+
+function isBlockCopyElement(tagName: string): boolean {
+  return [
+    'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DIV', 'DL', 'FIELDSET', 'FIGCAPTION', 'FIGURE',
+    'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'HR', 'LI', 'MAIN', 'NAV',
+    'P', 'SECTION',
+  ].includes(tagName);
+}
+
+function tableToMarkdown(table: HTMLTableElement): string {
+  const rows = Array.from(table.querySelectorAll('tr'))
+    .map((row) => Array.from(row.cells).map((cell) => normalizeTableCellCopyText(cell.textContent ?? '')))
+    .filter((row) => row.length > 0);
+
+  if (rows.length === 0) {
+    return '';
+  }
+
+  const header = rows[0];
+  const body = rows.slice(1);
+  const separator = header.map(() => '---');
+  const lines = [
+    `| ${header.join(' | ')} |`,
+    `| ${separator.join(' | ')} |`,
+    ...body.map((row) => `| ${row.join(' | ')} |`),
+  ];
+  return lines.join('\n');
+}
+
+function normalizeTableCellCopyText(value: string): string {
+  return value.replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim();
 }
 
 function autoResize(element: HTMLTextAreaElement | null) {
@@ -1521,15 +1656,16 @@ function OutputView({
   }
 
   if (output.output_type === 'execute_result' || output.output_type === 'display_data') {
-    const data = output.data ?? {};
-    if (data['text/html']) {
+    const renderSpec = getNotebookRichOutputRenderSpec(output);
+    if (renderSpec?.kind === 'html') {
       return (
         <div
-          className="rich-output"
+          className="rich-output rich-output--html"
+          data-rich-output-kind="html"
           style={{
             padding: `${d.outputPadding}px`,
             fontSize: d.outputFontSize,
-            color: 'var(--cds-text-secondary)',
+            color: 'var(--cds-text-primary)',
           }}
           onClickCapture={(event) => {
             const target = event.target as HTMLElement | null;
@@ -1539,16 +1675,91 @@ function OutputView({
             onOpenExternal(anchor.href);
           }}
           dangerouslySetInnerHTML={{
-            __html: renderRichHtml(normalizeText(data['text/html'])),
+            __html: renderRichHtml(renderSpec.value),
           }}
         />
       );
     }
 
-    if (data['text/plain']) {
-      const text = cleanTextOutput(data['text/plain']);
+    if (renderSpec?.kind === 'markdown') {
       return (
-        <TextualOutputBlock>{text}</TextualOutputBlock>
+        <div
+          className="rich-output markdown-content rich-output--markdown"
+          data-rich-output-kind="markdown"
+          style={{
+            padding: `${d.outputPadding}px`,
+            fontSize: d.outputFontSize,
+          }}
+          onClickCapture={(event) => {
+            const target = event.target as HTMLElement | null;
+            const anchor = target?.closest('a[href]') as HTMLAnchorElement | null;
+            if (!anchor) return;
+            event.preventDefault();
+            onOpenExternal(anchor.href);
+          }}
+          dangerouslySetInnerHTML={{
+            __html: renderMarkdown(renderSpec.value),
+          }}
+        />
+      );
+    }
+
+    if (renderSpec?.kind === 'svg') {
+      return (
+        <div
+          className="rich-output rich-output--media"
+          data-rich-output-kind="svg"
+          style={{
+            padding: `${d.outputPadding}px`,
+          }}
+          dangerouslySetInnerHTML={{
+            __html: renderRichSvg(renderSpec.value),
+          }}
+        />
+      );
+    }
+
+    if (renderSpec?.kind === 'image') {
+      return (
+        <div
+          className="rich-output rich-output--media"
+          data-rich-output-kind="image"
+          style={{
+            padding: `${d.outputPadding}px`,
+          }}
+        >
+          <img
+            alt={`Notebook output (${renderSpec.mime})`}
+            src={`data:${renderSpec.mime};base64,${renderSpec.value}`}
+          />
+        </div>
+      );
+    }
+
+    if (renderSpec?.kind === 'json') {
+      return (
+        <TextualOutputBlock>
+          <pre
+            className="rich-output rich-output--json"
+            data-rich-output-kind="json"
+            style={{
+              margin: 0,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {cleanTextOutput(renderSpec.value)}
+          </pre>
+        </TextualOutputBlock>
+      );
+    }
+
+    if (renderSpec?.kind === 'text') {
+      const text = cleanTextOutput(renderSpec.value);
+      return (
+        <TextualOutputBlock>
+          <span data-rich-output-kind="text">{text}</span>
+        </TextualOutputBlock>
       );
     }
   }

@@ -99,11 +99,16 @@ There is no single global schema, but many responses include some combination of
   "status": "ok",
   "message": "Routes hot-reloaded",
   "extension_root": "/Users/you/.vscode/extensions/giladrubin.agent-repl-0.3.0",
-  "routes_module": "/Users/you/.vscode/extensions/giladrubin.agent-repl-0.3.0/out/routes.js"
+  "routes_module": "/Users/you/.vscode/extensions/giladrubin.agent-repl-0.3.0/out/routes.js",
+  "build_sync": {
+    "status": "warn",
+    "message": "Installed extension build differs from the workspace repo build."
+  },
+  "warning": "Installed extension build differs from the workspace repo build."
 }
 ```
 
-Use this to confirm which installed extension build is actually active.
+Use this to confirm which installed extension build is actually active and whether it matches the workspace repo build.
 
 ## Error Shape
 
@@ -149,6 +154,7 @@ How to fix:
 - `setup`
 - `doctor`
 - `editor configure`
+- `editor dev`
 
 ### MCP commands
 

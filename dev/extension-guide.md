@@ -28,6 +28,7 @@
 
 ## Dev Loops
 
+- **Preferred integration loop**: `uv run agent-repl editor dev --editor vscode` — compiles the repo extension and opens an Extension Development Host so VS Code runs the workspace checkout directly.
 - **Canvas UI**: `cd extension && npm run preview:webview` — serves real canvas in browser with simulated runtime. Fastest loop for renderer work.
 - **Extension host**: `cd extension && npm run compile` then `Agent REPL: Reload` — hot-reloads routes/modules without reinstalling VSIX.
 - **Full rebuild**: Changes to `extension.ts` or `server.ts` require full window reload.
@@ -39,6 +40,7 @@
 - Browser preview does not exercise VS Code messaging, kernel attach, or custom-editor lifecycle. Verify integration-sensitive changes in Extension Development Host.
 - Browser preview does exercise the standalone session-selection path. If preview and VS Code disagree on lease behavior, inspect session reuse first.
 - `browserCanvasUrl` lets the installed extension prefer preview-served assets on loopback. If preview and installed UI disagree, suspect asset drift.
+- `agent-repl doctor` and `agent-repl reload --pretty` now report repo-vs-installed build drift when the workspace contains an `extension/` checkout.
 - Dirty-draft behavior around execute-all, restart-and-run-all, and notebook switching is high-risk. Add regression coverage when touching those flows.
 
 ## Canvas Icons

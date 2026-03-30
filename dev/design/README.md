@@ -18,6 +18,7 @@ These documents describe the system we want to build, the boundaries we want to 
 - [Reference Stack](reference-stack.md) — external technologies to adopt, prototype against, study, or avoid
 - [RTC Evaluation](rtc-evaluation.md) — how much of Jupyter's RTC/shared-model stack we should reuse without giving up core authority
 - [Review Rubric](review-rubric.md) — the recurring architecture checks to run after each meaningful slice
+- [JupyterLab-Powered Notebook Surface](jupyterlab-surface.md) — why the notebook UI should move to a JupyterLab surface while the daemon remains authoritative
 
 ## How to Use These Docs
 

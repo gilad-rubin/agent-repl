@@ -69,6 +69,28 @@ class NotebookWriteService:
         self.state._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
+    def enqueue_execute_cell(
+        self,
+        path: str,
+        *,
+        cell_id: str | None,
+        cell_index: int | None,
+        owner_session_id: str | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self.state._resolve_document_path(path)
+        try:
+            payload = self.state._headless_notebook_enqueue_execute_cell(
+                real_path,
+                relative_path,
+                cell_id=cell_id,
+                cell_index=cell_index,
+                owner_session_id=owner_session_id,
+            )
+        except CollaborationConflictError as err:
+            return err.payload, HTTPStatus.CONFLICT
+        self.state._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
+
     def insert_execute(
         self,
         path: str,

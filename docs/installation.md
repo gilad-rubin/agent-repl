@@ -128,6 +128,12 @@ If you want the Agent REPL canvas to become the workspace default for `*.ipynb` 
 agent-repl editor configure --default-canvas
 ```
 
+If you are developing this repo itself, prefer launching the extension from the workspace checkout instead of testing an installed copy:
+
+```bash
+agent-repl editor dev --editor vscode
+```
+
 Available extension settings:
 
 | Setting | Default | Description |
@@ -147,6 +153,14 @@ On first bootstrap, Agent REPL also makes sure `.agent-repl/` is present in the 
 
 ## Development Install Loops
 
+Preferred loop for extension development:
+
+```bash
+agent-repl editor dev --editor vscode
+```
+
+That command compiles the repo extension and opens an Extension Development Host, so VS Code runs the workspace checkout directly instead of a separately installed copy.
+
 Fast loop for most extension edits:
 
 ```bash
@@ -156,13 +170,14 @@ agent-repl reload --pretty
 ```
 
 Then run `Agent REPL: Reload` from the command palette. This hot-reloads route modules and refreshes open canvas editors in place.
+`agent-repl reload --pretty` also reports whether the live installed extension build matches the workspace repo build.
 
 Use a full window reload when you changed:
 
 - `extension/src/extension.ts`
 - `extension/src/server.ts`
 
-Use a full VSIX reinstall when you are testing the installed extension instead of an Extension Development Host:
+Use a full VSIX reinstall only when you intentionally need to test the installed extension instead of an Extension Development Host:
 
 ```bash
 cd extension
@@ -171,7 +186,7 @@ npx --yes @vscode/vsce package --allow-missing-repository -o agent-repl-0.3.0.vs
 code --install-extension agent-repl-0.3.0.vsix --force
 ```
 
-If you compare the browser preview with the installed extension UI, rebuild before packaging so the shared `media/canvas.js` and `media/canvas.css` bundle stays in sync across both surfaces.
+If you compare the browser preview with an installed extension UI, rebuild before packaging so the shared `media/canvas.js` and `media/canvas.css` bundle stays in sync across both surfaces. `agent-repl doctor` also reports repo-vs-installed build drift for VS Code-family editors.
 
 ## Troubleshooting
 
@@ -185,12 +200,11 @@ agent-repl --version
 **Installed extension is stale**
 
 ```bash
-cd extension
-npm run compile
-npx --yes @vscode/vsce package --allow-missing-repository -o agent-repl-0.3.0.vsix
-code --install-extension agent-repl-0.3.0.vsix --force
-agent-repl reload --pretty
+agent-repl doctor
+agent-repl editor dev --editor vscode
 ```
+
+If you must validate the installed extension specifically, reinstall the VSIX and reload the window afterward.
 
 **Headless `new` fails with no kernel**
 

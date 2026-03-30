@@ -6,7 +6,7 @@
 
 **Runtime-first framing** - The product now centers on a shared workspace runtime. VS Code, Cursor, and the browser preview are clients of that runtime rather than the primary source of truth.
 
-**Onboarding is now public CLI surface** - `agent-repl setup`, `agent-repl doctor`, and `agent-repl editor configure --default-canvas` are shipped commands, so internal docs should treat them as current product behavior rather than aspirational UX only.
+**Onboarding is now public CLI surface** - `agent-repl setup`, `agent-repl doctor`, `agent-repl editor configure --default-canvas`, and `agent-repl editor dev` are shipped commands, so internal docs should treat them as current product behavior rather than aspirational UX only.
 
 ## Read These First
 
@@ -17,6 +17,7 @@
 ## Design Docs
 
 - [North-Star Design Set](/Users/giladrubin/python_workspace/agent-repl/dev/design/README.md) - aspirational UX and architecture direction, not a guarantee of current behavior
+- [JupyterLab-Powered Notebook Surface](/Users/giladrubin/python_workspace/agent-repl/dev/design/jupyterlab-surface.md) - proposed path to stop owning the notebook UI while preserving runtime-first authority
 - [Architecture Modernization Plan](/Users/giladrubin/python_workspace/agent-repl/dev/architecture-modernization-plan.md) - recommended path to reduce bespoke infrastructure while preserving current CLI, VS Code, and browser behavior
 - [Architecture Modernization Rollout](/Users/giladrubin/python_workspace/agent-repl/dev/implementation-chain/architecture-modernization-rollout.md) - implementation slices with HLD, acceptance criteria, and test gates for the modernization chain
 - [Behavior Locks](/Users/giladrubin/python_workspace/agent-repl/dev/behavior-locks/README.md) - preserved product behaviors and their regression-test anchors so modernization does not silently erase interaction decisions
@@ -33,3 +34,4 @@
 - When onboarding or install flows change, update the developer-facing explanation here as well as the public docs
 - Prefer [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md) for shipped details and keep design docs clearly labeled as targets
 - When preview and installed VS Code behavior differ, document which asset source is authoritative and how to verify sync
+- Treat Extension Development Host as the preferred integration loop; installed-extension workflows are secondary and should surface drift warnings

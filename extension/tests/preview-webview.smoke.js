@@ -79,6 +79,9 @@ async function openWorkspacePreviewPage() {
     const context = await browser.newContext({
         viewport: { width: 1440, height: 960 },
     });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
+        origin: new URL(previewUrl).origin,
+    });
     const page = await context.newPage();
     await page.goto(previewUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('[data-browser-shell="true"]');
@@ -88,6 +91,9 @@ async function openWorkspacePreviewPage() {
 async function openWorkspaceNotebookPage(notebookPath) {
     const context = await browser.newContext({
         viewport: { width: 1440, height: 960 },
+    });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
+        origin: new URL(previewUrl).origin,
     });
     const page = await context.newPage();
     const targetUrl = `${previewUrl}?path=${encodeURIComponent(notebookPath)}`;
@@ -327,6 +333,208 @@ test('browser save button and cmd/ctrl-s flush the active draft to disk without 
     } finally {
         await closePageHandle(handle);
         await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('workspace preview renders markdown, html tables, and json outputs from persisted notebooks', async () => {
+    const notebookPath = path.join(extensionRoot, 'tmp', `browser-rich-output-${Date.now()}.ipynb`);
+    const notebook = {
+        cells: [{
+            cell_type: 'code',
+            execution_count: 1,
+            id: `rich-output-${Date.now()}`,
+            metadata: {},
+            outputs: [
+                {
+                    output_type: 'display_data',
+                    data: {
+                        'text/plain': '<IPython.core.display.Markdown object>',
+                        'text/markdown': '## Summary\n\n| key | value |\n| --- | --- |\n| alpha | 1 |',
+                    },
+                    metadata: {},
+                },
+                {
+                    output_type: 'display_data',
+                    data: {
+                        'text/plain': 'alpha  1',
+                        'text/html': '<table><thead><tr><th>key</th><th>value</th></tr></thead><tbody><tr><td>alpha</td><td>1</td></tr></tbody></table>',
+                    },
+                    metadata: {},
+                },
+                {
+                    output_type: 'display_data',
+                    data: {
+                        'application/json': { alpha: 1, items: ['x', 'y'] },
+                    },
+                    metadata: {},
+                },
+            ],
+            source: ['display("rich outputs")\n'],
+        }],
+        metadata: {
+            kernelspec: {
+                display_name: 'Python 3',
+                language: 'python',
+                name: 'python3',
+            },
+            language_info: {
+                name: 'python',
+            },
+        },
+        nbformat: 4,
+        nbformat_minor: 5,
+    };
+
+    await fs.mkdir(path.dirname(notebookPath), { recursive: true });
+    await fs.writeFile(notebookPath, JSON.stringify(notebook, null, 2));
+
+    const handle = await openWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        await page.waitForSelector('[data-rich-output-kind="markdown"]');
+        await page.waitForSelector('[data-rich-output-kind="html"] table');
+        await page.waitForSelector('[data-rich-output-kind="json"]');
+
+        assert.match(
+            await page.locator('[data-rich-output-kind="markdown"] h2').textContent(),
+            /Summary/,
+        );
+        assert.equal(
+            await page.locator('[data-rich-output-kind="html"] table tbody td').first().textContent(),
+            'alpha',
+        );
+        assert.match(
+            await page.locator('[data-rich-output-kind="json"]').textContent(),
+            /"items": \[/,
+        );
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('copy prefers markdown source and rendered html text for rich persisted outputs', async () => {
+    const notebookPath = path.join(extensionRoot, 'tmp', `browser-rich-copy-${Date.now()}.ipynb`);
+    const notebook = {
+        cells: [{
+            cell_type: 'code',
+            execution_count: 1,
+            id: `rich-copy-${Date.now()}`,
+            metadata: {},
+            outputs: [
+                {
+                    output_type: 'display_data',
+                    data: {
+                        'text/plain': '<IPython.core.display.Markdown object>',
+                        'text/markdown': '## Summary\n\n| key | value |\n| --- | --- |\n| alpha | 1 |',
+                    },
+                    metadata: {},
+                },
+                {
+                    output_type: 'display_data',
+                    data: {
+                        'text/plain': 'alpha  1',
+                        'text/html': '<table><thead><tr><th>category</th><th>total</th></tr></thead><tbody><tr><td>alpha</td><td>12</td></tr></tbody></table>',
+                    },
+                    metadata: {},
+                },
+            ],
+            source: ['display("rich copy")\n'],
+        }],
+        metadata: {
+            kernelspec: {
+                display_name: 'Python 3',
+                language: 'python',
+                name: 'python3',
+            },
+            language_info: {
+                name: 'python',
+            },
+        },
+        nbformat: 4,
+        nbformat_minor: 5,
+    };
+
+    await fs.mkdir(path.dirname(notebookPath), { recursive: true });
+    await fs.writeFile(notebookPath, JSON.stringify(notebook, null, 2));
+
+    const handle = await openWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        await page.evaluate(() => {
+            window.__agentReplCopiedText = '';
+            const originalClipboard = navigator.clipboard;
+            Object.defineProperty(navigator, 'clipboard', {
+                configurable: true,
+                value: {
+                    ...originalClipboard,
+                    readText: async () => window.__agentReplCopiedText ?? '',
+                    writeText: async (text) => {
+                        window.__agentReplCopiedText = String(text);
+                    },
+                },
+            });
+        });
+
+        await page.waitForSelector('[data-cell-id] [data-output-copy="true"]');
+        await page.locator('[data-cell-id] [data-output-copy="true"]').click();
+        await page.waitForFunction(() => {
+            const button = document.querySelector('[data-cell-id] [data-output-copy="true"]');
+            return button?.getAttribute('data-copied') === 'true';
+        });
+
+        const copiedText = await page.evaluate(() => navigator.clipboard.readText());
+        assert.match(copiedText, /^## Summary/);
+        assert.match(copiedText, /\| key \| value \|/);
+        assert.match(copiedText, /\| category \| total \|/);
+        assert.doesNotMatch(copiedText, /<table>|<th>|<td>/);
+        assert.doesNotMatch(copiedText, /<IPython\.core\.display\.Markdown object>/);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('mock preview executes IPython display objects with jupyter-like rich outputs', async () => {
+    const handle = await openPreviewPage();
+    try {
+        const { page } = handle;
+        const commandKey = process.platform === 'darwin' ? 'Meta' : 'Control';
+        const code = [
+            'from IPython.display import Markdown, HTML, SVG, JSON, display',
+            'display(Markdown("## Live Markdown"))',
+            'display(HTML("<table><tr><th>kind</th><th>value</th></tr><tr><td>html</td><td>1</td></tr></table>"))',
+            'display(JSON({"alpha": 1, "items": ["x", "y"]}))',
+            'SVG("<svg xmlns=\\"http://www.w3.org/2000/svg\\" width=\\"120\\" height=\\"40\\"><rect width=\\"120\\" height=\\"40\\" rx=\\"8\\" fill=\\"#d97706\\"/></svg>")',
+        ].join('\n');
+
+        await page.locator('[data-cell-id="preview-code-1"] .cm-content').click();
+        await page.keyboard.press(`${commandKey}+A`);
+        await page.keyboard.press('Backspace');
+        await page.keyboard.type(code);
+        await page.keyboard.press('Shift+Enter');
+
+        await page.waitForSelector('[data-cell-id="preview-code-1"] [data-rich-output-kind="markdown"]');
+        await page.waitForSelector('[data-cell-id="preview-code-1"] [data-rich-output-kind="html"] table');
+        await page.waitForSelector('[data-cell-id="preview-code-1"] [data-rich-output-kind="json"]');
+        await page.waitForSelector('[data-cell-id="preview-code-1"] [data-rich-output-kind="svg"] svg');
+
+        assert.match(
+            await page.locator('[data-cell-id="preview-code-1"] [data-rich-output-kind="markdown"] h2').textContent(),
+            /Live Markdown/,
+        );
+        assert.equal(
+            await page.locator('[data-cell-id="preview-code-1"] [data-rich-output-kind="html"] table tbody td').first().textContent(),
+            'html',
+        );
+        assert.match(
+            await page.locator('[data-cell-id="preview-code-1"] [data-rich-output-kind="json"]').textContent(),
+            /"items": \[/,
+        );
+    } finally {
+        await closePageHandle(handle);
     }
 });
 

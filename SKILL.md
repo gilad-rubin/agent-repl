@@ -22,6 +22,7 @@ The output below is injected dynamically when available. If you see the raw `!` 
 3. Run `agent-repl doctor` when you need a structured readiness check for CLI, kernel, editor defaults, or MCP.
 4. If the workspace has a `.venv`, it must contain `ipykernel`.
 5. If the installed CLI is stale: `uv tool install /path/to/agent-repl --reinstall`
+6. If you are developing the extension from this repo, prefer `agent-repl editor dev --editor vscode` over testing an installed copy.
 
 ## Quick Start
 
@@ -55,6 +56,7 @@ agent-repl exec demo.ipynb --cell-id <id>
 - `setup` — onboarding helper that can configure editor defaults, run MCP setup, and execute a notebook smoke test
 - `doctor` — JSON readiness report for install method, workspace kernel, editor defaults, and optional MCP
 - `editor configure --default-canvas` — make the Agent REPL canvas the workspace default for `*.ipynb`
+- `editor dev` — compile the repo extension and open an Extension Development Host (preferred extension dev loop)
 - `prompts` / `respond` — editor-driven prompt loop (requires extension)
 
 ## Best Practices
@@ -102,4 +104,4 @@ These commands require the VS Code / Cursor extension: `respond`, `kernels`, `re
 - **No workspace kernel:** create a `.venv` with `ipykernel`, or pass `--kernel /path/to/python`
 - **Need a full readiness report:** `agent-repl doctor --probe-mcp`
 - **Stale CLI:** `uv tool install /path/to/agent-repl --reinstall`
-- **Stale extension:** rebuild with `cd extension && npm run compile`, repackage the VSIX, reinstall, then `agent-repl reload --pretty`
+- **Extension drift or stale installed copy:** run `agent-repl doctor`, prefer `agent-repl editor dev --editor vscode`, and use `agent-repl reload --pretty` to inspect build-sync status when you intentionally test the installed extension

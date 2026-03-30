@@ -195,7 +195,7 @@ Expose `agent-repl` as a first-class agent platform through FastMCP while reusin
 Current shipped baseline before the remaining work:
 
 - public MCP onboarding exists through `agent-repl mcp setup|status|config|smoke-test`
-- public CLI onboarding helpers exist through `agent-repl setup`, `agent-repl doctor`, and `agent-repl editor configure --default-canvas`
+- public CLI onboarding helpers exist through `agent-repl setup`, `agent-repl doctor`, `agent-repl editor configure --default-canvas`, and `agent-repl editor dev`
 - the canonical MCP endpoint is `/mcp`, with `/mcp/mcp` retained as a compatibility alias
 
 ### HLD

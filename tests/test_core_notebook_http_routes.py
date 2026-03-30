@@ -47,3 +47,23 @@ class TestNotebookHttpRoutes(unittest.TestCase):
             source="x = 1",
             owner_session_id="sess-1",
         )
+
+    def test_execute_cell_wait_false_uses_server_queue(self):
+        state = mock.MagicMock()
+        state.notebook_enqueue_execute_cell.return_value = ({"status": "queued"}, HTTPStatus.OK)
+        client = _make_client(state)
+
+        resp = client.post(
+            "/api/notebooks/execute-cell",
+            json={"path": "nb.ipynb", "cell_id": "cell-1", "owner_session_id": "sess-1", "wait": False},
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "queued"})
+        state.notebook_enqueue_execute_cell.assert_called_once_with(
+            "nb.ipynb",
+            cell_id="cell-1",
+            cell_index=None,
+            owner_session_id="sess-1",
+        )
+        state.notebook_execute_cell.assert_not_called()
