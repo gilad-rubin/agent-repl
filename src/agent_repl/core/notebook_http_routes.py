@@ -19,6 +19,7 @@ from agent_repl.core.notebook_requests import (
     NotebookSelectKernelRequest,
     NotebookSessionPathRequest,
 )
+from agent_repl.core.request_parsing import parse_request as _parse_request
 
 
 def handle_notebook_post(
@@ -175,8 +176,3 @@ def handle_notebook_post(
     return None
 
 
-def _parse_request(payload: dict[str, Any], request_type: Any) -> Any | tuple[HTTPStatus, dict[str, Any]]:
-    try:
-        return request_type.from_payload(payload)
-    except ValueError as err:
-        return HTTPStatus.BAD_REQUEST, {"error": str(err)}
