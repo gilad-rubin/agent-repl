@@ -141,6 +141,7 @@ class NotebookMutationService:
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         notebook, changed = self.state._load_notebook(real_path)
+        ydoc = self.state._ydoc_service
         results: list[dict[str, Any]] = []
         actor = self.state._session_actor(owner_session_id, "agent")
         runtime_id = self._selected_runtime_id(relative_path)
@@ -156,7 +157,12 @@ class NotebookMutationService:
                     owner_session_id=owner_session_id,
                     operation="replace-source",
                 )
-                cell.source = op.get("source", "")
+                source = op.get("source", "")
+                # Route through YDoc CRDT
+                ydoc.set_cell_source(relative_path, index=index, source=source)
+                # Read back from YDoc and apply to nbformat
+                ydoc_cells = ydoc.get_cells(relative_path)
+                cell.source = ydoc_cells[index]["source"] if index < len(ydoc_cells) else source
                 if cell.cell_type == "code":
                     cell.outputs = []
                     cell.execution_count = None
@@ -184,10 +190,13 @@ class NotebookMutationService:
                 cell_type = op.get("cell_type", "code")
                 source = op.get("source", "")
                 cell = nbformat.v4.new_code_cell(source=source) if cell_type == "code" else nbformat.v4.new_markdown_cell(source=source)
+                # Insert into nbformat first to assign cell identity
                 notebook.cells.insert(index, cell)
                 for position, current in enumerate(notebook.cells):
                     self.state._ensure_cell_identity(current, position)
                 inserted_cell = notebook.cells[index]
+                # Route through YDoc CRDT
+                ydoc.insert_cell(relative_path, index, dict(inserted_cell))
                 results.append({"op": "insert", "changed": True, "cell_id": self.state._cell_id(inserted_cell, index), "cell_count": len(notebook.cells)})
                 self.state._append_activity_event(
                     path=relative_path,
@@ -216,6 +225,9 @@ class NotebookMutationService:
                     owner_session_id=owner_session_id,
                     operation="delete",
                 )
+                # Route through YDoc CRDT
+                ydoc.remove_cell(relative_path, index)
+                # Mirror to nbformat
                 notebook.cells.pop(index)
                 for position, current in enumerate(notebook.cells):
                     self.state._ensure_cell_identity(current, position)
@@ -252,6 +264,9 @@ class NotebookMutationService:
                     owner_session_id=owner_session_id,
                     operation="move",
                 )
+                # Route through YDoc CRDT
+                ydoc.move_cell(relative_path, index, to_index)
+                # Mirror to nbformat
                 cell = notebook.cells.pop(index)
                 notebook.cells.insert(to_index, cell)
                 for position, current in enumerate(notebook.cells):
@@ -269,6 +284,7 @@ class NotebookMutationService:
                 )
                 changed = True
             elif command == "clear-outputs":
+                # Outputs are server-owned — keep as direct nbformat mutation
                 if op.get("all"):
                     for index, cell in enumerate(notebook.cells):
                         if cell.cell_type == "code":
