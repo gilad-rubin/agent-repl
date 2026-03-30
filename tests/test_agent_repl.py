@@ -25,7 +25,6 @@ from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
 from agent_repl.core.server import CoreState, _load_or_create_state
 from agent_repl.http_api import poll_execution_until_complete
 from agent_repl.notebook_runtime_client import (
-    BridgeNotebookRuntimeAdapter,
     call_with_owner_session,
     resolve_owner_session_id,
 )
@@ -263,7 +262,6 @@ class TestCoreDiscovery(unittest.TestCase):
             "port": 23456,
             "token": "tok",
             "workspace_root": "/workspace",
-            "code_hash": "current",
         })
         with (
             mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
@@ -271,50 +269,11 @@ class TestCoreDiscovery(unittest.TestCase):
             mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
             mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
             mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
             mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
         ):
             client = CoreClient.discover()
         self.assertEqual(client.base_url, "http://127.0.0.1:23456")
         self.assertEqual(client.token, "tok")
-
-    def test_discover_skips_stale_daemons(self):
-        info = json.dumps({
-            "pid": 123,
-            "port": 23456,
-            "token": "tok",
-            "workspace_root": "/workspace",
-            "code_hash": "old-hash",
-        })
-        with (
-            mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
-            mock.patch("agent_repl.core.client.os.path.getmtime", return_value=1.0),
-            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
-            mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
-            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="new-hash"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "No running agent-repl core daemon"):
-                CoreClient.discover()
-
-    def test_discover_allows_stale_when_requested(self):
-        info = json.dumps({
-            "pid": 123,
-            "port": 23456,
-            "token": "tok",
-            "workspace_root": "/workspace",
-            "code_hash": "old-hash",
-        })
-        with (
-            mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
-            mock.patch("agent_repl.core.client.os.path.getmtime", return_value=1.0),
-            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
-            mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
-            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
-        ):
-            client = CoreClient.discover(allow_stale=True)
-        self.assertEqual(client.base_url, "http://127.0.0.1:23456")
 
     def test_discover_raises_when_no_workspace_matches(self):
         info = json.dumps({
@@ -322,7 +281,6 @@ class TestCoreDiscovery(unittest.TestCase):
             "port": 23456,
             "token": "tok",
             "workspace_root": "/other",
-            "code_hash": "current",
         })
         with (
             mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
@@ -330,7 +288,6 @@ class TestCoreDiscovery(unittest.TestCase):
             mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
             mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
             mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
         ):
             with self.assertRaisesRegex(RuntimeError, "No running agent-repl core daemon matched '/workspace'"):
                 CoreClient.discover()
@@ -341,14 +298,12 @@ class TestCoreDiscovery(unittest.TestCase):
             "port": 23456,
             "token": "tok-parent",
             "workspace_root": "/workspace",
-            "code_hash": "current",
         })
         info_child = json.dumps({
             "pid": 456,
             "port": 34567,
             "token": "tok-child",
             "workspace_root": "/workspace/subproject",
-            "code_hash": "current",
         })
         read_map = {
             "/tmp/agent-repl-core-parent.json": info_parent,
@@ -367,7 +322,6 @@ class TestCoreDiscovery(unittest.TestCase):
             mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace/subproject"),
             mock.patch("agent_repl.core.client.Path.read_text", autospec=True, side_effect=lambda self: read_map[str(self)]),
             mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
             mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
         ):
             client = CoreClient.discover()
@@ -402,29 +356,6 @@ class TestCoreDiscovery(unittest.TestCase):
             capabilities=["projection", "ops"],
             session_id="sess-1",
         )
-
-    def test_start_restarts_stale_daemon_when_installed_code_is_newer(self):
-        stale_client = mock.MagicMock(spec=CoreClient)
-        stale_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 1.0, "code_hash": "stale", "pid": 999}
-        fresh_client = mock.MagicMock(spec=CoreClient)
-        fresh_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 20.0, "code_hash": "fresh"}
-
-        with (
-            mock.patch.object(CoreClient, "discover", side_effect=[stale_client, RuntimeError("gone"), fresh_client]),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="fresh"),
-            mock.patch("agent_repl.core.client.subprocess.Popen") as mock_popen,
-            mock.patch("agent_repl.core.client.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2]),
-            mock.patch("agent_repl.core.client.time.sleep"),
-        ):
-            result = CoreClient.start("/workspace", timeout=1.0, runtime_dir="/tmp/runtime")
-
-        stale_client.shutdown.assert_called_once()
-        mock_popen.assert_called_once()
-        self.assertFalse(result["already_running"])
-        self.assertTrue(result["stale_restart"])
-        self.assertEqual(result["stale_pid"], 999)
-        self.assertEqual(result["workspace_root"], "/workspace")
-
 
 class TestPackagingMetadata(unittest.TestCase):
     """Packaging metadata must include the headless runtime dependencies."""
@@ -472,6 +403,16 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(document["sync_state"], "in-sync")
         self.assertTrue(document["bound_snapshot"]["exists"])
         self.assertEqual(document["bound_snapshot"]["sha256"], document["observed_snapshot"]["sha256"])
+
+    def test_snapshot_file_hashes_existing_files(self):
+        from agent_repl.core.server import _snapshot_file
+
+        snapshot = _snapshot_file(str(self.doc_path))
+
+        self.assertTrue(snapshot["exists"])
+        self.assertEqual(snapshot["source_kind"], "file")
+        self.assertIsInstance(snapshot["sha256"], str)
+        self.assertEqual(len(snapshot["sha256"]), 64)
 
     def test_refresh_document_reports_external_change_until_rebound(self):
         body, status = self.state.open_document("notebooks/demo.ipynb")
@@ -630,7 +571,7 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(body["results"][0]["op"], "replace-source")
         self.assertEqual(len(self.state.document_records), 1)
 
-    def test_notebook_edit_falls_back_to_cell_index_when_read_only_contents_generated_ephemeral_ids(self):
+    def test_notebook_edit_uses_generated_cell_id_for_read_only_contents(self):
         notebook_path = self.workspace_root / "notebooks" / "ephemeral-ids.ipynb"
         notebook_path.parent.mkdir(parents=True, exist_ok=True)
         notebook_path.write_text(json.dumps({
@@ -3451,12 +3392,26 @@ class TestCommands(unittest.TestCase):
         try:
             with (
                 mock.patch("agent_repl.cli._client", return_value=mock_client),
-                mock.patch("agent_repl.cli._notebook_client", return_value=BridgeNotebookRuntimeAdapter(mock_client)),
+                mock.patch("agent_repl.cli._notebook_client", return_value=self._mock_notebook_runtime_client(mock_client)),
             ):
                 code = main(argv)
         finally:
             sys.stdout = old
         return code, buf.getvalue()
+
+    def _mock_notebook_runtime_client(self, bridge_client: BridgeClient):
+        runtime = mock.Mock()
+        runtime.notebook_contents = bridge_client.contents
+        runtime.notebook_status = bridge_client.status
+        runtime.notebook_insert_execute = bridge_client.insert_and_execute
+        runtime.notebook_execute_cell = bridge_client.execute_cell
+        runtime.notebook_execute_all = bridge_client.execute_all
+        runtime.notebook_restart = bridge_client.restart_kernel
+        runtime.notebook_restart_and_run_all = bridge_client.restart_and_run_all
+        runtime.notebook_create = bridge_client.create
+        runtime.notebook_edit = bridge_client.edit
+        runtime.notebook_select_kernel = bridge_client.select_kernel
+        return runtime
 
     def _mock_client(self, **overrides):
         client = mock.MagicMock(spec=BridgeClient)
@@ -3615,8 +3570,8 @@ class TestCommands(unittest.TestCase):
         client.insert_and_execute.assert_called_once_with(
             "nb.ipynb",
             "x=1",
-            cell_type="code",
             at_index=-1,
+            cell_type="code",
             wait=True,
             timeout=30,
         )
@@ -3640,6 +3595,7 @@ class TestCommands(unittest.TestCase):
             "nb.ipynb",
             "x=1",
             at_index=-1,
+            cell_type="code",
             wait=True,
             timeout=30,
             owner_session_id="sess-1",
@@ -3666,6 +3622,7 @@ class TestCommands(unittest.TestCase):
             "nb.ipynb",
             "x=1",
             at_index=-1,
+            cell_type="code",
             wait=True,
             timeout=30,
             owner_session_id="sess-1",
@@ -3679,8 +3636,8 @@ class TestCommands(unittest.TestCase):
         client.insert_and_execute.assert_called_once_with(
             "nb.ipynb",
             "x=1",
-            cell_type="code",
             at_index=-1,
+            cell_type="code",
             wait=False,
             timeout=30,
         )
@@ -3706,8 +3663,8 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(
             client.insert_and_execute.call_args_list,
             [
-                mock.call("nb.ipynb", "x=1", cell_type="code", at_index=-1, wait=True, timeout=30),
-                mock.call("nb.ipynb", "x+1", cell_type="code", at_index=-1, wait=True, timeout=30),
+                mock.call("nb.ipynb", "x=1", at_index=-1, cell_type="code", wait=True, timeout=30),
+                mock.call("nb.ipynb", "x+1", at_index=-1, cell_type="code", wait=True, timeout=30),
             ],
         )
         payload = json.loads(out)
@@ -3749,8 +3706,8 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(
             core.notebook_insert_execute.call_args_list,
             [
-                mock.call("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30, owner_session_id="sess-1"),
-                mock.call("nb.ipynb", "x+1", at_index=-1, wait=True, timeout=30, owner_session_id="sess-1"),
+                mock.call("nb.ipynb", "x=1", at_index=-1, cell_type="code", wait=True, timeout=30, owner_session_id="sess-1"),
+                mock.call("nb.ipynb", "x+1", at_index=-1, cell_type="code", wait=True, timeout=30, owner_session_id="sess-1"),
             ],
         )
         bridge.insert_and_execute.assert_not_called()
@@ -3783,7 +3740,6 @@ class TestCommands(unittest.TestCase):
         client.execute_cell.assert_called_once_with(
             "nb.ipynb",
             cell_id="abc",
-            cell_index=None,
             wait=True,
             timeout=30,
         )
@@ -4977,12 +4933,14 @@ class TestDocsSurface(unittest.TestCase):
         self.assertNotIn("make install-ext", install)
         self.assertNotIn("make verify-install", install)
 
-    def test_command_reference_warns_about_closed_notebook_fallback_ids(self):
+    def test_command_reference_describes_live_cell_ids_and_session_reuse(self):
         root = Path(__file__).resolve().parents[1]
         commands = (root / "docs" / "commands.md").read_text()
-        self.assertIn("index-1", commands)
-        self.assertIn("fire-and-forget behavior", commands)
+        self.assertIn("live `cell_id` values", commands)
+        self.assertIn("`--session-id` overrides the default session reuse", commands)
         self.assertIn("agent-repl reload --pretty", commands)
+        self.assertNotIn("index-1", commands)
+        self.assertNotIn("fire-and-forget behavior", commands)
         self.assertNotIn("## v2", commands)
         self.assertNotIn("agent-repl v2", commands)
 

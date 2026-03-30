@@ -137,7 +137,14 @@ export function initExecutionMonitor(): vscode.Disposable {
                 }
             } else if (summary) {
                 // Execution started (summary set/cleared without endTime)
-                const cellId = getCellId(change.cell) ?? `index-${change.cell.index}`;
+                const cellId = getCellId(change.cell);
+                if (!cellId) {
+                    queueDebug(fsPath, 'monitor:missing-cell-id', {
+                        cellKey: key,
+                        cellIndex: change.cell.index,
+                    });
+                    continue;
+                }
                 const sourcePreview = change.cell.document.getText().split('\n')[0].slice(0, 80);
                 executingCells.set(key, {
                     fsPath,
@@ -561,7 +568,10 @@ async function prepareExecutionContext(
     const doc = resolveNotebook(path);
     const cellIndex = resolveCell(doc, selector);
     const cell = doc.cellAt(cellIndex);
-    const cellId = getCellId(cell) ?? `index-${cellIndex}`;
+    const cellId = getCellId(cell);
+    if (!cellId) {
+        throw new Error(`Cell at index ${cellIndex} is missing an agent-repl cell ID`);
+    }
     const preview = cell.document.getText().split('\n')[0].slice(0, 80);
     const execId = `exec-${++executionCounter}`;
     const queue = queues.get(path) ?? [];

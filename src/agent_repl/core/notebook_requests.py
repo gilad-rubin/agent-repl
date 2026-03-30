@@ -187,11 +187,12 @@ class NotebookInsertExecuteRequest:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> NotebookInsertExecuteRequest:
+        at_index = _optional_int(payload, "at_index")
         return cls(
             path=_require_path(payload),
             source=_require_str(payload, "source", error="Missing source"),
             cell_type=_optional_str(payload, "cell_type") or "code",
-            at_index=_optional_int(payload, "at_index") or -1,
+            at_index=at_index if at_index is not None else -1,
             owner_session_id=_optional_str(payload, "owner_session_id"),
         )
 

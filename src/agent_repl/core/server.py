@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import hashlib
 import os
 import secrets
 import shutil
@@ -33,7 +34,6 @@ from agent_repl.core.ydoc_service import YDocService
 
 CORE_VERSION = "0.1.0"
 STATE_DIRNAME = ".agent-repl"
-STATE_FILENAME = "core-state.json"
 MAX_ACTIVITY_RECORDS = 500
 RUNTIME_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "provisioning": {"idle", "busy", "failed"},
@@ -311,7 +311,6 @@ class CoreState:
     token: str
     pid: int
     started_at: float
-    state_file: str | None = None
     version: str = CORE_VERSION
     documents: int = 0
     sessions: int = 0
@@ -344,10 +343,6 @@ class CoreState:
     def __post_init__(self) -> None:
         self.workspace_root = os.path.realpath(self.workspace_root)
         self.runtime_dir = os.path.realpath(self.runtime_dir)
-        if self.state_file is None:
-            self.state_file = _state_file_path(self.workspace_root)
-        else:
-            self.state_file = os.path.realpath(self.state_file)
         self._last_activity_timestamp = max(
             (record.timestamp for record in self.activity_records),
             default=self.started_at,
@@ -386,9 +381,7 @@ class CoreState:
             "workspace_root": self.workspace_root,
             "pid": self.pid,
             "started_at": self.started_at,
-            "state_file": self.state_file,
             "version": self.version,
-            "code_hash": _current_package_hash(),
             "documents": self.documents,
             "sessions": self.sessions,
             "runs": self.runs,
@@ -757,11 +750,7 @@ class CoreState:
         payload = self._execution_ledger_service.notebook_execution(execution_id)
         if payload is not None:
             return payload, HTTPStatus.OK
-        client = self._projection_client(self.workspace_root)
-        if client is None:
-            return {"error": f"Unknown execution: {execution_id}"}, HTTPStatus.NOT_FOUND
-        fallback_payload = client.execution(execution_id)
-        return fallback_payload, HTTPStatus.OK
+        return {"error": f"Unknown execution: {execution_id}"}, HTTPStatus.NOT_FOUND
 
     def notebook_execute_all(
         self,
@@ -2040,7 +2029,6 @@ def serve_forever(
         "port": port,
         "token": token,
         "version": state.version,
-        "code_hash": _current_package_hash(),
         "workspace_root": workspace_root,
         "started_at": state.started_at,
     }))
@@ -2052,21 +2040,6 @@ def serve_forever(
         log_level="error",
     )
     server = uvicorn.Server(config)
-
-    startup_hash = _current_package_hash()
-
-    def _staleness_watchdog() -> None:
-        while True:
-            time.sleep(60)
-            try:
-                if _current_package_hash() != startup_hash:
-                    server.should_exit = True
-                    return
-            except Exception:
-                continue
-
-    watchdog = threading.Thread(target=_staleness_watchdog, daemon=True)
-    watchdog.start()
 
     try:
         server.run()
@@ -2087,20 +2060,6 @@ def _path_within(candidate: str, root: str) -> bool:
         return common == os.path.realpath(root)
     except ValueError:
         return False
-
-
-def _current_package_hash() -> str:
-    package_root = Path(__file__).resolve().parents[1]
-    digest = hashlib.sha256()
-    for source in sorted(package_root.rglob("*.py")):
-        try:
-            digest.update(str(source.relative_to(package_root)).encode("utf-8"))
-            digest.update(source.read_bytes())
-        except OSError:
-            continue
-    return digest.hexdigest()
-
-
 def _file_format(path: str) -> str:
     suffix = Path(path).suffix.lower()
     if suffix == ".ipynb":
@@ -2212,10 +2171,6 @@ def _default_session_capabilities(client: str) -> list[str]:
     return ["projection"]
 
 
-def _state_file_path(workspace_root: str) -> str:
-    return os.path.realpath(os.path.join(workspace_root, STATE_DIRNAME, STATE_FILENAME))
-
-
 def _load_or_create_state(
     *,
     workspace_root: str,
@@ -2224,13 +2179,8 @@ def _load_or_create_state(
     pid: int,
     started_at: float,
 ) -> CoreState:
-    from agent_repl.core.db import load_all, migrate_from_json, open_db
-
-    state_file = _state_file_path(workspace_root)
+    from agent_repl.core.db import load_all, open_db
     db = open_db(workspace_root)
-
-    # Migrate from JSON if the old state file still exists.
-    migrate_from_json(db, state_file)
 
     data = load_all(db)
 
@@ -2241,7 +2191,6 @@ def _load_or_create_state(
             token=token,
             pid=pid,
             started_at=started_at,
-            state_file=state_file,
             **extra,
         )
         s._db = db

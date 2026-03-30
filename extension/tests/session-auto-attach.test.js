@@ -16,6 +16,8 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
     const notebookEdits = [];
     let createdController;
     const execResponses = options.execResponses || {};
+    const activeNotebookEditor = options.activeNotebookEditor;
+    const visibleNotebookEditors = options.visibleNotebookEditors || [];
     Module._load = function patchedLoad(request, parent, isMain) {
         if (request === 'vscode') {
             class WorkspaceEdit {
@@ -85,7 +87,8 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
                     },
                 },
                 window: {
-                    visibleNotebookEditors: [],
+                    activeNotebookEditor,
+                    visibleNotebookEditors,
                     onDidChangeVisibleNotebookEditors: () => ({ dispose() {} }),
                 },
                 notebooks: {
@@ -251,36 +254,6 @@ test('coreCliPlans prefers configured and workspace-local launchers before PATH 
 test('primaryWorkspaceRoot returns the first workspace folder path', () => {
     const { module: { primaryWorkspaceRoot } } = loadSessionModule([{ uri: { fsPath: '/workspace' } }]);
     assert.equal(primaryWorkspaceRoot(), '/workspace');
-});
-
-test('SessionAutoAttach preserves the active session id when legacy and current keys alias', async () => {
-    const store = new Map();
-    const context = {
-        workspaceState: {
-            get: (key) => store.get(key),
-            update: async (key, value) => {
-                if (typeof value === 'undefined') {
-                    store.delete(key);
-                } else {
-                    store.set(key, value);
-                }
-            },
-        },
-    };
-    const {
-        module: { SessionAutoAttach },
-    } = loadSessionModule(
-        [{ uri: { fsPath: '/workspace' } }],
-        { execResponses: { default: { status: 'ok', session: { session_id: 'sess-1' } } } },
-    );
-    const attach = new SessionAutoAttach(context);
-    try {
-        await attach.attachIfEnabled({ get: (_name, fallback) => fallback });
-        assert.equal(store.get('agent-repl.session:/workspace'), 'sess-1');
-    } finally {
-        await attach.detachIfAttached();
-        attach.dispose();
-    }
 });
 
 test('SessionAutoAttach reuses the preferred human session when no workspace session is stored', async () => {
@@ -661,6 +634,77 @@ test('HeadlessNotebookProjection executes the visible cell source against the sh
         assert.equal(executions[0].executionOrder, 3);
         assert.equal(executions[0].success, true);
         assert.equal(executions[0].outputs[0].items[0].value, '9');
+    } finally {
+        projection.dispose();
+    }
+});
+
+test('HeadlessNotebookProjection falls back to the selected first cell when VS Code passes no cells to executeHandler', async () => {
+    const doc = {
+        notebookType: 'jupyter-notebook',
+        uri: { fsPath: '/workspace/notebooks/demo.ipynb' },
+        save: async () => true,
+    };
+    const firstCell = {
+        kind: 2,
+        index: 0,
+        document: { getText: () => 'x = 1\nx' },
+        metadata: {},
+        outputs: [],
+        executionSummary: null,
+    };
+    const secondCell = {
+        kind: 2,
+        index: 1,
+        document: { getText: () => 'x = 2\nx' },
+        metadata: {},
+        outputs: [],
+        executionSummary: null,
+    };
+    doc.cells = [firstCell, secondCell];
+    doc.cellCount = doc.cells.length;
+    doc.cellAt = (index) => doc.cells[index];
+
+    const editor = {
+        notebook: doc,
+        selections: [{ start: 0, end: 1 }],
+    };
+    const {
+        module: { HeadlessNotebookProjection },
+        execCalls,
+        executions,
+        getController,
+    } = loadSessionModule(
+        [{ uri: { fsPath: '/workspace' } }],
+        {
+            activeNotebookEditor: editor,
+            visibleNotebookEditors: [editor],
+            execResponses: {
+                'project-visible-notebook': {
+                    status: 'ok',
+                    cell_count: 2,
+                },
+                'execute-visible-cell': {
+                    status: 'ok',
+                    execution_count: 1,
+                    outputs: [{ output_type: 'execute_result', data: { 'text/plain': '1' }, metadata: {} }],
+                },
+            },
+        },
+    );
+    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl');
+    try {
+        const controller = getController();
+        await controller.executeHandler([], doc, controller);
+        assert.equal(execCalls.length, 2);
+        assert.ok(execCalls[1][1].includes('execute-visible-cell'));
+        assert.ok(execCalls[1][1].includes('--cell-index'));
+        assert.ok(execCalls[1][1].includes('0'));
+        assert.ok(execCalls[1][1].includes('--source'));
+        assert.ok(execCalls[1][1].includes('x = 1\nx'));
+        assert.equal(executions.length, 1);
+        assert.equal(executions[0].success, true);
+        assert.equal(executions[0].outputs[0].items[0].value, '1');
     } finally {
         projection.dispose();
     }

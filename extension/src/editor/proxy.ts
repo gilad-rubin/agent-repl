@@ -221,7 +221,7 @@ export class DaemonProxy {
     private async loadContents(requestId: string): Promise<void> {
         const result = await this.httpPost('/api/notebooks/contents', { path: this.notebookPath });
         this.replaceCells(result.cells ?? []);
-        this.postMessage({ type: 'contents', requestId, cells: this.cells });
+        this.postMessage({ type: 'contents', requestId, path: this.notebookPath, cells: this.cells });
     }
 
     // -----------------------------------------------------------------------

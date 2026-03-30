@@ -5,228 +5,87 @@ description: Work against the shared agent-repl notebook runtime. Use this when 
 
 # agent-repl
 
-`agent-repl` is the notebook runtime. The CLI is the normal agent surface. VS Code or Cursor is optional unless you are intentionally using editor-only features such as prompt-cell creation, explicit kernel picking, or extension reload.
+`agent-repl` is the notebook runtime. The CLI is the normal agent surface. VS Code or Cursor is optional unless you need editor-only features (prompt cells, kernel picker, extension reload). Public subcommands return JSON.
 
-The browser preview and the VS Code canvas share the same bundled UI from `extension/webview-src/main.tsx`.
+Run `agent-repl --help` for the full command list, and `agent-repl <command> --help` for exact syntax and defaults on any subcommand.
 
-CLI notebook commands, the VS Code canvas, and the standalone browser preview now reuse the active human workspace session by default. If a human session already exists, new `ix`, `edit`, `exec`, `run-all`, and `restart-run-all` requests join that same ownership context unless you explicitly override it with `--session-id`.
+## CLI Reference
 
-When the notebook is opened in the standalone browser canvas, that shared bundle now wraps the notebook in a minimal VS Code-like explorer for workspace `*.ipynb` files. Plain `/preview.html` roots itself to the folder where `npm run preview:webview` was launched and auto-selects the first notebook it finds; use `?path=...` to force a notebook or `?mock=1` to force the mock preview. Use `Cmd+B` on macOS or `Ctrl+B` elsewhere to collapse or reopen the explorer, and use the toolbar Save action or `Cmd+S` / `Ctrl+S` to flush in-browser drafts into the notebook file immediately.
+The output below is injected dynamically when available. If you see the raw `!` line instead, run the command yourself to get current syntax.
 
-Public subcommands print JSON on success. Top-level help and version output are plain text.
+!agent-repl --help
 
-Canvas Python IDE features use generated Pyright shadow files under the workspace-local `.agent-repl/pyright/` directory instead of creating sibling `.py` files next to notebooks.
+## Before You Start
 
-## Documentation Sync
+1. Confirm you are in the correct workspace directory.
+2. Run `agent-repl --version` to verify the CLI is current.
+3. If the workspace has a `.venv`, it must contain `ipykernel`.
+4. If the installed CLI is stale: `uv tool install /path/to/agent-repl --reinstall`
 
-- When a shipped feature, command shape, workflow, architecture note, or dev loop changes, update the affected durable docs in the same change.
-- Check `AGENTS.md`, `SKILL.md`, `docs/`, and `dev/` together instead of updating only one layer.
-
-## First Check
-
-Before validating behavior from another workspace:
+## Quick Start
 
 ```bash
-agent-repl --version
-agent-repl --help
+# New notebook
+agent-repl new scratch.ipynb
+agent-repl ix scratch.ipynb -s 'x = 2; x * 3'
+
+# Existing notebook — look up cell IDs, then edit and rerun
+agent-repl cat demo.ipynb --no-outputs
+agent-repl edit demo.ipynb replace-source --cell-id <id> -s 'x = 7; x ** 2'
+agent-repl exec demo.ipynb --cell-id <id>
 ```
-
-If the installed CLI is stale:
-
-```bash
-uv tool install /path/to/agent-repl --reinstall
-```
-
-## Minimal Happy Path
-
-For a new notebook:
-
-```bash
-agent-repl new tmp/validation.ipynb
-agent-repl ix tmp/validation.ipynb -s 'x = 2\nx * 3'
-```
-
-If you want the notebook open in the editor too:
-
-```bash
-agent-repl new tmp/validation.ipynb --open
-```
-
-If you want it in the standalone browser canvas instead:
-
-```bash
-agent-repl new tmp/validation.ipynb --open --target browser
-```
-
-If you want native Jupyter instead of the Agent REPL canvas:
-
-```bash
-agent-repl new tmp/validation.ipynb --open --editor jupyter
-```
-
-For an existing notebook:
-
-```bash
-agent-repl open notebooks/demo.ipynb
-agent-repl edit notebooks/demo.ipynb replace-source --cell-id <id> -s 'x = 7\nx ** 2'
-agent-repl exec notebooks/demo.ipynb --cell-id <id>
-agent-repl edit notebooks/demo.ipynb insert --cells-json '[{"type":"markdown","source":"# Notes"},{"type":"code","source":"print(1)"}]'
-agent-repl ix notebooks/demo.ipynb --cells-json '[{"type":"markdown","source":"# Step 1"},{"type":"code","source":"x = 2\nx * 3"}]'
-```
-
-Use `ix` as the default execution primitive. It inserts a visible code cell, executes it, and returns the result directly.
-Batch `ix` also supports `--cells-json` / `--cells-file`; it inserts cells sequentially so each code cell still projects as inserted and then running.
 
 ## What Commands Are For
 
-- `new` - create the notebook and prepare the runtime automatically
-- `open` - open an existing notebook in VS Code or the browser
-- `ix` - insert a new cell, run it, and return the result
-- `edit` - explicit notebook mutation
-- `exec` - rerun a known cell or insert and run inline code
-- `cat` - diagnostics or `cell_id` lookup
-- `status` - diagnostics for long-running or uncertain execution
-- `run-all` / `restart` / `restart-run-all` - notebook-wide execution control
-- `select-kernel` - switch the notebook kernel, usually through the shared runtime
+- `new` — create a notebook and prepare the runtime
+- `open` — open an existing notebook in VS Code or the browser
+- `ix` — insert a new cell, run it, return the result (recommended default)
+- `edit` — explicit notebook mutation (insert, replace-source, delete, move, clear-outputs)
+- `exec` — rerun a known cell or insert and run inline code
+- `cat` — read notebook contents; use `--no-outputs` for cell ID lookup
+- `status` — check execution state for long-running or uncertain cells
+- `run-all` / `restart` / `restart-run-all` — notebook-wide execution control
+- `select-kernel` — switch the notebook kernel
+- `prompts` / `respond` — editor-driven prompt loop (requires extension)
 
-`cat` and `status` are useful, but they are not part of the normal happy path.
+## Best Practices
 
-## Validation Flow
+**Prefer `ix` over separate insert + execute.** `ix` inserts a cell, runs it, and returns the result in one call. Use `edit` + `exec` only when you need to modify or rerun an existing cell.
 
-For a prompt like “test out the new agent-repl capabilities,” start with the smallest happy path:
+**Batch multiple cells with `--cells-json`.** Instead of calling `ix` five times, pass a JSON array in one call. Each code cell executes sequentially; batch `ix` stops on the first error.
 
-```bash
-agent-repl --version
-agent-repl new tmp/validation.ipynb
-agent-repl ix tmp/validation.ipynb -s 'x = 2\nx * 3'
-```
-
-Only inspect structure when you need a `cell_id` for an explicit edit or rerun:
+Starter cells passed to `agent-repl new --cells-json` are created but not auto-executed.
 
 ```bash
-agent-repl cat tmp/validation.ipynb --no-outputs
-agent-repl edit tmp/validation.ipynb replace-source --cell-id <id> -s 'x = 7\nx ** 2'
-agent-repl exec tmp/validation.ipynb --cell-id <id>
+agent-repl ix demo.ipynb --cells-json '[{"type":"code","source":"import pandas as pd"},{"type":"code","source":"df = pd.read_csv(\"data.csv\")\ndf.head()"}]'
 ```
 
-Then validate an existing notebook:
+**Verify your environment before starting work.** Check that you're in the right directory, the CLI is current, and the kernel resolves. Fixing these after creating cells wastes more time than checking upfront.
 
-```bash
-agent-repl cat notebooks/demo.ipynb --no-outputs
-agent-repl edit notebooks/demo.ipynb replace-source --cell-id <id> -s 'updated code'
-agent-repl exec notebooks/demo.ipynb --cell-id <id>
-agent-repl ix notebooks/demo.ipynb -s 'x + 1'
-```
+**Understand rollback behavior.** If `ix` fails due to infrastructure (kernel crash, timeout, connection lost), the inserted cell is rolled back and the notebook is unchanged. Python exceptions in your code are *not* rolled back — those produce normal error output.
 
-What to confirm:
-
-- `new` returns a ready notebook
-- `new --open` and `open` default to VS Code, and within VS Code they use the Agent REPL canvas editor by default
-- `new --open --editor jupyter` and `open --editor jupyter` explicitly choose the native notebook UI
-- `new --open --target browser` and `open --target browser` open the standalone browser canvas URL instead
-- when VS Code is already attached, the browser preview reuses that same human session instead of creating a lease-conflicting sibling session
-- `ix` returns the result directly
-- edited source and outputs stay in sync
-- the same commands work with the editor closed
-- if the editor is open, the human sees the notebook update live without popups or focus steal
+**Use `cat --no-outputs` for cell IDs.** When you need to edit or rerun a specific cell, `cat` gives you the cell IDs. Don't guess them.
 
 ## Kernel Rules
 
-- if a workspace `.venv` exists, it is the default runtime for `new` and `ix`
-- the `.venv` must have `ipykernel` installed — if it doesn't, the error will name the `.venv` path and tell you how to fix it
-- if no workspace `.venv` exists, pass `--kernel` explicitly
-- `select-kernel` changes the active kernel for a notebook in the shared runtime — subsequent `ix`, `exec`, and notebook-wide runs use the selected kernel
-- use `--interactive` with `select-kernel` only when you want the VS Code kernel picker
+- If a workspace `.venv` exists, it is the default runtime for `new` and `ix`.
+- The `.venv` must have `ipykernel` installed — the error will name the path and tell you how to fix it.
+- If no `.venv` exists, pass `--kernel` explicitly.
+- `select-kernel` changes the active kernel; subsequent runs use the selected kernel.
 
-## Session Ownership Rules
+## Session Ownership
 
-- `ix`, `edit`, `exec`, `run-all`, and `restart-run-all` reuse the active human workspace session automatically when `--session-id` is omitted
-- if no reusable human session exists, the CLI creates a human CLI session and attributes the operation to it
-- `--session-id` still overrides the default reuse path when you intentionally want a different collaboration owner
-- explicit cross-session lease conflicts are still expected when different session ids target the same leased cell
-
-```bash
-agent-repl select-kernel analysis.ipynb --kernel-id /opt/miniconda3/bin/python3
-agent-repl ix analysis.ipynb -s 'import sys; print(sys.executable)'
-```
-
-Starter cells from `new --cells-json` are created, not auto-executed.
-
-Failed `ix` calls do not leave orphan cells — if the kernel cannot be resolved or an infrastructure error occurs (kernel crash, connection lost, timeout), the inserted cell is rolled back and the notebook is unchanged. The error message will say "ix failed and the inserted cell was rolled back." Python exceptions in your code are *not* rolled back — those behave like normal notebook cells with error output.
+- `ix`, `edit`, `exec`, `run-all`, and `restart-run-all` automatically reuse the active human session when `--session-id` is omitted.
+- Use `--session-id` only when you intentionally need a different collaboration owner.
 
 ## Editor-Assisted Features
 
-These features still assume the extension is available:
-
-- `respond`
-- `kernels`
-- `reload`
-- `open --target vscode`
-- `new --open`
-
-These are still editor-oriented, but not all of them are purely VS Code-only:
-
-- `prompts` can be used to inspect prompt metadata from the notebook conversation flow
-- `respond` still relies on the editor-assisted prompt loop
-- `reload` hot-reloads installed extension routes and reports the live extension paths; it does not fully restart the extension host
-
-If you are validating live editor projection behavior, rebuild/reinstall the extension when needed and then verify:
-
-```bash
-agent-repl reload --pretty
-```
-
-## Prompt Loop
-
-Human in the editor:
-
-- click **Ask Agent**
-
-Agent in the CLI:
-
-```bash
-agent-repl prompts notebooks/demo.ipynb
-agent-repl respond notebooks/demo.ipynb --to <cell_id> -s 'df = df.dropna()'
-```
-
-Use this only when the notebook is intentionally being used as a conversation surface.
+These commands require the VS Code / Cursor extension: `respond`, `kernels`, `reload`, `open --target vscode`, `new --open`. The `prompts` command works from the CLI but the prompt loop itself is editor-driven.
 
 ## Troubleshooting
 
-**Need a cell ID**
-
-```bash
-agent-repl cat notebooks/demo.ipynb --no-outputs
-```
-
-**Notebook still busy**
-
-```bash
-agent-repl status notebooks/demo.ipynb
-```
-
-**No workspace kernel**
-
-How to fix:
-- create a workspace `.venv`, or
-- pass `--kernel /absolute/path/to/python`
-
-**Installed extension still runs old code**
-
-How to fix:
-
-```bash
-cd extension
-npm run compile
-npx --yes @vscode/vsce package --allow-missing-repository -o agent-repl-0.3.0.vsix
-code --install-extension agent-repl-0.3.0.vsix --force
-agent-repl reload --pretty
-```
-
-If preview and VS Code disagree visually, rebuild before packaging so the shared `canvas.js` and `canvas.css` bundle stays in sync across both surfaces.
-
-**Prompt loop commands fail in a closed-editor workflow**
-
-How to fix:
-- open the workspace in VS Code or Cursor
-- make sure the extension is installed and running
+- **Need a cell ID:** `agent-repl cat notebook.ipynb --no-outputs`
+- **Notebook still busy:** `agent-repl status notebook.ipynb`
+- **No workspace kernel:** create a `.venv` with `ipykernel`, or pass `--kernel /path/to/python`
+- **Stale CLI:** `uv tool install /path/to/agent-repl --reinstall`
+- **Stale extension:** rebuild with `cd extension && npm run compile`, repackage the VSIX, reinstall, then `agent-repl reload --pretty`

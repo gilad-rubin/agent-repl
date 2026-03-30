@@ -22,7 +22,7 @@ function loadRoutesModule({ vscode, resolver, queue }) {
         }
         if (request.endsWith('/notebook/identity')) {
             return {
-                getCellId: () => undefined,
+                getCellId: () => 'cell-1',
                 ensureIds: async () => {},
                 resolveCell: () => 0,
                 withCellId: (cellId) => ({ custom: { 'agent-repl': { cell_id: cellId } } }),

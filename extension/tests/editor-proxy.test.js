@@ -48,6 +48,44 @@ function loadProxyModule() {
 
 const { DaemonProxy } = loadProxyModule();
 
+test('loadContents includes the active notebook path in the contents message', async () => {
+    const postedMessages = [];
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    proxy.httpPost = async (endpoint, body) => {
+        assert.equal(endpoint, '/api/notebooks/contents');
+        assert.deepEqual(body, { path: 'notebooks/test3.ipynb' });
+        return {
+            cells: [{
+                index: 0,
+                cell_id: 'cell-1',
+                cell_type: 'code',
+                source: 'print("hello")',
+                outputs: [],
+                execution_count: null,
+                display_number: null,
+            }],
+        };
+    };
+    proxy.syncLsp = () => {};
+
+    await proxy.loadContents('req-contents');
+
+    assert.equal(postedMessages.length, 1);
+    assert.equal(postedMessages[0].type, 'contents');
+    assert.equal(postedMessages[0].requestId, 'req-contents');
+    assert.equal(postedMessages[0].path, 'notebooks/test3.ipynb');
+});
+
 test('handleExecuteCell persists a source override before starting the cell', async () => {
     const postedMessages = [];
     const httpCalls = [];

@@ -40,6 +40,17 @@ class TestNotebookRequests(unittest.TestCase):
             {"path": "nb.ipynb", "source": "x = 1", "cell_type": "code", "at_index": -1},
         )
 
+    def test_insert_execute_request_preserves_zero_index(self):
+        request = NotebookInsertExecuteRequest.from_payload(
+            {"path": "nb.ipynb", "source": "x = 1", "at_index": 0}
+        )
+
+        self.assertEqual(request.at_index, 0)
+        self.assertEqual(
+            request.to_payload(),
+            {"path": "nb.ipynb", "source": "x = 1", "cell_type": "code", "at_index": 0},
+        )
+
     def test_execute_visible_cell_requires_cell_index_and_source(self):
         with self.assertRaisesRegex(ValueError, "Missing cell_index"):
             NotebookExecuteVisibleCellRequest.from_payload({"path": "nb.ipynb", "source": "x = 1"})

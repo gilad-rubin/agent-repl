@@ -42,8 +42,7 @@ export function sessionIdForWorkspaceState(
     context: vscode.ExtensionContext,
     workspaceRoot: string,
 ): string | undefined {
-    return context.workspaceState.get<string>(sessionStorageKey(workspaceRoot))
-        ?? context.workspaceState.get<string>(legacySessionStorageKey(workspaceRoot));
+    return context.workspaceState.get<string>(sessionStorageKey(workspaceRoot));
 }
 
 function workspaceExecutable(workspaceRoot: string, executable: string): string {
@@ -110,9 +109,7 @@ export class SessionAutoAttach implements vscode.Disposable {
         if (!workspaceRoot) {
             return;
         }
-        const storedSessionId =
-            this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot)) ??
-            this.context.workspaceState.get<string>(legacySessionStorageKey(workspaceRoot));
+        const storedSessionId = this.context.workspaceState.get<string>(sessionStorageKey(workspaceRoot));
         const preferredSessionId = storedSessionId ?? await this.findReusableSessionId(workspaceRoot);
         const result = await this.runCli(
             workspaceRoot,
@@ -133,12 +130,7 @@ export class SessionAutoAttach implements vscode.Disposable {
             throw new Error('session attach returned no session_id');
         }
         this.session = { workspaceRoot, sessionId };
-        const sessionKey = sessionStorageKey(workspaceRoot);
-        const legacyKey = legacySessionStorageKey(workspaceRoot);
-        await this.context.workspaceState.update(sessionKey, sessionId);
-        if (legacyKey !== sessionKey) {
-            await this.context.workspaceState.update(legacyKey, undefined);
-        }
+        await this.context.workspaceState.update(sessionStorageKey(workspaceRoot), sessionId);
         this.startHeartbeat();
     }
 
@@ -559,6 +551,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
     }
 
     private async executeCells(cells: readonly vscode.NotebookCell[], notebook: vscode.NotebookDocument): Promise<void> {
+        const targetCells = this.executionTargets(cells, notebook);
         const workspaceRoot = workspaceRootForPath(notebook.uri.fsPath);
         if (!workspaceRoot) {
             throw new Error(`No workspace root matched '${notebook.uri.fsPath}'`);
@@ -566,7 +559,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         const config = vscode.workspace.getConfiguration('agent-repl');
         const sessionId = this.sessionIdForWorkspace(workspaceRoot);
         await this.projectVisibleNotebook(workspaceRoot, config, notebook);
-        for (const cell of cells) {
+        for (const cell of targetCells) {
             if (cell.kind !== vscode.NotebookCellKind.Code) {
                 continue;
             }
@@ -596,6 +589,41 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             }
         }
         await notebook.save();
+    }
+
+    private executionTargets(
+        cells: readonly vscode.NotebookCell[],
+        notebook: vscode.NotebookDocument,
+    ): readonly vscode.NotebookCell[] {
+        if (cells.length > 0) {
+            return cells;
+        }
+        const editor = this.editorForNotebook(notebook);
+        if (!editor) {
+            return cells;
+        }
+        const selectedIndexes = new Set<number>();
+        for (const range of editor.selections ?? []) {
+            const start = Math.max(0, range.start);
+            const end = Math.min(notebook.cellCount, range.end);
+            for (let index = start; index < end; index += 1) {
+                selectedIndexes.add(index);
+            }
+        }
+        if (selectedIndexes.size === 0) {
+            return cells;
+        }
+        return [...selectedIndexes]
+            .sort((left, right) => left - right)
+            .map((index) => notebook.cellAt(index));
+    }
+
+    private editorForNotebook(notebook: vscode.NotebookDocument): vscode.NotebookEditor | undefined {
+        const activeEditor = vscode.window.activeNotebookEditor;
+        if (activeEditor?.notebook === notebook) {
+            return activeEditor;
+        }
+        return vscode.window.visibleNotebookEditors.find((candidate) => candidate.notebook === notebook);
     }
 
     private async projectVisibleNotebook(
@@ -1019,9 +1047,5 @@ async function runCliJson<T>(workspaceRoot: string, config: vscode.WorkspaceConf
 }
 
 function sessionStorageKey(workspaceRoot: string): string {
-    return `agent-repl.session:${workspaceRoot}`;
-}
-
-function legacySessionStorageKey(workspaceRoot: string): string {
     return `agent-repl.session:${workspaceRoot}`;
 }

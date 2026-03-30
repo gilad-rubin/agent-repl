@@ -14,7 +14,6 @@ from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
 from agent_repl.core.server import serve_forever
 from agent_repl.notebook_runtime_client import (
-    BridgeNotebookRuntimeAdapter,
     NotebookRuntimeClient,
     call_with_owner_session,
     resolve_owner_session_id,
@@ -40,18 +39,13 @@ def _client(workspace_hint: str | None = None) -> BridgeClient:
 def _core_client(workspace_hint: str | None = None, runtime_dir: str | None = None) -> CoreClient:
     """Get a fresh core client, ensuring the daemon is up to date."""
     workspace_root = os.path.realpath(workspace_hint or os.getcwd())
-    result = CoreClient.start(workspace_root, runtime_dir=runtime_dir)
-    if result.get("stale_restart"):
-        print(
-            f"Restarted stale daemon (PID {result.get('stale_pid')}, code updated)",
-            file=sys.stderr,
-        )
+    CoreClient.start(workspace_root, runtime_dir=runtime_dir)
     return CoreClient.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir)
 
 
 def _core_client_raw(workspace_hint: str | None = None, runtime_dir: str | None = None) -> CoreClient:
-    """Bare discover without freshness check — only for core stop/status diagnostics."""
-    return CoreClient.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir, allow_stale=True)
+    """Bare discover for core stop/status diagnostics."""
+    return CoreClient.discover(workspace_hint=workspace_hint, runtime_dir=runtime_dir)
 
 
 def _workspace_root() -> str:
@@ -60,12 +54,7 @@ def _workspace_root() -> str:
 
 def _notebook_client(path: str) -> NotebookRuntimeClient:
     workspace_root = _workspace_root()
-    result = CoreClient.start(workspace_root)
-    if result.get("stale_restart"):
-        print(
-            f"Restarted stale daemon (PID {result.get('stale_pid')}, code updated)",
-            file=sys.stderr,
-        )
+    CoreClient.start(workspace_root)
     return CoreClient.discover(workspace_hint=path)
 
 # ------------------------------------------------------------------
@@ -181,6 +170,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
             args.path,
             args.code,
             explicit_session_id=getattr(args, "session_id", None),
+            cell_type="code",
             wait=wait,
             timeout=timeout,
         )
@@ -217,6 +207,7 @@ def cmd_ix(args: argparse.Namespace) -> int:
             source,
             explicit_session_id=explicit_session_id,
             at_index=at_index,
+            cell_type="code",
             wait=wait,
             timeout=timeout,
         )
@@ -235,7 +226,7 @@ def cmd_ix(args: argparse.Namespace) -> int:
         cell_type = cell["cell_type"]
         source = cell["source"]
         if cell_type == "code":
-            kwargs = {"at_index": current_index, "wait": wait, "timeout": timeout}
+            kwargs = {"at_index": current_index, "cell_type": "code", "wait": wait, "timeout": timeout}
             if session_id:
                 kwargs["owner_session_id"] = session_id
             item_result = client.notebook_insert_execute(args.path, source, **kwargs)
@@ -762,84 +753,84 @@ def build_parser() -> argparse.ArgumentParser:
 
     # cat
     p = sub.add_parser("cat", help="Read notebook contents")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
     p.add_argument("--no-outputs", action="store_true", help="Show cell sources only, without outputs")
 
     # status
     p = sub.add_parser("status", help="Notebook execution status")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
 
     # edit
     p = sub.add_parser("edit", help="Edit notebook cells")
-    p.add_argument("path")
-    p.add_argument("--session-id", help="Collaboration session to attribute the edit to")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
+    p.add_argument("--session-id", help="Override session (default: reuses active human session)")
     esub = p.add_subparsers(dest="edit_command")
 
-    ep = esub.add_parser("replace-source")
-    ep.add_argument("-s", "--source")
-    ep.add_argument("--source-file")
-    ep.add_argument("--cell-id")
-    ep.add_argument("-i", "--index", type=int)
+    ep = esub.add_parser("replace-source", help="Replace the source of an existing cell")
+    ep.add_argument("-s", "--source", help="Cell source code (or pipe to stdin)")
+    ep.add_argument("--source-file", help="Read source from this file")
+    ep.add_argument("--cell-id", help="ID of the cell to update")
+    ep.add_argument("-i", "--index", type=int, help="Index of the cell to update")
 
-    ep = esub.add_parser("insert")
-    ep.add_argument("-s", "--source")
-    ep.add_argument("--source-file")
-    ep.add_argument("--cells-json")
-    ep.add_argument("--cells-file")
-    ep.add_argument("--cell-type", default="code")
-    ep.add_argument("--at-index", type=int, default=-1)
+    ep = esub.add_parser("insert", help="Insert one or more new cells")
+    ep.add_argument("-s", "--source", help="Source for a single cell (or pipe to stdin)")
+    ep.add_argument("--source-file", help="Read source from this file")
+    ep.add_argument("--cells-json", help="JSON array of cells: [{\"type\":\"code\",\"source\":\"...\"}]")
+    ep.add_argument("--cells-file", help="Read cells JSON array from this file")
+    ep.add_argument("--cell-type", default="code", help="Cell type when using -s/--source (default: code)")
+    ep.add_argument("--at-index", type=int, default=-1, help="Insert at this cell index (-1 = end)")
 
-    ep = esub.add_parser("delete")
-    ep.add_argument("--cell-id")
-    ep.add_argument("-i", "--index", type=int)
+    ep = esub.add_parser("delete", help="Delete a cell by ID or index")
+    ep.add_argument("--cell-id", help="ID of the cell to delete")
+    ep.add_argument("-i", "--index", type=int, help="Index of the cell to delete")
 
-    ep = esub.add_parser("move")
-    ep.add_argument("--cell-id")
-    ep.add_argument("-i", "--index", type=int)
-    ep.add_argument("--to-index", type=int, required=True)
+    ep = esub.add_parser("move", help="Move a cell to a new index")
+    ep.add_argument("--cell-id", help="ID of the cell to move")
+    ep.add_argument("-i", "--index", type=int, help="Current index of the cell to move")
+    ep.add_argument("--to-index", type=int, required=True, help="Destination index")
 
-    ep = esub.add_parser("clear-outputs")
-    ep.add_argument("--cell-id")
-    ep.add_argument("-i", "--index", type=int)
-    ep.add_argument("--all", action="store_true")
+    ep = esub.add_parser("clear-outputs", help="Clear outputs for a cell or all cells")
+    ep.add_argument("--cell-id", help="ID of the cell to clear")
+    ep.add_argument("-i", "--index", type=int, help="Index of the cell to clear")
+    ep.add_argument("--all", action="store_true", help="Clear outputs for all cells")
 
     # exec
     p = sub.add_parser("exec", help="Execute a cell by ID or run code")
-    p.add_argument("path")
-    p.add_argument("--session-id", help="Collaboration session to attribute the execution to")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
+    p.add_argument("--session-id", help="Override session (default: reuses active human session)")
     p.add_argument("--cell-id", help="ID of cell to execute")
-    p.add_argument("-c", "--code", help="Code to insert and execute")
+    p.add_argument("-c", "--code", help="Inline code to insert and execute (prefer ix for most cases)")
     p.add_argument("--no-wait", action="store_true", help="Return immediately without waiting for output")
     p.add_argument("--timeout", type=float, default=30, help="Seconds to wait for completion (default: 30)")
 
     # ix
-    p = sub.add_parser("ix", help="Insert and execute code")
-    p.add_argument("path")
-    p.add_argument("--session-id", help="Collaboration session to attribute the insert/execute to")
-    p.add_argument("-s", "--source")
-    p.add_argument("--source-file")
-    p.add_argument("--cells-json")
-    p.add_argument("--cells-file")
+    p = sub.add_parser("ix", help="Insert and execute code (recommended default)")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
+    p.add_argument("--session-id", help="Override session (default: reuses active human session)")
+    p.add_argument("-s", "--source", help="Code to execute (or pipe to stdin)")
+    p.add_argument("--source-file", help="Read source from this file")
+    p.add_argument("--cells-json", help="JSON array of cells for batch insert+execute")
+    p.add_argument("--cells-file", help="Read cells JSON array from this file")
     p.add_argument("--at-index", type=int, default=-1, help="Insert at this cell index (-1 = end)")
     p.add_argument("--no-wait", action="store_true", help="Return immediately without waiting for output")
     p.add_argument("--timeout", type=float, default=30, help="Seconds to wait for completion (default: 30)")
 
     # run-all
     p = sub.add_parser("run-all", help="Execute all cells")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
 
     # restart
     p = sub.add_parser("restart", help="Restart kernel")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
 
     # restart-run-all
     p = sub.add_parser("restart-run-all", help="Restart kernel and run all cells")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
 
     # new
     p = sub.add_parser("new", help="Create a new notebook")
-    p.add_argument("path")
-    p.add_argument("--cells-json")
+    p.add_argument("path", help="Path for the new .ipynb notebook file")
+    p.add_argument("--cells-json", help="JSON array of starter cells (created, not auto-executed)")
     p.add_argument("--kernel", help="Python executable path (e.g. /opt/miniconda3/bin/python3 or python3)")
     p.add_argument("--open", action="store_true", help="Open the notebook after creating it")
     p.add_argument("--target", choices=["vscode", "browser"], default="vscode", help="Where to open with --open (default: vscode)")
@@ -848,7 +839,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # open
     p = sub.add_parser("open", help="Open an existing notebook")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
     p.add_argument("--target", choices=["vscode", "browser"], default="vscode", help="Where to open it (default: vscode)")
     p.add_argument("--editor", choices=["canvas", "jupyter"], default="canvas", help="Editor to use (default: canvas)")
     p.add_argument("--browser-url", help="Standalone browser canvas URL to use when --target browser")
@@ -858,21 +849,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     # select-kernel
     p = sub.add_parser("select-kernel", help="Select kernel for a notebook")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
     p.add_argument("--kernel-id", help="Python executable path or name (e.g. /opt/miniconda3/bin/python3 or python3)")
     p.add_argument("--interactive", action="store_true", help="Open the VS Code kernel picker instead of defaulting to the workspace .venv")
     p.add_argument("--extension", default="ms-toolsai.jupyter", help="Extension ID")
 
     # prompts
     p = sub.add_parser("prompts", help="List prompt cells")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
 
     # respond
     p = sub.add_parser("respond", help="Respond to a prompt cell")
-    p.add_argument("path")
+    p.add_argument("path", help="Path to the .ipynb notebook file")
     p.add_argument("--to", required=True, help="Prompt cell ID")
-    p.add_argument("-s", "--source")
-    p.add_argument("--source-file")
+    p.add_argument("-s", "--source", help="Response code (or pipe to stdin)")
+    p.add_argument("--source-file", help="Read source from this file")
 
     # core
     p = sub.add_parser("core", help=argparse.SUPPRESS, description="Internal core daemon diagnostics")

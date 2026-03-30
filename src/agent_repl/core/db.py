@@ -7,7 +7,6 @@ import sqlite3
 import time
 from typing import Any
 
-SCHEMA_VERSION = 2
 DB_FILENAME = "core-state.db"
 ACTIVITY_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
@@ -26,18 +25,8 @@ def open_db(workspace_root: str) -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER NOT NULL
-        )
-    """)
-    row = conn.execute("SELECT version FROM schema_version").fetchone()
-    if row is None:
-        _create_tables(conn)
-        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-        conn.commit()
-    elif row["version"] < SCHEMA_VERSION:
-        _migrate(conn, row["version"])
+    _create_tables(conn)
+    conn.commit()
 
 
 def _create_tables(conn: sqlite3.Connection) -> None:
@@ -159,34 +148,6 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             ON executions(status);
     """)
 
-
-def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
-    if from_version < 2:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS executions (
-                execution_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                path TEXT NOT NULL,
-                runtime_id TEXT NOT NULL,
-                cell_id TEXT NOT NULL,
-                cell_index INTEGER NOT NULL,
-                source_preview TEXT NOT NULL,
-                owner TEXT NOT NULL,
-                session_id TEXT,
-                operation TEXT NOT NULL,
-                outputs TEXT,
-                execution_count INTEGER,
-                error TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_executions_status
-                ON executions(status);
-        """)
-    conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
-    conn.commit()
-
-
 # -----------------------------------------------------------------------
 # Bulk persistence — mirrors the current persist() pattern
 # -----------------------------------------------------------------------
@@ -204,14 +165,13 @@ def persist_all(
 ) -> None:
     """Write all operational state to SQLite in a single transaction."""
     with conn:
-        _upsert_sessions(conn, sessions)
-        _upsert_documents(conn, documents)
-        _upsert_branches(conn, branches)
-        _upsert_runtimes(conn, runtimes)
-        _upsert_runs(conn, runs)
+        _replace_sessions(conn, sessions)
+        _replace_documents(conn, documents)
+        _replace_branches(conn, branches)
+        _replace_runtimes(conn, runtimes)
+        _replace_runs(conn, runs)
         _replace_activity(conn, activity)
-        if executions is not None:
-            _upsert_executions(conn, executions)
+        _replace_executions(conn, executions or [])
 
 
 def load_all(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
@@ -275,7 +235,8 @@ def _deserialize_json_fields(table: str, record: dict[str, Any]) -> None:
             record["outputs"] = None
 
 
-def _upsert_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) -> None:
+def _replace_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM sessions")
     for s in sessions:
         conn.execute("""
             INSERT OR REPLACE INTO sessions
@@ -289,7 +250,8 @@ def _upsert_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) -
         ))
 
 
-def _upsert_documents(conn: sqlite3.Connection, documents: list[dict[str, Any]]) -> None:
+def _replace_documents(conn: sqlite3.Connection, documents: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM documents")
     for d in documents:
         conn.execute("""
             INSERT OR REPLACE INTO documents
@@ -305,7 +267,8 @@ def _upsert_documents(conn: sqlite3.Connection, documents: list[dict[str, Any]])
         ))
 
 
-def _upsert_branches(conn: sqlite3.Connection, branches: list[dict[str, Any]]) -> None:
+def _replace_branches(conn: sqlite3.Connection, branches: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM branches")
     for b in branches:
         conn.execute("""
             INSERT OR REPLACE INTO branches
@@ -326,7 +289,8 @@ def _upsert_branches(conn: sqlite3.Connection, branches: list[dict[str, Any]]) -
         ))
 
 
-def _upsert_runtimes(conn: sqlite3.Connection, runtimes: list[dict[str, Any]]) -> None:
+def _replace_runtimes(conn: sqlite3.Connection, runtimes: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM runtimes")
     for r in runtimes:
         conn.execute("""
             INSERT OR REPLACE INTO runtimes
@@ -342,7 +306,8 @@ def _upsert_runtimes(conn: sqlite3.Connection, runtimes: list[dict[str, Any]]) -
         ))
 
 
-def _upsert_runs(conn: sqlite3.Connection, runs: list[dict[str, Any]]) -> None:
+def _replace_runs(conn: sqlite3.Connection, runs: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM runs")
     for r in runs:
         conn.execute("""
             INSERT OR REPLACE INTO runs
@@ -380,7 +345,8 @@ def _replace_activity(conn: sqlite3.Connection, activity: list[dict[str, Any]]) 
         ))
 
 
-def _upsert_executions(conn: sqlite3.Connection, executions: list[dict[str, Any]]) -> None:
+def _replace_executions(conn: sqlite3.Connection, executions: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM executions")
     for e in executions:
         conn.execute("""
             INSERT OR REPLACE INTO executions
@@ -396,38 +362,3 @@ def _upsert_executions(conn: sqlite3.Connection, executions: list[dict[str, Any]
             e.get("execution_count"), e.get("error"),
             e["created_at"], e["updated_at"],
         ))
-
-
-def migrate_from_json(conn: sqlite3.Connection, json_path: str) -> bool:
-    """Import state from an existing JSON state file, if present.
-
-    Returns True if migration occurred, False if no JSON file was found.
-    """
-    if not os.path.exists(json_path):
-        return False
-    try:
-        with open(json_path) as fh:
-            data = json.load(fh)
-    except (json.JSONDecodeError, OSError):
-        return False
-    if not isinstance(data, dict):
-        return False
-
-    persist_all(
-        conn,
-        sessions=data.get("sessions", []),
-        documents=data.get("documents", []),
-        branches=data.get("branches", []),
-        runtimes=data.get("runtimes", []),
-        runs=data.get("runs", []),
-        activity=data.get("activity", []),
-    )
-
-    # Rename the old JSON file as a backup
-    backup_path = json_path + ".backup"
-    try:
-        os.rename(json_path, backup_path)
-    except OSError:
-        pass
-
-    return True

@@ -90,7 +90,7 @@ agent-repl ix analysis.ipynb --cells-json '[{"type":"markdown","source":"# Step 
 Notes:
 
 - waits for completion by default
-- `--no-wait` returns after the execution record is created and keeps the older fire-and-forget behavior
+- `--no-wait` returns after the execution record is created
 - `--at-index` controls insertion point; `-1` means append
 - when `--session-id` is omitted, `ix` reuses the active human workspace session when possible
 - `--session-id` overrides the default session reuse and attributes the run to that collaboration session
@@ -139,7 +139,7 @@ Notes:
 - `exec --cell-id` reruns an existing cell
 - `exec -c` inserts a real persistent code cell and runs it
 - when `--session-id` is omitted, `exec` reuses the active human workspace session when possible
-- `--session-id` overrides the default session reuse and attributes the execution to that collaboration session
+- `--session-id` attributes the execution to that collaboration session
 
 ### `cat`
 
@@ -151,8 +151,7 @@ agent-repl cat PATH [--no-outputs]
 
 Use this when you need:
 
-- live `cell_id` values
-- fallback ids like `index-1` when the notebook is closed and no live stable id is available
+- live `cell_id` values from the notebook
 - a source or output inspection pass
 - prompt metadata
 
