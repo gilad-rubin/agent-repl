@@ -3434,32 +3434,43 @@ function App() {
 
       if (message.type === 'activity-update') {
         const current = stateRef.current;
-        const nextCells = [...current.cells];
-        let cellsChanged = false;
 
+        // Collect per-cell patches from activity events. We apply these via a
+        // functional setCells updater so that a concurrent insert (which may
+        // still be inside a startTransition) is never clobbered by a stale
+        // snapshot of the cell array.
+        const cellPatches = new Map<string, { replace?: NotebookCell; outputs?: NotebookOutput[] }>();
         for (const eventItem of (message.events ?? []) as ActivityEvent[]) {
           const eventType = eventItem.event_type ?? eventItem.type;
           const cell = eventItem.data?.cell;
-          const cellIndex = nextCells.findIndex(
-            (entry) => entry.cell_id === eventItem.cell_id,
-          );
+          const cellId = eventItem.cell_id;
+          if (!cellId) continue;
 
-          if (eventType === 'cell-source-updated' && cell && cellIndex >= 0) {
-            nextCells[cellIndex] = cell;
-            cellsChanged = true;
+          if (eventType === 'cell-source-updated' && cell) {
+            cellPatches.set(cellId, { replace: cell });
           } else if (
             (eventType === 'cell-output-appended' ||
               eventType === 'cell-outputs-updated') &&
-            cell &&
-            cellIndex >= 0
+            cell
           ) {
-            nextCells[cellIndex] = {
-              ...nextCells[cellIndex],
-              ...cell,
-              outputs: cell.outputs ?? nextCells[cellIndex].outputs,
-            };
-            cellsChanged = true;
+            cellPatches.set(cellId, { outputs: cell.outputs ?? undefined, replace: cell });
           }
+        }
+
+        if (cellPatches.size > 0) {
+          setCells((prevCells) => {
+            let changed = false;
+            const patched = prevCells.map((entry) => {
+              const patch = cellPatches.get(entry.cell_id);
+              if (!patch) return entry;
+              changed = true;
+              if (patch.outputs !== undefined) {
+                return { ...entry, ...patch.replace, outputs: patch.outputs ?? entry.outputs };
+              }
+              return patch.replace ?? entry;
+            });
+            return changed ? patched : prevCells;
+          });
         }
 
         const activityExecution = reduceActivityExecution(current, (message.events ?? []) as ActivityEvent[]);
@@ -3511,9 +3522,6 @@ function App() {
         if (activityExecution.needsFullReload) {
           sendRequest({ type: 'load-contents' });
         } else {
-          if (cellsChanged) {
-            applyCells(nextCells);
-          }
           setQueuedIds(activityExecution.buckets.queuedIds);
           setExecutingIds(activityExecution.buckets.executingIds);
           setPausedCellIds(activityExecution.buckets.pausedCellIds);
