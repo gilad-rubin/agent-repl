@@ -3421,14 +3421,8 @@ function App() {
             return next;
           });
         }
-        if (message.type === 'execute-failed') {
-          setErrorMessage(
-            typeof message.message === 'string' && message.message.trim()
-              ? message.message
-              : 'Execution failed.',
-          );
-          setErrorIsConflict(false);
-        }
+        // Cell execution errors (NameError, etc.) show in the cell output —
+        // don't surface them as a top-level notebook banner.
         return;
       }
 
