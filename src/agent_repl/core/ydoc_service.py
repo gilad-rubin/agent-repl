@@ -61,6 +61,13 @@ class YDocService:
         self._index_to_id[path] = idx_to_id
         return ynb
 
+    def has_cells(self, path: str) -> bool:
+        """Return True if the YDoc for this path already has cells loaded."""
+        ynb = self._documents.get(path)
+        if ynb is None:
+            return False
+        return len(ynb.ycells) > 0
+
     def _rebuild_id_map(self, path: str) -> None:
         """Rebuild bidirectional cell ID mapping from current YDoc state."""
         cells = self.get_cells(path)

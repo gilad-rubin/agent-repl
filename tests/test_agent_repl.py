@@ -686,6 +686,62 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(contents_status, 200)
         self.assertEqual(len(contents_body["cells"]), 1)
 
+    def test_ydoc_shadow_stays_in_sync_after_edit_operations(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            self.state.notebook_create(
+                "notebooks/ydoc-sync.ipynb",
+                cells=[
+                    {"type": "code", "source": "a = 1"},
+                    {"type": "code", "source": "b = 2"},
+                    {"type": "code", "source": "c = 3"},
+                ],
+                kernel_id=_python_with_ipykernel(),
+            )
+            relative_path = "notebooks/ydoc-sync.ipynb"
+
+            # Verify initial shadow load
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(len(ydoc_cells), 3)
+            self.assertEqual(ydoc_cells[0]["source"], "a = 1")
+
+            # Replace source
+            self.state.notebook_edit(
+                relative_path,
+                [{"op": "replace-source", "cell_index": 0, "source": "a = 10"}],
+            )
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(ydoc_cells[0]["source"], "a = 10")
+
+            # Insert cell
+            self.state.notebook_edit(
+                relative_path,
+                [{"op": "insert", "cell_type": "code", "source": "d = 4", "at_index": 1}],
+            )
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(len(ydoc_cells), 4)
+            self.assertEqual(ydoc_cells[1]["source"], "d = 4")
+
+            # Delete cell
+            self.state.notebook_edit(
+                relative_path,
+                [{"op": "delete", "cell_index": 1}],
+            )
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(len(ydoc_cells), 3)
+            self.assertEqual(ydoc_cells[0]["source"], "a = 10")
+            self.assertEqual(ydoc_cells[1]["source"], "b = 2")
+
+            # Move cell
+            self.state.notebook_edit(
+                relative_path,
+                [{"op": "move", "cell_index": 0, "to_index": 2}],
+            )
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(len(ydoc_cells), 3)
+            # After move(0,2): b, c, a
+            self.assertEqual(ydoc_cells[0]["source"], "b = 2")
+            self.assertEqual(ydoc_cells[2]["source"], "a = 10")
+
     def test_notebook_insert_execute_clamps_out_of_range_index_for_blank_headless_notebook(self):
         with mock.patch.object(self.state, "_projection_client", return_value=None):
             create_body, create_status = self.state.notebook_create(

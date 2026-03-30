@@ -28,6 +28,7 @@ from agent_repl.core.notebook_execution_service import NotebookExecutionService
 from agent_repl.core.notebook_mutation_service import NotebookMutationService
 from agent_repl.core.notebook_read_service import NotebookReadService
 from agent_repl.core.notebook_write_service import NotebookWriteService
+from agent_repl.core.ydoc_service import YDocService
 
 
 CORE_VERSION = "0.1.0"
@@ -337,6 +338,7 @@ class CoreState:
     _notebook_mutation_service: NotebookMutationService = field(init=False, repr=False)
     _notebook_read_service: NotebookReadService = field(init=False, repr=False)
     _notebook_write_service: NotebookWriteService = field(init=False, repr=False)
+    _ydoc_service: YDocService = field(init=False, repr=False)
     _db: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -366,6 +368,7 @@ class CoreState:
         self._notebook_mutation_service = NotebookMutationService(self)
         self._notebook_read_service = NotebookReadService(self)
         self._notebook_write_service = NotebookWriteService(self)
+        self._ydoc_service = YDocService()
         self._recompute_counts()
 
     def _next_activity_timestamp(self) -> float:
@@ -1292,6 +1295,10 @@ class CoreState:
         changed = False
         for index, cell in enumerate(notebook.cells):
             changed = self._ensure_cell_identity(cell, index) or changed
+        # Shadow-load into YDoc if not already populated
+        relative_path = os.path.relpath(real_path, self.workspace_root)
+        if not self._ydoc_service.has_cells(relative_path):
+            self._sync_notebook_to_ydoc(relative_path, notebook)
         return notebook, created or changed
 
     def _save_notebook(self, real_path: str, notebook: Any) -> None:
@@ -1312,6 +1319,15 @@ class CoreState:
             except OSError:
                 pass
             raise
+        # Keep YDoc shadow in sync after every save
+        relative_path = os.path.relpath(real_path, self.workspace_root)
+        self._sync_notebook_to_ydoc(relative_path, notebook)
+
+    def _sync_notebook_to_ydoc(self, relative_path: str, notebook: Any) -> None:
+        """Sync an nbformat notebook into the YDoc shadow."""
+        cells = [dict(cell) for cell in notebook.cells]
+        self._ydoc_service.close(relative_path)
+        self._ydoc_service.load_from_nbformat(relative_path, {"cells": cells})
 
     def _ensure_cell_identity(self, cell: Any, index: int) -> bool:
         metadata = dict(getattr(cell, "metadata", {}) or {})
