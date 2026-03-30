@@ -129,6 +129,56 @@ def create_mcp_server(state: Any) -> FastMCP:
         """List all active runtimes in the workspace."""
         return state.list_runtimes_payload()
 
+    @mcp.tool
+    def start_runtime(runtime_id: str, mode: str, label: str | None = None, environment: str | None = None, document_path: str | None = None, ttl_seconds: int | None = None) -> dict[str, Any]:
+        """Start or register a new runtime."""
+        return state.start_runtime(runtime_id=runtime_id, mode=mode, label=label, environment=environment, document_path=document_path, ttl_seconds=ttl_seconds)
+
+    @mcp.tool
+    def stop_runtime(runtime_id: str) -> dict[str, Any]:
+        """Stop a runtime, draining and shutting down its kernel."""
+        body, status = state.stop_runtime(runtime_id)
+        return body
+
+    @mcp.tool
+    def recover_runtime(runtime_id: str) -> dict[str, Any]:
+        """Recover a runtime by restarting its kernel."""
+        body, status = state.recover_runtime(runtime_id)
+        return body
+
+    @mcp.tool
+    def promote_runtime(runtime_id: str, mode: str = "shared") -> dict[str, Any]:
+        """Promote an ephemeral runtime to shared or pinned."""
+        body, status = state.promote_runtime(runtime_id, mode=mode)
+        return body
+
+    @mcp.tool
+    def discard_runtime(runtime_id: str) -> dict[str, Any]:
+        """Discard an ephemeral runtime, stopping and reaping it."""
+        body, status = state.discard_runtime(runtime_id)
+        return body
+
+    # ------------------------------------------------------------------
+    # Run tools
+    # ------------------------------------------------------------------
+
+    @mcp.tool
+    def list_runs() -> dict[str, Any]:
+        """List all runs in the workspace."""
+        return state.list_runs_payload()
+
+    @mcp.tool
+    def start_run(run_id: str, runtime_id: str, target_type: str, target_ref: str, kind: str) -> dict[str, Any]:
+        """Start a new run targeting a document, node, or branch."""
+        body, status = state.start_run(run_id=run_id, runtime_id=runtime_id, target_type=target_type, target_ref=target_ref, kind=kind)
+        return body
+
+    @mcp.tool
+    def finish_run(run_id: str, status: str) -> dict[str, Any]:
+        """Finish a run with a final status."""
+        body, http_status = state.finish_run(run_id, status)
+        return body
+
     # ------------------------------------------------------------------
     # Document tools
     # ------------------------------------------------------------------
