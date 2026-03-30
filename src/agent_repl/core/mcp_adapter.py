@@ -153,6 +153,94 @@ def create_mcp_server(state: Any) -> FastMCP:
         """List all sessions in the workspace."""
         return state.list_sessions_payload()
 
+    @mcp.tool
+    def start_session(actor: str, client: str, session_id: str, label: str | None = None, capabilities: list[str] | None = None) -> dict[str, Any]:
+        """Start a new collaboration session."""
+        return state.start_session(actor, client, label, session_id, capabilities)
+
+    @mcp.tool
+    def resolve_preferred_session(actor: str = "human") -> dict[str, Any]:
+        """Resolve the preferred active session for an actor type."""
+        return state.resolve_preferred_session(actor)
+
+    @mcp.tool
+    def touch_session(session_id: str) -> dict[str, Any]:
+        """Touch a session to refresh its liveness timestamp."""
+        body, status = state.touch_session(session_id)
+        return body
+
+    @mcp.tool
+    def detach_session(session_id: str) -> dict[str, Any]:
+        """Detach a session, marking it as inactive but not ended."""
+        body, status = state.detach_session(session_id)
+        return body
+
+    @mcp.tool
+    def end_session(session_id: str) -> dict[str, Any]:
+        """End a session permanently."""
+        body, status = state.end_session(session_id)
+        return body
+
+    # ------------------------------------------------------------------
+    # Presence tools
+    # ------------------------------------------------------------------
+
+    @mcp.tool
+    def upsert_presence(session_id: str, path: str, activity: str, cell_id: str | None = None, cell_index: int | None = None) -> dict[str, Any]:
+        """Upsert notebook presence for a session (what the user is doing and where)."""
+        body, status = state.upsert_notebook_presence(session_id=session_id, path=path, activity=activity, cell_id=cell_id, cell_index=cell_index)
+        return body
+
+    @mcp.tool
+    def clear_presence(session_id: str, path: str | None = None) -> dict[str, Any]:
+        """Clear notebook presence for a session, optionally scoped to a path."""
+        body, status = state.clear_notebook_presence(session_id=session_id, path=path)
+        return body
+
+    # ------------------------------------------------------------------
+    # Branch tools
+    # ------------------------------------------------------------------
+
+    @mcp.tool
+    def start_branch(branch_id: str, document_id: str, owner_session_id: str | None = None, parent_branch_id: str | None = None, title: str | None = None, purpose: str | None = None) -> dict[str, Any]:
+        """Start a new branch for a document."""
+        body, status = state.start_branch(branch_id=branch_id, document_id=document_id, owner_session_id=owner_session_id, parent_branch_id=parent_branch_id, title=title, purpose=purpose)
+        return body
+
+    @mcp.tool
+    def finish_branch(branch_id: str, status: str) -> dict[str, Any]:
+        """Finish a branch with a final status."""
+        body, http_status = state.finish_branch(branch_id, status)
+        return body
+
+    @mcp.tool
+    def request_branch_review(branch_id: str, requested_by_session_id: str, note: str | None = None) -> dict[str, Any]:
+        """Request a review for a branch."""
+        body, status = state.request_branch_review(branch_id=branch_id, requested_by_session_id=requested_by_session_id, note=note)
+        return body
+
+    @mcp.tool
+    def resolve_branch_review(branch_id: str, resolved_by_session_id: str, resolution: str, note: str | None = None) -> dict[str, Any]:
+        """Resolve a branch review with a decision."""
+        body, status = state.resolve_branch_review(branch_id=branch_id, resolved_by_session_id=resolved_by_session_id, resolution=resolution, note=note)
+        return body
+
+    # ------------------------------------------------------------------
+    # Lease tools
+    # ------------------------------------------------------------------
+
+    @mcp.tool
+    def acquire_cell_lease(session_id: str, path: str, cell_id: str | None = None, cell_index: int | None = None, kind: str = "edit", ttl_seconds: float | None = None) -> dict[str, Any]:
+        """Acquire an edit lease on a notebook cell."""
+        body, status = state.acquire_cell_lease(session_id=session_id, path=path, cell_id=cell_id, cell_index=cell_index, kind=kind, ttl_seconds=ttl_seconds)
+        return body
+
+    @mcp.tool
+    def release_cell_lease(session_id: str, path: str, cell_id: str | None = None, cell_index: int | None = None) -> dict[str, Any]:
+        """Release an edit lease on a notebook cell."""
+        body, status = state.release_cell_lease(session_id=session_id, path=path, cell_id=cell_id, cell_index=cell_index)
+        return body
+
     # ------------------------------------------------------------------
     # Resources
     # ------------------------------------------------------------------
