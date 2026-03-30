@@ -632,6 +632,7 @@ class CoreState:
                 runtimes=[r.payload() for r in self.runtime_records.values()],
                 runs=[r.payload() for r in self.run_records.values()],
                 activity=[r.payload() for r in self.activity_records],
+                executions=list(self.execution_records.values()),
             )
 
     def touch_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -2274,6 +2275,11 @@ def _load_or_create_state(
             for record in data.get("activity", [])
             if isinstance(record, dict) and isinstance(record.get("event_id"), str)
         ],
+        execution_records={
+            record["execution_id"]: record
+            for record in data.get("executions", [])
+            if isinstance(record, dict) and isinstance(record.get("execution_id"), str)
+        },
     )
     _normalize_restored_state(state)
     state.persist()
@@ -2297,4 +2303,8 @@ def _normalize_restored_state(state: CoreState) -> None:
         if run.status in {"queued", "running"}:
             run.status = "interrupted"
             run.updated_at = now
+    for execution in state.execution_records.values():
+        if execution.get("status") == "running":
+            execution["status"] = "interrupted"
+            execution["updated_at"] = now
     state._recompute_counts()

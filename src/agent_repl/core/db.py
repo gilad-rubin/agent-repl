@@ -6,7 +6,7 @@ import os
 import sqlite3
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DB_FILENAME = "core-state.db"
 
 
@@ -135,11 +135,52 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             ON activity(timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_activity_path
             ON activity(path);
+
+        CREATE TABLE IF NOT EXISTS executions (
+            execution_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            path TEXT NOT NULL,
+            runtime_id TEXT NOT NULL,
+            cell_id TEXT NOT NULL,
+            cell_index INTEGER NOT NULL,
+            source_preview TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            session_id TEXT,
+            operation TEXT NOT NULL,
+            outputs TEXT,
+            execution_count INTEGER,
+            error TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_executions_status
+            ON executions(status);
     """)
 
 
 def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
-    # Future migrations go here as elif chains.
+    if from_version < 2:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS executions (
+                execution_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                path TEXT NOT NULL,
+                runtime_id TEXT NOT NULL,
+                cell_id TEXT NOT NULL,
+                cell_index INTEGER NOT NULL,
+                source_preview TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                session_id TEXT,
+                operation TEXT NOT NULL,
+                outputs TEXT,
+                execution_count INTEGER,
+                error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_executions_status
+                ON executions(status);
+        """)
     conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
     conn.commit()
 
@@ -157,6 +198,7 @@ def persist_all(
     runtimes: list[dict[str, Any]],
     runs: list[dict[str, Any]],
     activity: list[dict[str, Any]],
+    executions: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write all operational state to SQLite in a single transaction."""
     with conn:
@@ -166,6 +208,8 @@ def persist_all(
         _upsert_runtimes(conn, runtimes)
         _upsert_runs(conn, runs)
         _replace_activity(conn, activity)
+        if executions is not None:
+            _upsert_executions(conn, executions)
 
 
 def load_all(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
@@ -177,6 +221,7 @@ def load_all(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
         "runtimes": _load_rows(conn, "runtimes"),
         "runs": _load_rows(conn, "runs"),
         "activity": _load_rows(conn, "activity", order_by="timestamp ASC"),
+        "executions": _load_rows(conn, "executions"),
     }
 
 
@@ -221,6 +266,11 @@ def _deserialize_json_fields(table: str, record: dict[str, Any]) -> None:
             record["data"] = json.loads(record["data"])
         except (ValueError, TypeError):
             record["data"] = None
+    if table == "executions" and isinstance(record.get("outputs"), str):
+        try:
+            record["outputs"] = json.loads(record["outputs"])
+        except (ValueError, TypeError):
+            record["outputs"] = None
 
 
 def _upsert_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) -> None:
@@ -319,6 +369,24 @@ def _replace_activity(conn: sqlite3.Connection, activity: list[dict[str, Any]]) 
             a.get("cell_id"), a.get("cell_index"),
             json.dumps(a["data"]) if a.get("data") else None,
             a["timestamp"],
+        ))
+
+
+def _upsert_executions(conn: sqlite3.Connection, executions: list[dict[str, Any]]) -> None:
+    for e in executions:
+        conn.execute("""
+            INSERT OR REPLACE INTO executions
+                (execution_id, status, path, runtime_id, cell_id, cell_index,
+                 source_preview, owner, session_id, operation,
+                 outputs, execution_count, error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            e["execution_id"], e["status"], e["path"], e["runtime_id"],
+            e["cell_id"], e["cell_index"], e["source_preview"], e["owner"],
+            e.get("session_id"), e["operation"],
+            json.dumps(e["outputs"]) if e.get("outputs") is not None else None,
+            e.get("execution_count"), e.get("error"),
+            e["created_at"], e["updated_at"],
         ))
 
 

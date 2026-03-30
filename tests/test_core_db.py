@@ -176,6 +176,115 @@ class TestMigrateFromJson(unittest.TestCase):
             conn.close()
 
 
+class TestExecutionsPersistence(unittest.TestCase):
+    def test_round_trip_executions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = open_db(tmpdir)
+            execution = {
+                "execution_id": "exec-1",
+                "status": "completed",
+                "path": "demo.ipynb",
+                "runtime_id": "rt-1",
+                "cell_id": "c1",
+                "cell_index": 0,
+                "source_preview": "print('hello')",
+                "owner": "human",
+                "session_id": "s1",
+                "operation": "execute-cell",
+                "outputs": [{"text": "hello"}],
+                "execution_count": 1,
+                "error": None,
+                "created_at": 1.0,
+                "updated_at": 2.0,
+            }
+            persist_all(
+                conn, sessions=[], documents=[], branches=[],
+                runtimes=[], runs=[], activity=[],
+                executions=[execution],
+            )
+
+            data = load_all(conn)
+            self.assertEqual(len(data["executions"]), 1)
+            e = data["executions"][0]
+            self.assertEqual(e["execution_id"], "exec-1")
+            self.assertEqual(e["status"], "completed")
+            self.assertEqual(e["outputs"], [{"text": "hello"}])
+            self.assertEqual(e["execution_count"], 1)
+            self.assertIsNone(e["error"])
+            conn.close()
+
+    def test_upsert_updates_execution_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = open_db(tmpdir)
+            execution = {
+                "execution_id": "exec-1",
+                "status": "running",
+                "path": "demo.ipynb",
+                "runtime_id": "rt-1",
+                "cell_id": "c1",
+                "cell_index": 0,
+                "source_preview": "x = 1",
+                "owner": "agent",
+                "session_id": None,
+                "operation": "execute-cell",
+                "created_at": 1.0,
+                "updated_at": 1.0,
+            }
+            persist_all(
+                conn, sessions=[], documents=[], branches=[],
+                runtimes=[], runs=[], activity=[],
+                executions=[execution],
+            )
+            execution["status"] = "completed"
+            execution["outputs"] = [{"text": "1"}]
+            execution["execution_count"] = 1
+            execution["updated_at"] = 2.0
+            persist_all(
+                conn, sessions=[], documents=[], branches=[],
+                runtimes=[], runs=[], activity=[],
+                executions=[execution],
+            )
+
+            data = load_all(conn)
+            self.assertEqual(len(data["executions"]), 1)
+            self.assertEqual(data["executions"][0]["status"], "completed")
+            conn.close()
+
+    def test_schema_migration_from_v1_adds_executions_table(self):
+        """Simulate a v1 database and verify migration adds executions."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a v1 database manually
+            import sqlite3
+            db_dir = os.path.join(tmpdir, ".agent-repl")
+            os.makedirs(db_dir, exist_ok=True)
+            db_path = os.path.join(db_dir, "core-state.db")
+            raw = sqlite3.connect(db_path)
+            raw.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+            raw.execute("INSERT INTO schema_version (version) VALUES (1)")
+            # Create minimal v1 tables so open_db doesn't fail
+            raw.executescript("""
+                CREATE TABLE sessions (session_id TEXT PRIMARY KEY);
+                CREATE TABLE documents (document_id TEXT PRIMARY KEY);
+                CREATE TABLE branches (branch_id TEXT PRIMARY KEY);
+                CREATE TABLE runtimes (runtime_id TEXT PRIMARY KEY);
+                CREATE TABLE runs (run_id TEXT PRIMARY KEY);
+                CREATE TABLE activity (event_id TEXT PRIMARY KEY);
+            """)
+            raw.commit()
+            raw.close()
+
+            conn = open_db(tmpdir)
+            # executions table should exist after migration
+            tables = [
+                row[0] for row in
+                conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            ]
+            self.assertIn("executions", tables)
+            version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+            self.assertEqual(version, 2)
+            conn.close()
+
+
 class TestPersistNoJsonFallback(unittest.TestCase):
     """persist() with _db set must NOT write to state_file."""
 
