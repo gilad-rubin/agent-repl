@@ -2,13 +2,9 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import type { CellSnapshot } from '../shared/notebookVirtualDocument';
 
-export type NotebookCellSnapshot = {
-    index: number;
-    cell_id: string;
-    cell_type: 'code' | 'markdown' | 'raw';
-    source: string;
-};
+export type NotebookCellSnapshot = CellSnapshot;
 
 export type CellDiagnostic = {
     from: number;
