@@ -69,6 +69,46 @@ class YDocService:
         ynb.append_cell(cell_data)
         return True
 
+    def insert_cell(self, path: str, index: int, cell_data: dict[str, Any]) -> bool:
+        """Insert a cell at the given index via CRDT mutation."""
+        ynb = self._documents.get(path)
+        if ynb is None:
+            return False
+        cell_count = len(ynb.ycells)
+        if index < 0 or index > cell_count:
+            return False
+        if index == cell_count:
+            ynb.append_cell(cell_data)
+        else:
+            ynb.append_cell(cell_data)
+            ynb.ycells.move(cell_count, index)
+        return True
+
+    def remove_cell(self, path: str, index: int) -> bool:
+        """Remove the cell at the given index via CRDT mutation."""
+        ynb = self._documents.get(path)
+        if ynb is None:
+            return False
+        if index < 0 or index >= len(ynb.ycells):
+            return False
+        ynb.ycells.pop(index)
+        return True
+
+    def move_cell(self, path: str, from_index: int, to_index: int) -> bool:
+        """Move a cell from one position to another via CRDT mutation."""
+        ynb = self._documents.get(path)
+        if ynb is None:
+            return False
+        cell_count = len(ynb.ycells)
+        if from_index < 0 or from_index >= cell_count:
+            return False
+        if to_index < 0 or to_index >= cell_count:
+            return False
+        if from_index == to_index:
+            return True
+        ynb.ycells.move(from_index, to_index)
+        return True
+
     def get_update(self, path: str) -> bytes | None:
         """Get the current YDoc state as an update for syncing."""
         ynb = self._documents.get(path)
