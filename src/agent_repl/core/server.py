@@ -1985,6 +1985,29 @@ class CoreState:
         return self._execution_ledger_service.finish_run(run_id, status)
 
 
+def create_state(
+    workspace_root: str,
+    *,
+    runtime_dir: str,
+    token: str | None = None,
+) -> "CoreState":
+    """Create a ``CoreState`` backed by the workspace database.
+
+    This is the public entry point for callers that need a ready-to-use
+    state instance without starting the HTTP server (e.g. MCP stdio).
+    """
+    workspace_root = os.path.realpath(workspace_root)
+    runtime_dir = os.path.realpath(runtime_dir)
+    token = token or secrets.token_hex(24)
+    return _load_or_create_state(
+        workspace_root=workspace_root,
+        runtime_dir=runtime_dir,
+        token=token,
+        pid=os.getpid(),
+        started_at=time.time(),
+    )
+
+
 def serve_forever(
     workspace_root: str,
     *,
@@ -1998,16 +2021,9 @@ def serve_forever(
 
     from agent_repl.core.asgi import create_app
 
-    workspace_root = os.path.realpath(workspace_root)
+    state = create_state(workspace_root, runtime_dir=runtime_dir, token=token)
+    token = state.token
     runtime_dir = os.path.realpath(runtime_dir)
-    token = token or secrets.token_hex(24)
-    state = _load_or_create_state(
-        workspace_root=workspace_root,
-        runtime_dir=runtime_dir,
-        token=token,
-        pid=os.getpid(),
-        started_at=time.time(),
-    )
     Path(runtime_dir).mkdir(parents=True, exist_ok=True)
 
     # Resolve an ephemeral port before uvicorn starts so we can write

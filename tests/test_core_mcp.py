@@ -144,5 +144,25 @@ class TestMcpToolDelegation(unittest.TestCase):
         self.assertEqual(result.structured_content["cells"], [{"id": "c1"}])
 
 
+class TestMcpStdioWiring(unittest.TestCase):
+    def test_create_state_is_importable(self):
+        """The public create_state helper used by mcp-stdio is available."""
+        from agent_repl.core.server import create_state
+        self.assertTrue(callable(create_state))
+
+    def test_cli_parser_accepts_mcp_stdio(self):
+        """The argparser recognises the mcp-stdio subcommand."""
+        from agent_repl.cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["core", "mcp-stdio"])
+        self.assertEqual(args.core_command, "mcp-stdio")
+
+    def test_cli_parser_mcp_stdio_with_workspace_root(self):
+        from agent_repl.cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["core", "mcp-stdio", "--workspace-root", "/tmp/ws"])
+        self.assertEqual(args.workspace_root, "/tmp/ws")
+
+
 if __name__ == "__main__":
     unittest.main()
