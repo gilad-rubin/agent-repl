@@ -8,6 +8,7 @@ import {
     positionToOffset,
     buildVirtualDocument,
 } from '../shared/notebookVirtualDocument';
+export { offsetToPosition, positionToOffset };
 import type {
     CellSnapshot,
     CellDiagnostic,
