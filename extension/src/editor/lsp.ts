@@ -2,19 +2,22 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import type { CellSnapshot } from '../shared/notebookVirtualDocument';
+import {
+    computeLineStarts,
+    offsetToPosition,
+    positionToOffset,
+    buildVirtualDocument,
+} from '../shared/notebookVirtualDocument';
+import type {
+    CellSnapshot,
+    CellDiagnostic,
+    DiagnosticsByCell,
+    VirtualCellSegment,
+    VirtualDocument,
+} from '../shared/notebookVirtualDocument';
 
 export type NotebookCellSnapshot = CellSnapshot;
-
-export type CellDiagnostic = {
-    from: number;
-    to: number;
-    severity: 'error' | 'warning' | 'info' | 'hint';
-    message: string;
-    source?: string;
-};
-
-export type DiagnosticsByCell = Record<string, CellDiagnostic[]>;
+export type { CellDiagnostic, DiagnosticsByCell };
 
 export type CellCompletionItem = {
     label: string;
@@ -90,23 +93,10 @@ type JsonRpcResponse = {
     error?: { code: number; message: string };
 };
 
-type VirtualCellSegment = {
-    cell_id: string;
-    index: number;
-    contentFrom: number;
-    contentTo: number;
-    source: string;
-    lineStarts: number[];
-};
-
-export type VirtualNotebookDocument = {
+export type VirtualNotebookDocument = VirtualDocument & {
     filePath: string;
     shadowFilePath: string;
     uri: string;
-    text: string;
-    lineStarts: number[];
-    codeCells: VirtualCellSegment[];
-    version: number;
 };
 
 const JSON_RPC_HEADER = '\r\n\r\n';
@@ -158,16 +148,6 @@ function pythonAnalysisSettings(): Record<string, unknown> {
     };
 }
 
-function computeLineStarts(text: string): number[] {
-    const starts = [0];
-    for (let i = 0; i < text.length; i += 1) {
-        if (text.charCodeAt(i) === 10) {
-            starts.push(i + 1);
-        }
-    }
-    return starts;
-}
-
 function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
 }
@@ -190,28 +170,6 @@ function virtualDocumentShadowPath(workspaceRoot: string, notebookPath: string):
         parsed.dir,
         `${parsed.base}.agent-repl.py`,
     );
-}
-
-export function positionToOffset(lineStarts: number[], textLength: number, position: LspPosition): number {
-    if (lineStarts.length === 0) {
-        return 0;
-    }
-    const lineIndex = clamp(position.line, 0, lineStarts.length - 1);
-    const lineStart = lineStarts[lineIndex];
-    const nextLineStart = lineIndex + 1 < lineStarts.length ? lineStarts[lineIndex + 1] : textLength;
-    return clamp(lineStart + position.character, lineStart, nextLineStart);
-}
-
-export function offsetToPosition(lineStarts: number[], textLength: number, offset: number): LspPosition {
-    const clampedOffset = clamp(offset, 0, textLength);
-    let lineIndex = 0;
-    while (lineIndex + 1 < lineStarts.length && lineStarts[lineIndex + 1] <= clampedOffset) {
-        lineIndex += 1;
-    }
-    return {
-        line: lineIndex,
-        character: clampedOffset - lineStarts[lineIndex],
-    };
 }
 
 function documentationToString(documentation: LspCompletionItem['documentation']): string | undefined {
@@ -270,40 +228,12 @@ export function buildVirtualNotebookDocument(
 ): VirtualNotebookDocument {
     const filePath = virtualDocumentPath(notebookPath);
     const shadowFilePath = virtualDocumentShadowPath(workspaceRoot, notebookPath);
-    const parts: string[] = [];
-    const codeCells: VirtualCellSegment[] = [];
-
-    for (const cell of cells) {
-        if (cell.cell_type !== 'code') {
-            continue;
-        }
-
-        const header = `# %% [agent-repl cell ${cell.cell_id}]\n`;
-        parts.push(header);
-        const contentFrom = parts.join('').length;
-        parts.push(cell.source);
-        const contentTo = contentFrom + cell.source.length;
-        parts.push('\n\n');
-
-        codeCells.push({
-            cell_id: cell.cell_id,
-            index: cell.index,
-            contentFrom,
-            contentTo,
-            source: cell.source,
-            lineStarts: computeLineStarts(cell.source),
-        });
-    }
-
-    const text = parts.join('');
+    const base = buildVirtualDocument(cells, version);
     return {
+        ...base,
         filePath,
         shadowFilePath,
         uri: vscode.Uri.file(filePath).toString(),
-        text,
-        lineStarts: computeLineStarts(text),
-        codeCells,
-        version,
     };
 }
 
