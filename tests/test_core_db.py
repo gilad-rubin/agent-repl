@@ -94,6 +94,7 @@ class TestPersistAndLoad(unittest.TestCase):
             conn.close()
 
     def test_round_trip_activity_with_data(self):
+        import time as _time
         with tempfile.TemporaryDirectory() as tmpdir:
             conn = open_db(tmpdir)
             persist_all(conn, sessions=[], documents=[], branches=[],
@@ -108,7 +109,7 @@ class TestPersistAndLoad(unittest.TestCase):
                 "cell_id": "c1",
                 "cell_index": 0,
                 "data": {"output": [1, 2, 3]},
-                "timestamp": 1.5,
+                "timestamp": _time.time(),
             }])
 
             data = load_all(conn)
@@ -134,6 +135,66 @@ class TestPersistAndLoad(unittest.TestCase):
             data = load_all(conn)
             self.assertEqual(len(data["sessions"]), 1)
             self.assertEqual(data["sessions"][0]["status"], "detached")
+            conn.close()
+
+
+class TestActivityTTL(unittest.TestCase):
+    def _make_event(self, event_id: str, timestamp: float) -> dict:
+        return {
+            "event_id": event_id,
+            "path": "demo.ipynb",
+            "type": "test-event",
+            "detail": "Test",
+            "actor": "human",
+            "session_id": "s1",
+            "runtime_id": None,
+            "cell_id": None,
+            "cell_index": None,
+            "data": None,
+            "timestamp": timestamp,
+        }
+
+    def test_old_activity_records_are_pruned_on_persist(self):
+        import time
+        from agent_repl.core.db import ACTIVITY_TTL_SECONDS
+
+        now = time.time()
+        old_ts = now - ACTIVITY_TTL_SECONDS - 3600  # 8 days ago
+        recent_ts = now - 3600  # 1 hour ago
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = open_db(tmpdir)
+            persist_all(
+                conn, sessions=[], documents=[], branches=[],
+                runtimes=[], runs=[],
+                activity=[
+                    self._make_event("old-1", old_ts),
+                    self._make_event("recent-1", recent_ts),
+                ],
+            )
+
+            data = load_all(conn)
+            self.assertEqual(len(data["activity"]), 1)
+            self.assertEqual(data["activity"][0]["event_id"], "recent-1")
+            conn.close()
+
+    def test_all_recent_records_survive_ttl_prune(self):
+        import time
+
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = open_db(tmpdir)
+            persist_all(
+                conn, sessions=[], documents=[], branches=[],
+                runtimes=[], runs=[],
+                activity=[
+                    self._make_event("e1", now - 100),
+                    self._make_event("e2", now - 50),
+                ],
+            )
+
+            data = load_all(conn)
+            self.assertEqual(len(data["activity"]), 2)
             conn.close()
 
 

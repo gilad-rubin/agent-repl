@@ -4,10 +4,12 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from typing import Any
 
 SCHEMA_VERSION = 2
 DB_FILENAME = "core-state.db"
+ACTIVITY_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 
 def open_db(workspace_root: str) -> sqlite3.Connection:
@@ -355,9 +357,15 @@ def _upsert_runs(conn: sqlite3.Connection, runs: list[dict[str, Any]]) -> None:
 
 
 def _replace_activity(conn: sqlite3.Connection, activity: list[dict[str, Any]]) -> None:
-    """Replace activity events: delete all, then insert fresh batch."""
+    """Replace activity events: delete all, then insert fresh batch.
+
+    Records older than ACTIVITY_TTL_SECONDS (7 days) are pruned.
+    """
     conn.execute("DELETE FROM activity")
+    cutoff = time.time() - ACTIVITY_TTL_SECONDS
     for a in activity:
+        if a.get("timestamp", 0) < cutoff:
+            continue
         conn.execute("""
             INSERT INTO activity
                 (event_id, path, type, detail, actor, session_id,
