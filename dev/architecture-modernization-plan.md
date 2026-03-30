@@ -2,7 +2,28 @@
 
 ## Status
 
-Proposed revision — 2026-03-29
+Updated 2026-03-29
+
+### Shipped
+
+- **ASGI host shell (Phase 3)**: Starlette app served by uvicorn (`src/agent_repl/core/asgi.py`), with `TokenAuthMiddleware` for auth. The old `ThreadingHTTPServer` handler has been fully removed.
+- **SQLite persistence (Phase 4)**: Operational state persisted to `{workspace}/.agent-repl/core-state.db` via `src/agent_repl/core/db.py` with WAL mode. First startup migrates any existing `core-state.json` to SQLite.
+- **FastMCP mount (Phase 5, partial)**: MCP server mounted at `/mcp/mcp` via `src/agent_repl/core/mcp_adapter.py`. MCP tools call through to `CoreState`. Mounted into the Starlette ASGI host with shared lifespan.
+
+### In Progress
+
+- Phase 0: Contract consolidation — shared pure helpers under `extension/src/shared/` are progressing; typed request/response models are partially in place.
+- Phase 1: Application service layer — `CoreState` extraction into focused services is ongoing.
+- Phase 2: Execution truth unification — daemon run ledger owns queued/running promotion; canvas renderer extraction of pure execution-bucket helpers is in progress.
+
+### Not Started
+
+- Phase 6: YDoc spike
+- Phase 7: Collaborative editing migration
+- Phase 6 (LSP): Notebook LSP standardization
+- Phase 7 (cleanup): Compatibility debt deletion
+
+### Original Review Context
 
 Reviewed against:
 
@@ -308,24 +329,14 @@ Do not:
 - keep optimistic running state once the execution ledger exists
 - keep separate queue semantics in `queue.ts`, `editor/proxy.ts`, and browser host code
 
-### Phase 3: Move to an ASGI Host Shell
+### Phase 3: Move to an ASGI Host Shell — SHIPPED
 
-Do this after contracts, service consolidation, and most execution truth work.
+Starlette ASGI app (`src/agent_repl/core/asgi.py`) served by uvicorn. `TokenAuthMiddleware` handles auth. The old `ThreadingHTTPServer` routing layer has been fully removed. Domain route modules still use the `(HTTPStatus, dict) | None` handler pattern; the ASGI app adapts them through a catch-all dispatcher. New routes should be added to the appropriate domain route module.
 
-Changes:
+Remaining work:
 
-1. Replace the raw `ThreadingHTTPServer` routing layer with an ASGI host shell.
-2. Keep the loopback + token-auth boundary.
-3. Keep the standalone browser proxy so browser JS never receives the daemon token.
-4. Preserve existing public JSON response shapes wherever possible.
-5. Mount the MCP adapter into the same ASGI host.
-6. Add a UI-specific stream endpoint only if the product clients still need one after MCP is in place.
-
-Why the ASGI host is worth it here:
-
-- typed models and middleware pay off immediately
-- one host can mount MCP and any remaining product routes together
-- it shrinks the “god handler” problem even before deeper collaboration work lands
+- Decompose the ASGI catch-all dispatcher into individual Starlette routes (see task E2).
+- Add a UI-specific stream endpoint only if the product clients still need one after MCP is in place.
 
 MCP note:
 
@@ -333,34 +344,33 @@ MCP note:
 - expose stable notebook/runtime tools, resources, and prompts through MCP
 - keep `agent-repl` collaboration sessions distinct from MCP transport sessions
 
-### Phase 4: Split Persistence Responsibilities
+### Phase 4: Split Persistence Responsibilities — SHIPPED
 
-Changes:
+SQLite persistence is live via `src/agent_repl/core/db.py`. Database at `{workspace}/.agent-repl/core-state.db` with WAL mode. First daemon startup migrates any existing `core-state.json` to SQLite (renamed to `.backup`). `CoreState` keeps in-memory dicts as working state; `persist()` syncs to SQLite when a `_db` connection is set, otherwise falls back to JSON for test compatibility.
 
-1. Move operational state to SQLite:
-   - sessions
-   - runtimes
-   - runs
-   - execution records
-   - activity events
-2. Keep the schema focused on actual operational state, not speculative future abstractions.
-3. If collaborative docs move to YDoc, store them using the YDoc persistence layer rather than inventing a parallel JSON blob format.
+Remaining work:
+
+- Persist execution records to SQLite (task A2).
+- Add SQL-level activity TTL (task A3).
+- Remove dead JSON fallback from `persist()` once migration confidence is high (task A1).
+- If collaborative docs move to YDoc, store them using the YDoc persistence layer rather than inventing a parallel JSON blob format.
 
 Important rule:
 
 - operational state and collaborative-document state are related, but they are not the same storage problem
 
-### Phase 5: Add FastMCP and Rationalize CLI/MCP Boundaries
+### Phase 5: Add FastMCP and Rationalize CLI/MCP Boundaries — PARTIALLY SHIPPED
 
-Do this once the ASGI shell and application services exist.
+FastMCP server is mounted at `/mcp/mcp` via `src/agent_repl/core/mcp_adapter.py`. MCP tools call through to the same `CoreState` methods as the CLI and REST API. The MCP app is mounted into the Starlette ASGI host with shared lifespan.
 
-Changes:
+Remaining work:
 
-1. Mount `FastMCP` as the MCP adapter over the shared application service layer.
-2. Expose stable notebook/runtime capabilities as tools/resources/prompts.
-3. Keep `stdio` available for local and spawned use cases.
-4. Decide which CLI flows should stay handcrafted and which can be schema-driven or thin wrappers over MCP-compatible services.
-5. Ensure there is no duplicated business logic between CLI commands and MCP tool handlers.
+- Add missing notebook MCP tools (task D1).
+- Add collaboration MCP tools (task D2).
+- Add runtime and run lifecycle MCP tools (task D3).
+- Wire MCP stdio transport for local and spawned use cases (task D4).
+- Update MCP tests for full tool parity (task D5).
+- Decide which CLI flows should stay handcrafted and which can be schema-driven or thin wrappers over MCP-compatible services.
 
 Decision rule:
 
