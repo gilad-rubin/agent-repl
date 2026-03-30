@@ -55,16 +55,19 @@ class NotebookWriteService:
         cell_index: int | None,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._run_locked_mutation(
-            path,
-            lambda real_path, relative_path: self.state._headless_notebook_execute_cell(
+        real_path, relative_path = self.state._resolve_document_path(path)
+        try:
+            payload = self.state._headless_notebook_execute_cell(
                 real_path,
                 relative_path,
                 cell_id=cell_id,
                 cell_index=cell_index,
                 owner_session_id=owner_session_id,
-            ),
-        )
+            )
+        except CollaborationConflictError as err:
+            return err.payload, HTTPStatus.CONFLICT
+        self.state._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
 
     def insert_execute(
         self,

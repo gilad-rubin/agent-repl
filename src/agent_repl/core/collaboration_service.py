@@ -13,6 +13,7 @@ from agent_repl.core.collaboration import (
     SESSION_STATUS_RANK,
     CollaborationConflictError,
 )
+from agent_repl.recovery import lease_conflict_recovery
 
 
 class CollaborationService:
@@ -170,6 +171,7 @@ class CollaborationService:
                 "operation": operation,
                 "suggested_branch": suggested_branch,
             },
+            "recovery": lease_conflict_recovery(has_suggested_branch=suggested_branch is not None),
         }
 
     def assert_cell_not_leased(

@@ -34,6 +34,7 @@ function loadLspModule() {
 }
 
 const {
+    buildWorkspaceSearchPaths,
     buildVirtualNotebookDocument,
     buildWorkspaceConfiguration,
     defaultWorkspaceSettings,
@@ -59,6 +60,7 @@ test('buildVirtualNotebookDocument keeps code cells in order and skips markdown 
     assert.equal(document.codeCells[1].cell_id, 'code-2');
     assert.equal(document.filePath, '/workspace/demo.ipynb.agent-repl.py');
     assert.equal(document.shadowFilePath, '/workspace/.agent-repl/pyright/demo.ipynb.agent-repl.py');
+    assert.equal(document.uri, 'file:///workspace/.agent-repl/pyright/demo.ipynb.agent-repl.py');
 });
 
 test('mapDiagnosticsToCells maps virtual-document diagnostics back to the owning cell offsets', () => {
@@ -106,19 +108,106 @@ test('offsetToPosition round-trips offsets inside the virtual notebook document'
     assert.equal(position.character >= 0, true);
 });
 
-test('workspace settings disable unused-expression warnings for notebook analysis', () => {
-    const settings = defaultWorkspaceSettings();
+test('workspace settings prefer notebook and workspace paths for notebook analysis', () => {
+    const searchPaths = buildWorkspaceSearchPaths('/workspace', '/workspace/notebooks/demo.ipynb');
+    assert.deepEqual(searchPaths, ['/workspace/notebooks', '/workspace']);
+
+    const settings = defaultWorkspaceSettings('/workspace', '/workspace/notebooks/demo.ipynb');
     const pythonAnalysis = settings.python.analysis;
 
     assert.equal(
         pythonAnalysis.diagnosticSeverityOverrides.reportUnusedExpression,
         'none',
     );
+    assert.deepEqual(
+        pythonAnalysis.extraPaths,
+        ['/workspace/notebooks', '/workspace'],
+    );
 
     const [analysisConfig] = buildWorkspaceConfiguration({
         items: [{ section: 'python.analysis' }],
-    });
+    }, settings);
     assert.deepEqual(analysisConfig, pythonAnalysis);
+});
+
+test('resolveDefinitionAt maps same-notebook definitions back to cell offsets', async () => {
+    const client = new PyrightNotebookLspClient(
+        '/workspace',
+        '/workspace/demo.ipynb',
+        () => {},
+        () => {},
+        'pyright-langserver',
+    );
+    const document = buildVirtualNotebookDocument('/workspace', '/workspace/demo.ipynb', [
+        { index: 0, cell_id: 'code-1', cell_type: 'code', source: 'def hello():\n    pass\n\nhello()\n' },
+    ], 1);
+    const definitionOffset = document.codeCells[0].source.indexOf('hello');
+    const absoluteDefinitionOffset = document.codeCells[0].contentFrom + definitionOffset;
+    const definitionPosition = offsetToPosition(
+        document.lineStarts,
+        document.text.length,
+        absoluteDefinitionOffset,
+    );
+
+    client.ready = true;
+    client.virtualDocument = document;
+    client.request = async () => ({
+        uri: document.uri,
+        range: {
+            start: definitionPosition,
+            end: { line: definitionPosition.line, character: definitionPosition.character + 'hello'.length },
+        },
+    });
+
+    const target = await client.resolveDefinitionAt(
+        'code-1',
+        document.codeCells[0].source.lastIndexOf('hello'),
+    );
+
+    assert.deepEqual(target, {
+        kind: 'cell',
+        cellId: 'code-1',
+        from: definitionOffset,
+        to: definitionOffset + 'hello'.length,
+    });
+});
+
+test('resolveDefinitionAt returns workspace file targets for external definitions', async () => {
+    const client = new PyrightNotebookLspClient(
+        '/workspace',
+        '/workspace/demo.ipynb',
+        () => {},
+        () => {},
+        'pyright-langserver',
+    );
+    const document = buildVirtualNotebookDocument('/workspace', '/workspace/demo.ipynb', [
+        { index: 0, cell_id: 'code-1', cell_type: 'code', source: 'from test import hello\nhello()\n' },
+    ], 1);
+
+    client.ready = true;
+    client.virtualDocument = document;
+    client.request = async () => ({
+        uri: 'file:///workspace/test.py',
+        range: {
+            start: { line: 0, character: 4 },
+            end: { line: 0, character: 9 },
+        },
+    });
+
+    const target = await client.resolveDefinitionAt(
+        'code-1',
+        document.codeCells[0].source.lastIndexOf('hello'),
+    );
+
+    assert.deepEqual(target, {
+        kind: 'file',
+        uri: 'file:///workspace/test.py',
+        filePath: '/workspace/test.py',
+        range: {
+            start: { line: 0, character: 4 },
+            end: { line: 0, character: 9 },
+        },
+    });
 });
 
 test('dispose cleans up the workspace-local Pyright shadow file', () => {

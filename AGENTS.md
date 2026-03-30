@@ -6,6 +6,8 @@ Runtime-first notebook system for agents and humans.
 
 ```bash
 uv run agent-repl <command>              # CLI from source
+uv run agent-repl setup --smoke-test     # onboarding checks + notebook smoke test
+uv run agent-repl doctor --probe-mcp     # install/workspace/editor/MCP readiness
 uv run agent-repl core status            # daemon diagnostics
 uv run pytest                            # Python tests
 cd extension && npm run compile          # rebuild extension
@@ -32,7 +34,9 @@ All surfaces call the same `CoreState` service layer. See [dev/core-guide.md](de
 - **Docs are part of done.** Update `AGENTS.md`, `SKILL.md`, `docs/`, `dev/` together.
 - **Adapters stay thin.** CLI, extension, browser, MCP reuse shared contracts — no re-encoding notebook semantics.
 - **Execution truth is server-owned.** Clients derive queue/running state from the daemon.
+- **Staleness and conflict recovery are product behavior.** CLI, MCP, browser, and IDE surfaces should detect stale or mismatched state, self-heal when safe, and otherwise return actionable next steps instead of generic failures.
 - **Mutations route through YDoc** then mirror to nbformat for disk. See [dev/core-guide.md](dev/core-guide.md).
+- **Commit and push autonomously** as you work on a feature. This will allow backtracking.
 
 ## Coupling
 
@@ -49,13 +53,19 @@ API changes touch multiple layers — keep in sync:
 
 ## Extension Work
 
-Read [dev/extension-guide.md](dev/extension-guide.md) for module map, dev loops, shared modules, error handling patterns, and canvas icon rules.
+Read [dev/extension-guide.md](dev/extension-guide.md) for module map, dev loops, shared modules, error handling patterns, and canvas icon rules. For browser QA, preview troubleshooting, and how to verify incremental cell output properly, use [dev/browser-verification-guide.md](dev/browser-verification-guide.md).
 
 Key points:
 - `execution/queue.ts` is the most complex module — read fully before modifying
 - Execution paths must stay background-safe (no focus stealing)
 - Use `npm run preview:webview` for renderer work, Extension Development Host for integration
+- When claiming a browser fix, verify it with the browser workflow in [dev/browser-verification-guide.md](dev/browser-verification-guide.md), including intermediate cell output when execution/rendering changed
 - Prefer `@carbon/icons-react` over custom SVG for notebook chrome icons
+- `npm run compile` rebuilds the repo copy only. It does not update an installed extension under `~/.vscode/extensions/` or `~/.cursor/extensions/`
+- If you manually sync an installed extension, sync the full compiled `extension/out/` and `extension/media/` trees together. Partial file copies can leave a mixed module graph and produce misleading regressions or assertions
+- `Agent REPL: Reload` hot-reloads routes and refreshes open canvases, but changes that affect `extension.js` still require a full VS Code window reload
+- If the repo source and live behavior disagree, suspect installed-extension drift before changing notebook logic
+- Webview markdown rendering must normalize notebook sources to strings before passing them to `marked`; nbformat-style arrays and nullish values should be treated as valid input shapes
 
 </important>
 
@@ -68,6 +78,9 @@ Read [dev/core-guide.md](dev/core-guide.md) for the full module map, route struc
 Key points:
 - `client.py` = extension bridge; `core/client.py` = shared runtime client; `cli.py` = public surface
 - Hidden `agent-repl core ...` commands are the diagnostics surface
+- Public onboarding commands are `agent-repl setup`, `agent-repl doctor`, and `agent-repl editor configure --default-canvas`
+- `setup` should report post-action state in JSON so agents can continue safely after editor or MCP configuration
+- When stale server, workspace mismatch, route mismatch, or lease/runtime conflicts are detected, prefer structured recovery metadata and safe automatic fallback over bare string errors
 - Source input pattern (`-s`, `--source-file`, stdin) is shared across `ix`, `respond`, `edit` — keep consistent
 - Omitted `--session-id` reuses the preferred active human session
 
@@ -77,17 +90,23 @@ Key points:
 
 ## Troubleshooting
 
+- For browser preview QA, stale-port confusion, or streamed-output verification, follow [dev/browser-verification-guide.md](dev/browser-verification-guide.md)
 - Connection files: `~/Library/Jupyter/runtime/agent-repl-bridge-<pid>.json`
 - `BridgeClient.discover()` scans files, matches `cwd`, pings health, picks freshest
 - Stale files from dead processes are the most common failure
 - `agent-repl core status` for daemon issues; `agent-repl core sessions` for session disagreements
 - `agent-repl reload --pretty` reports `extension_root` and `routes_module` paths
+- Browser preview and IDE canvases should treat refresh/reload as part of recovery: refresh the notebook surface when local state is stale, reload the bridge or preview when server/module state is stale, and explain which action the user should take when auto-recovery is not possible
+- If hot reload appears to succeed but the UI still behaves like old code, compare the live installed extension under `extension_root` with the repo build. The running copy may still be stale
+- For installed-extension debugging, prefer syncing the entire compiled `out/` and `media/` directories instead of patching individual files
+- After syncing installed `out/` files or changing `extension.ts`, reload the VS Code window once. `agent-repl reload` alone will not swap the already-loaded extension host entrypoint
 
 </important>
 
 ## Further Reading
 
 - [dev/README.md](dev/README.md) — dev docs index
+- [dev/browser-verification-guide.md](dev/browser-verification-guide.md) — browser QA, troubleshooting, and streamed-output verification
 - [dev/core-guide.md](dev/core-guide.md) — core module map, persistence, design rules
 - [dev/extension-guide.md](dev/extension-guide.md) — extension modules, dev loops, patterns
 - [dev/current-architecture.md](dev/current-architecture.md) — shipped topology

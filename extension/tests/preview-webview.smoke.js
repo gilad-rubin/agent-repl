@@ -109,6 +109,34 @@ function normalizeNotebookSource(source) {
     return typeof source === 'string' ? source : '';
 }
 
+async function writeNotebook(filePath, cellSources) {
+    const notebook = {
+        cells: cellSources.map((source, index) => ({
+            cell_type: 'code',
+            execution_count: null,
+            id: `browser-test-${Date.now()}-${index}`,
+            metadata: {},
+            outputs: [],
+            source: [`${source}${source.endsWith('\n') ? '' : '\n'}`],
+        })),
+        metadata: {
+            kernelspec: {
+                display_name: 'Python 3',
+                language: 'python',
+                name: 'python3',
+            },
+            language_info: {
+                name: 'python',
+            },
+        },
+        nbformat: 4,
+        nbformat_minor: 5,
+    };
+
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify(notebook, null, 2));
+}
+
 async function waitForNotebookSource(filePath, expectedText, timeoutMs = 15_000) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
@@ -173,6 +201,34 @@ test('preview uses a monospaced font for code cells', async () => {
             .evaluate((element) => getComputedStyle(element).fontFamily);
 
         assert.match(fontFamily, /IBM Plex Mono|SF Mono|Monaco|Menlo|Consolas|monospace/i);
+    } finally {
+        await closePageHandle(handle);
+    }
+});
+
+test('kernel picker options remain visible below the toolbar when opened', async () => {
+    const handle = await openPreviewPage();
+    try {
+        const { page } = handle;
+        await page.locator('.toolbar-kernel-button').click();
+        await page.waitForSelector('.toolbar-kernel-menu');
+
+        const toolbarOverflow = await page.evaluate(() => {
+            const toolbar = document.querySelector('[data-toolbar="notebook"] > div');
+            if (!(toolbar instanceof HTMLElement)) {
+                return null;
+            }
+            const computed = getComputedStyle(toolbar);
+            return {
+                overflowX: computed.overflowX,
+                overflowY: computed.overflowY,
+            };
+        });
+
+        assert.deepEqual(toolbarOverflow, {
+            overflowX: 'visible',
+            overflowY: 'visible',
+        });
     } finally {
         await closePageHandle(handle);
     }
@@ -940,6 +996,37 @@ test('dd falls back to the cell above when deleting the last cell', async () => 
     }
 });
 
+test('command-mode z restores the last deleted cell at the notebook level', async () => {
+    const handle = await openPreviewPage();
+    try {
+        const { page } = handle;
+
+        await page.locator('[data-cell-id="preview-code-1"]').click();
+        await page.keyboard.press('d');
+        await page.keyboard.press('d');
+
+        await page.waitForFunction(() => document.querySelectorAll('[data-cell-id]').length === 2);
+
+        await page.keyboard.press('z');
+
+        await page.waitForFunction(() => {
+            const cells = Array.from(document.querySelectorAll('[data-cell-id]'));
+            if (cells.length !== 3) {
+                return false;
+            }
+            const ids = cells.map((element) => element.getAttribute('data-cell-id'));
+            if (ids.join(',') !== 'preview-md-1,preview-code-1,preview-code-2') {
+                return false;
+            }
+            const selectedArticle = document.querySelector('[data-cell-id="preview-code-1"] article');
+            return selectedArticle instanceof HTMLElement
+                && Boolean(selectedArticle.style.boxShadow && selectedArticle.style.boxShadow !== 'none');
+        });
+    } finally {
+        await closePageHandle(handle);
+    }
+});
+
 test('shift-enter executes the latest in-editor source without waiting for a separate draft flush', async () => {
     const handle = await openPreviewPage();
     try {
@@ -1139,5 +1226,196 @@ test('running that reused trailing cell creates the next trailing cell too', asy
         assert.ok(inlineState.trailingCellId);
     } finally {
         await closePageHandle(handle);
+    }
+});
+
+test('cmd/ctrl-enter runs the active code cell and advances immediately in workspace preview', async () => {
+    const notebookPath = path.join(extensionRoot, 'tmp', `browser-cmd-enter-${Date.now()}.ipynb`);
+    const commandKey = process.platform === 'darwin' ? 'Meta' : 'Control';
+
+    await writeNotebook(notebookPath, [
+        'import time\ntime.sleep(2)\nprint("done", flush=True)',
+    ]);
+
+    const handle = await openWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        await page.locator('[data-cell-id] .cm-content').click();
+        await page.keyboard.press(`${commandKey}+Enter`);
+
+        await page.waitForFunction(() => {
+            const cells = Array.from(document.querySelectorAll('[data-cell-id]'));
+            const lastCellEditor = cells.at(-1)?.querySelector('.cm-editor') ?? null;
+            const active = document.activeElement;
+            return cells.length === 2 && Boolean(lastCellEditor && active && lastCellEditor.contains(active));
+        });
+
+        await page.keyboard.type('next_value = 2');
+
+        const nextCellText = await page.locator('[data-cell-id]').last().locator('.cm-line').first().textContent();
+        assert.equal(nextCellText, 'next_value = 2');
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('workspace preview shows queued status for a second submitted cell while the first is running', async () => {
+    const notebookPath = path.join(extensionRoot, 'tmp', `browser-queued-status-${Date.now()}.ipynb`);
+
+    await writeNotebook(notebookPath, [
+        'import time\nfor i in range(6):\n    print(f"tick {i}", flush=True)\n    time.sleep(0.5)',
+        'queued_value = 2\nqueued_value',
+    ]);
+
+    const handle = await openWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        const firstCell = page.locator('[data-cell-id]').nth(0);
+        const secondCell = page.locator('[data-cell-id]').nth(1);
+
+        await firstCell.locator('article').click({ position: { x: 48, y: 10 } });
+        await page.keyboard.press('Shift+Enter');
+        await page.waitForFunction(() => {
+            const status = document.querySelector('[data-cell-id] [data-cell-status]');
+            return status?.getAttribute('data-cell-status') === 'running';
+        });
+
+        await secondCell.hover();
+        await secondCell.getByTitle('Run cell (Shift+Enter)').click();
+
+        await page.waitForFunction(() => {
+            const cells = Array.from(document.querySelectorAll('[data-cell-id]'));
+            const secondStatus = cells[1]?.querySelector('[data-cell-status]')?.getAttribute('data-cell-status') ?? null;
+            return secondStatus === 'queued';
+        }, { timeout: 10_000 });
+
+        const statuses = await page.evaluate(() => Array.from(document.querySelectorAll('[data-cell-id]')).map((cell) => ({
+            id: cell.getAttribute('data-cell-id'),
+            status: cell.querySelector('[data-cell-status]')?.getAttribute('data-cell-status') ?? null,
+        })));
+        assert.equal(statuses[0]?.status, 'running');
+        assert.equal(statuses[1]?.status, 'queued');
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('rerunning a completed cell does not flash completed before returning to running in workspace preview', async () => {
+    const notebookPath = path.join(extensionRoot, 'tmp', `browser-rerun-status-${Date.now()}.ipynb`);
+
+    await writeNotebook(notebookPath, [
+        'from time import sleep\nsleep(1)',
+    ]);
+
+    const handle = await openWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+        const firstCell = page.locator('[data-cell-id]').first();
+
+        await firstCell.locator('article').click({ position: { x: 48, y: 10 } });
+        await page.keyboard.press('Shift+Enter');
+
+        await page.waitForFunction(() => {
+            const status = document.querySelector('[data-cell-id] [data-cell-status]');
+            return status?.getAttribute('data-cell-status') === 'completed';
+        }, { timeout: 15_000 });
+
+        await firstCell.locator('article').click({ position: { x: 48, y: 10 } });
+        await page.keyboard.press('Shift+Enter');
+
+        await page.waitForFunction(() => {
+            const status = document.querySelector('[data-cell-id] [data-cell-status]');
+            return status?.getAttribute('data-cell-status') !== 'completed';
+        }, { timeout: 250 });
+
+        await page.waitForFunction(() => {
+            const status = document.querySelector('[data-cell-id] [data-cell-status]');
+            return status?.getAttribute('data-cell-status') === 'running';
+        }, { timeout: 10_000 });
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('rerunning a completed second cell while another cell is active stays visibly queued in workspace preview', async () => {
+    const notebookPath = path.join(extensionRoot, 'tmp', `browser-rerun-queued-${Date.now()}.ipynb`);
+
+    await writeNotebook(notebookPath, [
+        'from time import sleep\nfor i in range(4):\n    print(i, flush=True)\n    sleep(0.5)',
+        'queued_value = 2\nqueued_value',
+    ]);
+
+    const handle = await openWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+        const firstCell = page.locator('[data-cell-id]').nth(0);
+        const secondCell = page.locator('[data-cell-id]').nth(1);
+
+        await secondCell.locator('article').click({ position: { x: 48, y: 10 } });
+        await page.keyboard.press('Shift+Enter');
+        await page.waitForFunction(() => {
+            const cells = Array.from(document.querySelectorAll('[data-cell-id]'));
+            const secondStatus = cells[1]?.querySelector('[data-cell-status]');
+            return secondStatus?.getAttribute('data-cell-status') === 'completed';
+        }, { timeout: 15_000 });
+
+        await firstCell.locator('article').click({ position: { x: 48, y: 10 } });
+        await page.keyboard.press('Shift+Enter');
+        await page.waitForFunction(() => {
+            const firstStatus = document.querySelector('[data-cell-id] [data-cell-status]');
+            return firstStatus?.getAttribute('data-cell-status') === 'running';
+        }, { timeout: 10_000 });
+
+        await secondCell.locator('article').click({ position: { x: 48, y: 10 } });
+        await page.keyboard.press('Shift+Enter');
+
+        await page.waitForFunction(() => {
+            const cells = Array.from(document.querySelectorAll('[data-cell-id]'));
+            const secondStatus = cells[1]?.querySelector('[data-cell-status]');
+            return secondStatus?.getAttribute('data-cell-status') === 'queued';
+        }, { timeout: 250 });
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('dd deletes a running cell after returning it to command mode in workspace preview', async () => {
+    const notebookPath = path.join(extensionRoot, 'tmp', `browser-delete-running-${Date.now()}.ipynb`);
+
+    await writeNotebook(notebookPath, [
+        'import time\nfor i in range(6):\n    print(f"tick {i}", flush=True)\n    time.sleep(0.5)',
+        'print("still here")',
+    ]);
+
+    const handle = await openWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        const firstCell = page.locator('[data-cell-id]').nth(0);
+
+        await firstCell.locator('article').click({ position: { x: 48, y: 10 } });
+        await page.keyboard.press('Shift+Enter');
+        await page.waitForFunction(() => {
+            const status = document.querySelector('[data-cell-id] [data-cell-status]');
+            return status?.getAttribute('data-cell-status') === 'running';
+        });
+
+        await firstCell.locator('article').click({ position: { x: 48, y: 10 } });
+        await page.keyboard.press('d');
+        await page.keyboard.press('d');
+
+        await page.waitForFunction(() => document.querySelectorAll('[data-cell-id]').length === 1, { timeout: 10_000 });
+
+        const remainingText = await page.locator('[data-cell-id]').first().textContent();
+        assert.match(remainingText, /still here/);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
     }
 });

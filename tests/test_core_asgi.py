@@ -70,6 +70,31 @@ class TestInlineRoutes(unittest.TestCase):
         resp = self.client.get("/api/nonexistent", headers=self.headers)
         self.assertEqual(resp.status_code, 404)
 
+    def test_canonical_mcp_endpoint_is_available(self):
+        with TestClient(self.app, raise_server_exceptions=False) as client:
+            resp = client.get(
+                "/mcp",
+                headers={
+                    **self.headers,
+                    "Accept": "application/json",
+                },
+            )
+            self.assertEqual(resp.status_code, 406)
+            self.assertIn("text/event-stream", resp.json()["error"]["message"])
+
+    def test_legacy_mcp_endpoint_remains_available(self):
+        with TestClient(self.app, raise_server_exceptions=False) as client:
+            resp = client.get(
+                "/mcp/mcp",
+                headers={
+                    **self.headers,
+                    "Accept": "application/json",
+                },
+                follow_redirects=False,
+            )
+            self.assertEqual(resp.status_code, 307)
+            self.assertEqual(resp.headers["location"], "/mcp")
+
 
 class TestDomainRouteDispatch(unittest.TestCase):
     def setUp(self):

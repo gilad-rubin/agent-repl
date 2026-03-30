@@ -34,6 +34,11 @@ def _optional_number(payload: dict[str, Any], key: str) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+def _optional_bool(payload: dict[str, Any], key: str) -> bool | None:
+    value = payload.get(key)
+    return value if isinstance(value, bool) else None
+
+
 def _optional_dict_list(payload: dict[str, Any], key: str) -> list[dict[str, Any]] | None:
     value = payload.get(key)
     if not isinstance(value, list):
@@ -64,11 +69,14 @@ class NotebookPathRequest:
 class NotebookSessionPathRequest:
     path: str
     owner_session_id: str | None = None
+    wait: bool = True
 
     def to_payload(self) -> dict[str, Any]:
         body: dict[str, Any] = {"path": self.path}
         if self.owner_session_id is not None:
             body["owner_session_id"] = self.owner_session_id
+        if self.wait is False:
+            body["wait"] = False
         return body
 
     @classmethod
@@ -76,6 +84,7 @@ class NotebookSessionPathRequest:
         return cls(
             path=_require_path(payload),
             owner_session_id=_optional_str(payload, "owner_session_id"),
+            wait=_optional_bool(payload, "wait") is not False,
         )
 
 
@@ -145,6 +154,7 @@ class NotebookExecuteCellRequest:
     cell_id: str | None = None
     cell_index: int | None = None
     owner_session_id: str | None = None
+    wait: bool = True
 
     def to_payload(self) -> dict[str, Any]:
         body: dict[str, Any] = {"path": self.path}
@@ -154,6 +164,8 @@ class NotebookExecuteCellRequest:
             body["cell_index"] = self.cell_index
         if self.owner_session_id is not None:
             body["owner_session_id"] = self.owner_session_id
+        if self.wait is False:
+            body["wait"] = False
         return body
 
     @classmethod
@@ -163,6 +175,7 @@ class NotebookExecuteCellRequest:
             cell_id=_optional_str(payload, "cell_id"),
             cell_index=_optional_int(payload, "cell_index"),
             owner_session_id=_optional_str(payload, "owner_session_id"),
+            wait=_optional_bool(payload, "wait") is not False,
         )
 
 
@@ -173,6 +186,7 @@ class NotebookInsertExecuteRequest:
     cell_type: str = "code"
     at_index: int = -1
     owner_session_id: str | None = None
+    wait: bool = True
 
     def to_payload(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -183,6 +197,8 @@ class NotebookInsertExecuteRequest:
         }
         if self.owner_session_id is not None:
             body["owner_session_id"] = self.owner_session_id
+        if self.wait is False:
+            body["wait"] = False
         return body
 
     @classmethod
@@ -194,6 +210,7 @@ class NotebookInsertExecuteRequest:
             cell_type=_optional_str(payload, "cell_type") or "code",
             at_index=at_index if at_index is not None else -1,
             owner_session_id=_optional_str(payload, "owner_session_id"),
+            wait=_optional_bool(payload, "wait") is not False,
         )
 
 

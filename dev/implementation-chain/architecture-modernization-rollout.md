@@ -27,7 +27,7 @@ Primary references:
 
 ## Known Baseline Risk
 
-At the time this chain was revised, the targeted Python and extension collaboration suites were green, but the browser preview smoke suite still had one failing case around trailing-cell reuse after restart. Treat that as a live regression to fix or explicitly carry forward before using the preview smoke suite as a hard migration gate.
+At the time this chain was revised, the targeted Python and extension collaboration suites were green, but the browser preview smoke suite still had one failing case around trailing-cell reuse after restart. Treat that as a live regression to fix or explicitly carry forward before using the preview smoke suite as a hard regression gate.
 
 ## Piece 0: Shared Contracts and Duplicate Policy Removal
 
@@ -35,7 +35,7 @@ ClickUp: [`869cp5wg9`](https://app.clickup.com/t/869cp5wg9)
 
 ### Goal
 
-Remove duplicated policy and create typed internal contracts so later service, transport, persistence, and collaboration migrations stop rippling across CLI, extension, and browser code.
+Remove duplicated policy and create typed internal contracts so later service, transport, persistence, and collaboration changes stop rippling across CLI, extension, and browser code.
 
 ### HLD
 
@@ -152,7 +152,7 @@ Replace the raw daemon routing layer with a typed ASGI host that can mount MCP a
 
 - Add service-host tests for request validation and auth middleware.
 - Add stream/resumability tests for whichever event path survives in the final host.
-- Run targeted CLI and extension contract tests against the migrated host.
+- Run targeted CLI and extension contract tests against the updated host.
 - Keep browser standalone auth-boundary behavior covered.
 
 ## Piece 4: SQLite Operational Persistence
@@ -161,14 +161,13 @@ ClickUp: [`869cp5wkk`](https://app.clickup.com/t/869cp5wkk)
 
 ### Goal
 
-Move operational state out of `core-state.json` into a durable, queryable local database.
+Keep operational state in a durable, queryable local database.
 
 ### HLD
 
 - Store sessions, runtimes, runs, execution records, and activity events in SQLite.
 - Use WAL mode for read/write concurrency.
-- Add schema versioning and migration logic.
-- Migrate existing JSON state on first run, preserving a backup.
+- Create the required operational tables on open.
 - Keep operational state separate from future collaborative document persistence.
 
 ### Acceptance Criteria
@@ -176,13 +175,13 @@ Move operational state out of `core-state.json` into a durable, queryable local 
 - Restarting the daemon preserves operational state without JSON corruption risk.
 - Activity history and execution records survive restart.
 - Existing status and inspection commands still return the expected information.
-- Recovery from partial or failed migration is diagnosable and safe.
+- Recovery from partial writes is diagnosable and safe.
 
 ### Tests
 
-- Add migration tests from JSON to SQLite.
+- Add restart-safety tests for SQLite persistence.
 - Add crash-safety/restart tests around partially written state.
-- Add tests for schema version upgrades.
+- Add tests for current table creation and reload behavior.
 - Keep `core status`, activity, runtime, and session tests green.
 
 ## Piece 5: FastMCP Adapter and CLI/MCP Convergence
@@ -193,11 +192,17 @@ ClickUp: [`869cp5wm7`](https://app.clickup.com/t/869cp5wm7)
 
 Expose `agent-repl` as a first-class agent platform through FastMCP while reusing the same application service layer and reducing duplicated CLI/MCP behavior.
 
+Current shipped baseline before the remaining work:
+
+- public MCP onboarding exists through `agent-repl mcp setup|status|config|smoke-test`
+- public CLI onboarding helpers exist through `agent-repl setup`, `agent-repl doctor`, and `agent-repl editor configure --default-canvas`
+- the canonical MCP endpoint is `/mcp`, with `/mcp/mcp` retained as a compatibility alias
+
 ### HLD
 
 - Mount a FastMCP server on top of the shared application service layer.
 - Use Streamable HTTP as the networked MCP transport.
-- Keep `stdio` available for local and spawned use cases.
+- Keep the networked MCP transport focused on Streamable HTTP.
 - Model stable notebook/runtime capabilities as MCP tools/resources/prompts.
 - Decide which CLI flows stay handcrafted for human UX and which become thin wrappers over shared MCP-compatible services.
 
@@ -313,14 +318,14 @@ Delete superseded code, tighten docs, and leave the project easier to understand
 
 - Remove raw routing code, obsolete queue/status code, duplicated policy, retired lease paths, and transport scaffolding that no longer pays rent.
 - Reduce the core/server “god object” surface by keeping clear service boundaries.
-- Update durable docs to reflect the shipped result, not the migration plan.
+- Update durable docs to reflect the shipped result, not the plan draft.
 - Close the loop on known parity gaps, including the current preview trailing-cell regression.
 
 ### Acceptance Criteria
 
 - All deleted code is covered by replacement tests.
 - Docs describe the final shipped architecture clearly.
-- Known migration-era parity bugs are either fixed or explicitly documented.
+- Known parity bugs are either fixed or explicitly documented.
 - The final code layout is simpler to explain by module responsibility.
 
 ### Tests
@@ -328,7 +333,7 @@ Delete superseded code, tighten docs, and leave the project easier to understand
 - Run the full Python test suite.
 - Run the full extension test suite.
 - Run the browser preview smoke suite and clear the known failing case.
-- Add any final parity or migration regression tests revealed during cleanup.
+- Add any final parity or regression tests revealed during cleanup.
 
 ## Suggested Chain Order
 

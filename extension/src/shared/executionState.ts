@@ -29,6 +29,14 @@ export type ActivityExecutionReduction = {
     needsFullReload: boolean;
 };
 
+export type ActivityRuntimeExecutionReduction = {
+    buckets: ExecutionBuckets;
+    startedIds: string[];
+    completedIds: string[];
+    pausedIds: string[];
+    needsFullReload: boolean;
+};
+
 export type CommandExecutionMessageLike = {
     type?: string;
     cell_id?: string | null;
@@ -86,6 +94,19 @@ export function startExecutionBuckets(
         failedCellIds: current.failedCellIds.filter((cellId) => !nextExecutingIds.includes(cellId)),
         pausedCellIds: current.pausedCellIds.filter((cellId) => !nextExecutingIds.includes(cellId)),
     };
+}
+
+export function primeBulkExecutionBuckets(
+    current: ExecutionBuckets,
+    cellIds: string[],
+): ExecutionBuckets {
+    if (cellIds.length === 0) {
+        return current;
+    }
+
+    const [firstCellId, ...remainingCellIds] = Array.from(new Set(cellIds));
+    const queued = queueExecutionBuckets(current, remainingCellIds);
+    return startExecutionBuckets(queued, [firstCellId]);
 }
 
 export function syncExecutionBuckets(
@@ -161,6 +182,38 @@ export function reduceActivityExecution(
         startedIds,
         finishedIds,
         needsFullReload,
+    };
+}
+
+export function reduceActivityAndRuntimeExecution(
+    current: ExecutionBuckets,
+    events: ActivityExecutionEventLike[],
+    runtime?: RuntimeExecutionLike,
+): ActivityRuntimeExecutionReduction {
+    const activityReduction = reduceActivityExecution(current, events);
+    if (!runtime) {
+        return {
+            buckets: activityReduction.buckets,
+            startedIds: activityReduction.startedIds,
+            completedIds: activityReduction.finishedIds,
+            pausedIds: [],
+            needsFullReload: activityReduction.needsFullReload,
+        };
+    }
+
+    const runtimeReduction = reduceRuntimeExecution(activityReduction.buckets, runtime);
+    return {
+        buckets: runtimeReduction.buckets,
+        startedIds: Array.from(new Set([
+            ...activityReduction.startedIds,
+            ...runtimeReduction.startedIds,
+        ])),
+        completedIds: Array.from(new Set([
+            ...activityReduction.finishedIds,
+            ...runtimeReduction.completedIds,
+        ])),
+        pausedIds: runtimeReduction.pausedIds,
+        needsFullReload: activityReduction.needsFullReload,
     };
 }
 

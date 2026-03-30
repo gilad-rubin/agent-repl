@@ -7,8 +7,9 @@ Updated 2026-03-29
 ### Shipped
 
 - **ASGI host shell (Phase 3)**: Starlette app served by uvicorn (`src/agent_repl/core/asgi.py`), with `TokenAuthMiddleware` for auth. The old `ThreadingHTTPServer` handler has been fully removed.
-- **SQLite persistence (Phase 4)**: Operational state persisted to `{workspace}/.agent-repl/core-state.db` via `src/agent_repl/core/db.py` with WAL mode. First startup migrates any existing `core-state.json` to SQLite.
-- **FastMCP mount (Phase 5, partial)**: MCP server mounted at `/mcp/mcp` via `src/agent_repl/core/mcp_adapter.py`. MCP tools call through to `CoreState`. Mounted into the Starlette ASGI host with shared lifespan.
+- **SQLite persistence (Phase 4)**: Operational state persisted to `{workspace}/.agent-repl/core-state.db` via `src/agent_repl/core/db.py` with WAL mode.
+- **FastMCP mount (Phase 5, partial)**: MCP server mounted into the Starlette ASGI host via `src/agent_repl/core/mcp_adapter.py`, with the canonical public endpoint at `/mcp` and `/mcp/mcp` retained as a compatibility alias. MCP tools call through to `CoreState` with shared lifespan.
+- **Public onboarding CLI surface**: `agent-repl setup`, `agent-repl doctor`, and `agent-repl editor configure --default-canvas` are shipped public commands. `setup` and `doctor` are JSON-first onboarding and verification helpers, and `editor configure` updates workspace `.vscode/settings.json` to prefer `agent-repl.canvasEditor` for `*.ipynb`.
 
 ### In Progress
 
@@ -19,7 +20,7 @@ Updated 2026-03-29
 ### Not Started
 
 - Phase 6: YDoc spike
-- Phase 7: Collaborative editing migration
+- Phase 7: Collaborative editing cleanup
 - Phase 6 (LSP): Notebook LSP standardization
 - Phase 7 (cleanup): Compatibility debt deletion
 
@@ -41,7 +42,7 @@ This plan is intentionally pragmatic:
 - keep what is already paying rent
 - replace custom infrastructure where the ecosystem is clearly stronger
 - avoid rewrites that mostly swap one custom pile for another
-- migrate behind stable user-facing behavior and stable tests
+- ship behind stable user-facing behavior and stable tests
 
 ## Non-Goals
 
@@ -139,7 +140,7 @@ This is the pragmatic stack to converge toward.
 | UI HTTP surface | Optional thin HTTP adapter for browser/editor-specific needs | Keep only what the product UI actually needs beyond MCP; do not duplicate business logic |
 | Operational persistence | SQLite via stdlib `sqlite3` | Sessions, runtimes, runs, execution records, activity ledger in a durable local DB |
 | CRDT persistence | `pycrdt-store` or equivalent YDoc-backed persistence | Do not invent a second custom persistence format for collaborative documents if upstream already provides one |
-| Notebook diff/migration verification | [`nbdime`](https://nbdime.readthedocs.io/) | Semantic notebook diffs for migration and round-trip parity checks |
+| Notebook diff verification | [`nbdime`](https://nbdime.readthedocs.io/) | Semantic notebook diffs for round-trip parity checks |
 | LSP virtual document model | [jupyterlab-lsp virtual document pattern](https://jupyterlab.readthedocs.io/en/stable/api/modules/lsp.VirtualDocument.html) + [jupyterlab-lsp extension guidance](https://jupyterlab-lsp.readthedocs.io/en/latest/Extending.html) + `vscode-languageclient` where it fits | Reuse the established notebook-to-virtual-document mapping model rather than growing a one-off mapper forever |
 | Editor surface | [VS Code Custom Editor API](https://code.visualstudio.com/api/extension-guides/custom-editors), shared React canvas, [CodeMirror 6](https://codemirror.net/docs/guide) | Keep the current shared-canvas direction; do not replace it with JupyterLab UI packages |
 
@@ -152,11 +153,10 @@ Use different transports for different jobs instead of forcing one transport to 
 - `Streamable HTTP` for MCP exposure and any request/stream pattern that naturally fits MCP
 - optional UI-specific HTTP or SSE only where the browser/editor clients need non-MCP ergonomics
 - `WebSocket` for collaborative document sync if and when YDoc lands
-- `stdio` for local MCP integrations and spawned local tools
 
 ### Why
 
-`MCP` now standardizes `stdio` and `Streamable HTTP` as its standard transports. Streamable HTTP can optionally use SSE for server-to-client streaming, but `WebSocket` is not a standard MCP transport and should be treated as a custom transport only if we have a very specific reason to add it.
+`MCP` now standardizes `Streamable HTTP` as its networked transport. Streamable HTTP can optionally use SSE for server-to-client streaming, but `WebSocket` is not a standard MCP transport and should be treated as a custom transport only if we have a very specific reason to add it.
 
 For `agent-repl`, that means:
 
@@ -180,7 +180,6 @@ Important clarification:
 The ecosystem has already solved a meaningful amount of MCP plumbing:
 
 - `FastMCP` can run over HTTP, expose an ASGI app, and be mounted into a larger application
-- it supports `stdio` and `Streamable HTTP`
 - it can generate a typed CLI from MCP tool schemas for admin or power-user workflows
 
 That makes it a better fit than inventing another custom agent adapter, and a better fit than treating MCP as just a wire format.
@@ -259,7 +258,7 @@ Goals:
 
 - remove duplicated policy
 - define stable internal contracts
-- make later migrations smaller
+- make later changes smaller
 
 Changes:
 
@@ -311,7 +310,7 @@ Why this phase exists:
 
 ### Phase 2: Unify Execution Truth
 
-This is still the highest-payoff technical migration.
+This is still the highest-payoff technical refactor.
 
 Changes:
 
@@ -346,13 +345,13 @@ MCP note:
 
 ### Phase 4: Split Persistence Responsibilities — SHIPPED
 
-SQLite persistence is live via `src/agent_repl/core/db.py`. Database at `{workspace}/.agent-repl/core-state.db` with WAL mode. First daemon startup migrates any existing `core-state.json` to SQLite (renamed to `.backup`). `CoreState` keeps in-memory dicts as working state; `persist()` syncs to SQLite when a `_db` connection is set, otherwise falls back to JSON for test compatibility.
+SQLite persistence is live via `src/agent_repl/core/db.py`. Database at `{workspace}/.agent-repl/core-state.db` with WAL mode. `CoreState` keeps in-memory dicts as working state; `persist()` syncs to SQLite when a `_db` connection is set.
 
 Remaining work:
 
 - Persist execution records to SQLite (task A2).
 - Add SQL-level activity TTL (task A3).
-- Remove dead JSON fallback from `persist()` once migration confidence is high (task A1).
+- Keep `persist()` SQLite-only.
 - If collaborative docs move to YDoc, store them using the YDoc persistence layer rather than inventing a parallel JSON blob format.
 
 Important rule:
@@ -361,14 +360,27 @@ Important rule:
 
 ### Phase 5: Add FastMCP and Rationalize CLI/MCP Boundaries — PARTIALLY SHIPPED
 
-FastMCP server is mounted at `/mcp/mcp` via `src/agent_repl/core/mcp_adapter.py`. MCP tools call through to the same `CoreState` methods as the CLI and REST API. The MCP app is mounted into the Starlette ASGI host with shared lifespan.
+FastMCP server is mounted into the Starlette ASGI host via `src/agent_repl/core/mcp_adapter.py`. The canonical public endpoint is `/mcp`, with `/mcp/mcp` retained as a compatibility alias. MCP tools call through to the same `CoreState` methods as the CLI and REST API.
+
+Public onboarding for this surface is already shipped through:
+
+- `agent-repl mcp setup`
+- `agent-repl mcp status`
+- `agent-repl mcp config`
+- `agent-repl mcp smoke-test`
+
+The broader CLI onboarding surface is also now partially shipped:
+
+- `agent-repl setup`
+- `agent-repl doctor`
+- `agent-repl editor configure --default-canvas`
 
 Remaining work:
 
 - Add missing notebook MCP tools (task D1).
 - Add collaboration MCP tools (task D2).
 - Add runtime and run lifecycle MCP tools (task D3).
-- Wire MCP stdio transport for local and spawned use cases (task D4).
+- Wire MCP Streamable HTTP transport for local and spawned use cases (task D4).
 - Update MCP tests for full tool parity (task D5).
 - Decide which CLI flows should stay handcrafted and which can be schema-driven or thin wrappers over MCP-compatible services.
 
@@ -379,7 +391,7 @@ Decision rule:
 
 ### Phase 6: YDoc Spike
 
-Do a real spike before promising full CRDT migration.
+Do a real spike before promising full CRDT adoption.
 
 Spike questions:
 
@@ -393,7 +405,7 @@ Spike deliverables:
 
 - two-client collaborative edit prototype
 - notebook round-trip tests on real fixtures
-- migration/no-migration decision for branches and review flows
+- branch and review-flow ownership decision
 - measured decision on whether to embed `jupyter_server_ydoc` vs. use the underlying pieces directly
 
 ### Phase 7: Migrate Collaborative Editing
@@ -451,7 +463,7 @@ Delete:
 - raw HTTP routing code
 - leftover queue/status logic that is no longer authoritative
 - obsolete lease paths for edited cell/source structure
-- stale compatibility shims that only existed to bridge old and new execution models
+- stale shims that only existed to bridge old and new execution models
 
 ## What Not To Rewrite
 
@@ -503,11 +515,11 @@ These local checks were run during the 2026-03-29 review:
   - result: `21 passed`, `1 failed`
   - current known failure: `running that reused trailing cell creates the next trailing cell too`
 
-That last browser failure is important. Fix it or explicitly bless it as a known bug before using the preview smoke suite as a migration gate.
+That last browser failure is important. Fix it or explicitly bless it as a known bug before using the preview smoke suite as a regression gate.
 
 ### Required Long-Lived Test Layers
 
-Keep these layers green throughout the migration:
+Keep these layers green throughout the refactor:
 
 1. Python core/runtime tests
 2. CLI contract tests
@@ -592,7 +604,7 @@ Every phase should preserve the following behaviors.
 - background insert/execute/restart flows do not steal focus or force notebook UI open
 - open route defaults to the custom canvas editor
 - browser open route uses the standalone preview instead of the VS Code editor
-- native notebook compatibility path remains thin and delegates to the core execution model once migrated
+- native notebook path remains thin and delegates to the core execution model
 
 #### Collaboration Workflow
 
@@ -601,11 +613,11 @@ Every phase should preserve the following behaviors.
 - branch-backed handoff hints remain attributable to sessions
 - if branches are redesigned, replacement workflow tests must exist before branch code is deleted
 
-#### Persistence and Migration
+#### Persistence
 
-- JSON-state to SQLite migration preserves sessions, runtimes, runs, and activity data
+- SQLite operational persistence preserves sessions, runtimes, runs, and activity data
 - notebook/YDoc round trips preserve notebook semantics on real fixture notebooks
-- migration tests compare notebooks semantically, not just by raw JSON ordering
+- persistence tests compare notebooks semantically, not just by raw JSON ordering
 - daemon restart after partial persistence failure recovers cleanly or fails loudly with diagnostics
 - activity retention and cleanup rules are test-covered
 

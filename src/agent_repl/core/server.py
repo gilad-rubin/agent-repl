@@ -30,6 +30,7 @@ from agent_repl.core.notebook_mutation_service import NotebookMutationService
 from agent_repl.core.notebook_read_service import NotebookReadService
 from agent_repl.core.notebook_write_service import NotebookWriteService
 from agent_repl.core.ydoc_service import YDocService
+from agent_repl.recovery import runtime_busy_recovery
 
 
 CORE_VERSION = "0.1.0"
@@ -339,10 +340,12 @@ class CoreState:
     _notebook_write_service: NotebookWriteService = field(init=False, repr=False)
     _ydoc_service: YDocService = field(init=False, repr=False)
     _db: Any = field(default=None, init=False, repr=False)
+    _owner_thread_id: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = os.path.realpath(self.workspace_root)
         self.runtime_dir = os.path.realpath(self.runtime_dir)
+        self._owner_thread_id = threading.get_ident()
         self._last_activity_timestamp = max(
             (record.timestamp for record in self.activity_records),
             default=self.started_at,
@@ -1314,6 +1317,8 @@ class CoreState:
 
     def _sync_notebook_to_ydoc(self, relative_path: str, notebook: Any) -> None:
         """Sync an nbformat notebook into the YDoc shadow."""
+        if threading.get_ident() != self._owner_thread_id:
+            return
         cells = [dict(cell) for cell in notebook.cells]
         self._ydoc_service.close(relative_path)
         self._ydoc_service.load_from_nbformat(relative_path, {"cells": cells})
@@ -1864,7 +1869,10 @@ class CoreState:
                 "error": f"Runtime identity mismatch for document-bound runtime: {runtime_id}",
             }, HTTPStatus.CONFLICT
         if live_runtime is not None and live_runtime.busy:
-            return {"error": f"Runtime is busy: {runtime_id}"}, HTTPStatus.CONFLICT
+            return {
+                "error": f"Runtime is busy: {runtime_id}",
+                "recovery": runtime_busy_recovery(),
+            }, HTTPStatus.CONFLICT
 
         previous_status = record.status
         previous_generation = record.kernel_generation
@@ -1906,7 +1914,10 @@ class CoreState:
         if record.status in {"reaped", "stopped"}:
             return {"error": f"Ephemeral runtime is no longer promotable: {runtime_id}"}, HTTPStatus.BAD_REQUEST
         if record.status == "busy":
-            return {"error": f"Runtime is busy and cannot be promoted yet: {runtime_id}"}, HTTPStatus.CONFLICT
+            return {
+                "error": f"Runtime is busy and cannot be promoted yet: {runtime_id}",
+                "recovery": runtime_busy_recovery(),
+            }, HTTPStatus.CONFLICT
         previous_mode = record.mode
         record.mode = mode
         record.expires_at = None

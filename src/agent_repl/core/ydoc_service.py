@@ -29,17 +29,32 @@ class YDocService:
     def __init__(self) -> None:
         self._documents: dict[str, YNotebook] = {}
         self._awareness: dict[str, pycrdt.Awareness] = {}
+        self._owner_threads: dict[str, int] = {}
+        self._pending_disposals: dict[int, list[tuple[YNotebook | None, pycrdt.Awareness | None]]] = {}
         # Bidirectional cell_id <-> index mapping per path
         self._id_to_index: dict[str, dict[str, int]] = {}
         self._index_to_id: dict[str, dict[int, str]] = {}
         self._lock = threading.Lock()
 
+    def _flush_thread_disposals(self) -> None:
+        """Drop any queued YDoc objects owned by the current thread."""
+        thread_id = threading.get_ident()
+        with self._lock:
+            pending = self._pending_disposals.pop(thread_id, [])
+        # Releasing the references on the owner thread avoids pycrdt's
+        # cross-thread drop warnings for UndoManager-backed notebooks.
+        for notebook, awareness in pending:
+            del awareness
+            del notebook
+
     def get_or_create(self, path: str) -> YNotebook:
         """Get or create a YNotebook for the given path."""
+        self._flush_thread_disposals()
         with self._lock:
             if path not in self._documents:
                 self._documents[path] = YNotebook()
                 self._awareness[path] = pycrdt.Awareness(self._documents[path].ydoc)
+                self._owner_threads[path] = threading.get_ident()
             return self._documents[path]
 
     def awareness(self, path: str) -> pycrdt.Awareness | None:
@@ -236,7 +251,26 @@ class YDocService:
     def close(self, path: str) -> None:
         """Remove a notebook from the service."""
         with self._lock:
-            self._documents.pop(path, None)
-            self._awareness.pop(path, None)
+            notebook = self._documents.pop(path, None)
+            awareness = self._awareness.pop(path, None)
+            owner_thread = self._owner_threads.pop(path, None)
             self._id_to_index.pop(path, None)
             self._index_to_id.pop(path, None)
+
+        if notebook is None and awareness is None:
+            return
+
+        current_thread = threading.get_ident()
+        if owner_thread is None or owner_thread == current_thread:
+            return
+
+        with self._lock:
+            self._pending_disposals.setdefault(owner_thread, []).append((notebook, awareness))
+
+    def close_all(self) -> None:
+        """Remove every notebook from the service."""
+        with self._lock:
+            paths = list(self._documents.keys())
+        for path in paths:
+            self.close(path)
+        self._flush_thread_disposals()

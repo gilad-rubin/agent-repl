@@ -21,6 +21,7 @@ export type NotebookCommandAction =
     | { type: 'insert-cell'; where: 'above' | 'below'; nextMode: 'command' }
     | { type: 'change-cell-type'; cellType: 'code' | 'markdown' }
     | { type: 'delete-selected' }
+    | { type: 'undo-notebook' }
     | { type: 'activate-pending-edit' }
     | { type: 'enter-edit'; index: number }
     | { type: 'run-and-advance'; index: number }
@@ -119,6 +120,18 @@ export function decideNotebookCommandKeyAction(
                     actions: [],
                     nextLastDPressAt: now,
                 };
+        case 'z':
+            if (event.metaKey || event.ctrlKey) {
+                return {
+                    ...NOOP_DECISION,
+                    nextLastDPressAt: lastDPressAt,
+                };
+            }
+            return {
+                preventDefault: true,
+                actions: [{ type: 'undo-notebook' }],
+                nextLastDPressAt: 0,
+            };
         case 'Backspace':
         case 'Delete':
             return {
@@ -144,7 +157,7 @@ export function decideNotebookCommandKeyAction(
             return {
                 preventDefault: true,
                 actions: [
-                    event.shiftKey
+                    (event.shiftKey || event.metaKey || event.ctrlKey)
                         ? { type: 'run-and-advance', index: context.focusedIndex }
                         : { type: 'enter-edit', index: context.focusedIndex },
                 ],

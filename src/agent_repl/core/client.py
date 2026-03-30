@@ -294,6 +294,7 @@ class CoreClient(JsonApiClient):
             cell_id=cell_id,
             cell_index=cell_index,
             owner_session_id=owner_session_id,
+            wait=wait,
         ).to_payload()
         result = self._post("/api/notebooks/execute-cell", body, timeout=30)
         if wait and result.get("execution_id"):
@@ -317,6 +318,7 @@ class CoreClient(JsonApiClient):
             cell_type=cell_type,
             at_index=at_index,
             owner_session_id=owner_session_id,
+            wait=wait,
         ).to_payload()
         result = self._post(
             "/api/notebooks/insert-and-execute",

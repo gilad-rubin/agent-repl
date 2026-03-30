@@ -6,6 +6,12 @@ import {
   buildReplaceSourceOperation,
   buildReplaceSourceOperations,
 } from '../src/shared/notebookEditPayload';
+import {
+  daemonUnavailableRecovery,
+  recoveryFromPayload,
+  stalePreviewServerRecovery,
+  type RecoveryAdvice,
+} from '../src/shared/recovery';
 import { buildRuntimeSnapshot } from '../src/shared/runtimeSnapshot';
 
 type NotebookOutput = {
@@ -106,6 +112,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
   let activityCursor = 0;
   let pollingTimer: number | null = null;
   let touchTimer: number | null = null;
+  let pollingStarting = false;
   let attached = false;
   let activeCells: NotebookCell[] = [];
 
@@ -144,20 +151,48 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
     return null;
   };
 
+  function inferStandaloneRecovery(url: string, status: number, bodyText: string): RecoveryAdvice | undefined {
+    if (
+      status === 404
+      && url.startsWith('/api/standalone/')
+      && bodyText.includes('/api/standalone/')
+    ) {
+      return stalePreviewServerRecovery();
+    }
+    if (status >= 500 || bodyText.includes('Failed to fetch')) {
+      return daemonUnavailableRecovery();
+    }
+    return undefined;
+  }
+
   const postJson = async <T>(url: string, body: Record<string, unknown>): Promise<T> => {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const payload = await response.json().catch(() => ({}));
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      const wrapped = error instanceof Error ? error : new Error(String(error));
+      (wrapped as Error & { recovery?: RecoveryAdvice }).recovery = daemonUnavailableRecovery();
+      throw wrapped;
+    }
+    const text = await response.text();
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = {};
+    }
     if (!response.ok) {
       const error = new Error(
         typeof payload?.error === 'string' && payload.error.trim()
           ? payload.error
           : `Request failed with status ${response.status}`,
-      ) as Error & { conflict?: boolean };
+      ) as Error & { conflict?: boolean; recovery?: RecoveryAdvice };
       error.conflict = Boolean(payload?.conflict);
+      error.recovery = recoveryFromPayload(payload) ?? inferStandaloneRecovery(url, response.status, text);
       throw error;
     }
     return payload as T;
@@ -309,7 +344,26 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
     });
   };
 
+  const primeActivityCursor = async () => {
+    if (!currentNotebookPath) {
+      return;
+    }
+    await ensureAttached();
+    try {
+      const result = await postJson<{ cursor?: number }>('/api/standalone/notebook/activity', {
+        client_id: clientId,
+        path: requireNotebookPath(),
+      });
+      if (typeof result.cursor === 'number') {
+        activityCursor = result.cursor;
+      }
+    } catch {
+      // A failed prime should not block the notebook from loading.
+    }
+  };
+
   const stopPolling = () => {
+    pollingStarting = false;
     if (pollingTimer != null) {
       window.clearInterval(pollingTimer);
       pollingTimer = null;
@@ -380,16 +434,30 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
   };
 
   const startPolling = () => {
-    if (pollingTimer == null) {
+    if (pollingStarting) {
+      return;
+    }
+    if (pollingTimer != null || touchTimer != null) {
+      return;
+    }
+    pollingStarting = true;
+    void primeActivityCursor().finally(() => {
+      pollingStarting = false;
+      if (pollingTimer != null) {
+        return;
+      }
+      if (currentNotebookPath) {
+        void pollActivity();
+      }
       pollingTimer = window.setInterval(() => {
         void pollActivity();
       }, 500);
-    }
-    if (touchTimer == null) {
-      touchTimer = window.setInterval(() => {
-        void postJson('/api/standalone/session-touch', { client_id: clientId }).catch(() => undefined);
-      }, 15_000);
-    }
+      if (touchTimer == null) {
+        touchTimer = window.setInterval(() => {
+          void postJson('/api/standalone/session-touch', { client_id: clientId }).catch(() => undefined);
+        }, 15_000);
+      }
+    });
   };
 
   const endSession = () => {
@@ -455,6 +523,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               if (typeof message.path !== 'string' || !message.path.trim()) {
                 throw new Error('Missing notebook path');
               }
+              stopPolling();
               currentNotebookPath = message.path.trim();
               activityCursor = 0;
               activeCells = [];
@@ -462,6 +531,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               await loadWorkspaceTree();
               await loadContents(message.requestId);
               await loadRuntime();
+              startPolling();
               break;
             case 'get-kernels':
               await loadKernels(message.requestId);
@@ -533,51 +603,42 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
                   })],
                 });
               }
-              console.debug('[queue-debug] host: dispatching execute-started', { cell_id: message.cell_id });
-              dispatch({
-                type: 'execute-started',
-                requestId: message.requestId,
-                cell_id: message.cell_id,
-              });
-              void postJson('/api/standalone/notebook/execute-cell', {
+              const executeResult = await postJson<{
+                status?: string;
+                cell_id?: string | null;
+                error?: string;
+              }>('/api/standalone/notebook/execute-cell', {
                 client_id: clientId,
                 path: requireNotebookPath(),
                 cell_id: message.cell_id,
                 ...(typeof message.cell_index === 'number' ? { cell_index: message.cell_index } : {}),
-              }).then(async (result) => {
-                const response = result as { status?: string } | undefined;
-                console.debug('[queue-debug] host: execute-cell response', {
-                  cell_id: message.cell_id,
-                  status: response?.status,
-                });
+              });
+              const resultStatus = typeof executeResult?.status === 'string' ? executeResult.status : 'started';
+              const resultCellId = typeof executeResult?.cell_id === 'string' && executeResult.cell_id
+                ? executeResult.cell_id
+                : message.cell_id;
+              if (resultStatus === 'started') {
+                console.debug('[queue-debug] host: dispatching execute-started', { cell_id: resultCellId });
                 dispatch({
-                  type: 'execute-finished',
+                  type: 'execute-started',
                   requestId: message.requestId,
-                  cell_id: message.cell_id,
-                  ok: response?.status !== 'error',
+                  cell_id: resultCellId,
                 });
-                await loadContents();
-                await loadRuntime();
-              }).catch(async (error: Error & { conflict?: boolean }) => {
-                logNonBlockingFailure('execute-cell', error);
-                console.debug('[queue-debug] host: execute-cell error', {
-                  cell_id: message.cell_id,
-                  error: error.message,
-                  conflict: Boolean(error.conflict),
-                });
+              } else if (resultStatus === 'error') {
                 dispatch({
                   type: 'execute-failed',
                   requestId: message.requestId,
-                  cell_id: message.cell_id,
-                  message: error.message,
+                  cell_id: resultCellId,
+                  ok: false,
+                  message: typeof executeResult?.error === 'string' && executeResult.error.trim()
+                    ? executeResult.error
+                    : 'Execution failed.',
                 });
-                await loadRuntime().catch(() => undefined);
-                dispatch({
-                  type: 'error',
-                  requestId: message.requestId,
-                  message: error.message,
-                  conflict: Boolean(error.conflict),
-                });
+              } else {
+                dispatch({ type: 'ok', requestId: message.requestId });
+              }
+              void loadRuntime().catch((error) => {
+                logNonBlockingFailure('runtime refresh after execute-cell start', error);
               });
               break;
             case 'interrupt-execution':
@@ -591,25 +652,13 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               break;
             case 'execute-all':
               await ensureAttached();
-              runNotebookCommandFlow({
-                run: () => postJson('/api/standalone/notebook/execute-all', {
-                  client_id: clientId,
-                  path: requireNotebookPath(),
-                }),
-                onSuccess: async () => {
-                  dispatch({ type: 'ok', requestId: message.requestId });
-                  await loadContents();
-                  await loadRuntime();
-                },
-                onError: async (error: unknown) => {
-                  const typedError = error as Error & { conflict?: boolean };
-                  dispatch({
-                    type: 'error',
-                    requestId: message.requestId,
-                    message: typedError.message,
-                    conflict: Boolean(typedError.conflict),
-                  });
-                },
+              await postJson('/api/standalone/notebook/execute-all-async', {
+                client_id: clientId,
+                path: requireNotebookPath(),
+              });
+              dispatch({ type: 'ok', requestId: message.requestId });
+              void loadRuntime().catch((error) => {
+                logNonBlockingFailure('runtime refresh after execute-all start', error);
               });
               break;
             case 'select-kernel':
@@ -633,25 +682,13 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               break;
             case 'restart-and-run-all':
               await ensureAttached();
-              runNotebookCommandFlow({
-                run: () => postJson('/api/standalone/notebook/restart-and-run-all', {
-                  client_id: clientId,
-                  path: requireNotebookPath(),
-                }),
-                onSuccess: async () => {
-                  dispatch({ type: 'ok', requestId: message.requestId });
-                  await loadContents();
-                  await loadRuntime();
-                },
-                onError: async (error: unknown) => {
-                  const typedError = error as Error & { conflict?: boolean };
-                  dispatch({
-                    type: 'error',
-                    requestId: message.requestId,
-                    message: typedError.message,
-                    conflict: Boolean(typedError.conflict),
-                  });
-                },
+              await postJson('/api/standalone/notebook/restart-and-run-all-async', {
+                client_id: clientId,
+                path: requireNotebookPath(),
+              });
+              dispatch({ type: 'ok', requestId: message.requestId });
+              void loadRuntime().catch((error) => {
+                logNonBlockingFailure('runtime refresh after restart-and-run-all start', error);
               });
               break;
             case 'lsp-sync-cell': {
@@ -674,12 +711,13 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               break;
           }
         } catch (error) {
-          const typedError = error as Error & { conflict?: boolean };
+          const typedError = error as Error & { conflict?: boolean; recovery?: RecoveryAdvice };
           dispatch({
             type: 'error',
             requestId: message.requestId,
             message: typedError.message,
             conflict: Boolean(typedError.conflict),
+            recovery: typedError.recovery,
           });
         }
       })();

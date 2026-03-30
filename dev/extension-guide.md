@@ -4,7 +4,7 @@
 
 - `extension.ts` — VS Code activation, command registration
 - `server.ts` — extension HTTP server for CLI bridge
-- `routes.ts` — extension API surface for editor-backed features and compatibility paths
+- `routes.ts` — extension API surface for editor-backed features and bridge routes
 - `session.ts` — session auto-attach, heartbeat, headless notebook projection
 - `execution/queue.ts` — most complex module; read fully before modifying
 - `editor/provider.ts` — canvas custom editor host

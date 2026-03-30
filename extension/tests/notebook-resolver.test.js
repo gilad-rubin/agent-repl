@@ -63,3 +63,33 @@ test('restoreEditorFocus ignores notebook-cell text documents', async () => {
 
     assert.equal(showTextCalled, false);
 });
+
+test('ensureNotebookEditor re-focuses an already visible notebook when preserveFocus is false', async () => {
+    const notebook = { uri: { fsPath: '/tmp/demo.ipynb', toString: () => '/tmp/demo.ipynb' } };
+    const visibleEditor = {
+        notebook,
+        selections: [{ start: 0, end: 1 }],
+    };
+    const showCalls = [];
+    const resolver = loadResolver({
+        window: {
+            visibleNotebookEditors: [visibleEditor],
+            showNotebookDocument: async (_doc, options) => {
+                showCalls.push(options);
+                return { notebook, selections: options?.selections ?? visibleEditor.selections };
+            },
+        },
+    });
+
+    const selection = { start: 1, end: 2 };
+    await resolver.ensureNotebookEditor(notebook, {
+        preserveFocus: false,
+        preview: false,
+        selections: [selection],
+    });
+
+    assert.equal(showCalls.length, 1);
+    assert.equal(showCalls[0].preserveFocus, false);
+    assert.deepEqual(showCalls[0].selections, [selection]);
+    assert.deepEqual(visibleEditor.selections, [selection]);
+});

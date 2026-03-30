@@ -1,9 +1,11 @@
 """FastMCP adapter exposing notebook operations as MCP tools."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.resources.resource import ResourceContent
 
 
 def create_mcp_server(state: Any) -> FastMCP:
@@ -295,9 +297,14 @@ def create_mcp_server(state: Any) -> FastMCP:
     # Resources
     # ------------------------------------------------------------------
 
-    @mcp.resource("agent-repl://status")
-    def workspace_status() -> dict[str, Any]:
+    @mcp.resource("agent-repl://status", mime_type="application/json")
+    def workspace_status() -> list[ResourceContent]:
         """Current workspace status including runtime and document counts."""
-        return state.status_payload()
+        return [
+            ResourceContent(
+                json.dumps(state.status_payload(), indent=2),
+                mime_type="application/json",
+            )
+        ]
 
     return mcp

@@ -237,37 +237,45 @@ class NotebookExecutionService:
             operation="execute-cell",
         )
         actor = self.state._session_actor(owner_session_id, "agent")
+        final_index = index
         try:
-            cell.outputs = outputs
-            cell.execution_count = execution_count
-            self.state._set_cell_runtime_provenance(
-                cell,
-                runtime_id=runtime.runtime_id,
-                kernel_generation=runtime.kernel_generation,
-                status="error" if error_text else "ok",
-            )
-            self.state._save_notebook(real_path, notebook)
-            self.state._append_activity_event(
-                path=relative_path,
-                event_type="cell-outputs-updated",
-                detail=f"Updated outputs for cell {index + 1}",
-                actor=actor,
-                session_id=owner_session_id,
-                runtime_id=runtime.runtime_id,
-                cell_id=stable_cell_id,
-                cell_index=index,
-                data={"cell": self.state._cell_payload(cell, index)},
-            )
+            latest_notebook, _ = self.state._load_notebook(real_path)
+            try:
+                final_index = self.state._find_cell_index(latest_notebook, cell_id=stable_cell_id)
+            except RuntimeError:
+                final_index = -1
+            if final_index >= 0:
+                latest_cell = latest_notebook.cells[final_index]
+                latest_cell.outputs = outputs
+                latest_cell.execution_count = execution_count
+                self.state._set_cell_runtime_provenance(
+                    latest_cell,
+                    runtime_id=runtime.runtime_id,
+                    kernel_generation=runtime.kernel_generation,
+                    status="error" if error_text else "ok",
+                )
+                self.state._save_notebook(real_path, latest_notebook)
+                self.state._append_activity_event(
+                    path=relative_path,
+                    event_type="cell-outputs-updated",
+                    detail=f"Updated outputs for cell {final_index + 1}",
+                    actor=actor,
+                    session_id=owner_session_id,
+                    runtime_id=runtime.runtime_id,
+                    cell_id=stable_cell_id,
+                    cell_index=final_index,
+                    data={"cell": self.state._cell_payload(latest_cell, final_index)},
+                )
         finally:
             self.state._append_activity_event(
                 path=relative_path,
                 event_type="execution-finished",
-                detail=f"Finished cell {index + 1}",
+                detail=f"Finished cell {(final_index if final_index >= 0 else index) + 1}",
                 actor=actor,
                 session_id=owner_session_id,
                 runtime_id=runtime.runtime_id,
                 cell_id=stable_cell_id,
-                cell_index=index,
+                cell_index=final_index if final_index >= 0 else index,
             )
             self.state.persist()
         return {
@@ -275,7 +283,7 @@ class NotebookExecutionService:
             "path": relative_path,
             "execution_id": execution_id,
             "cell_id": stable_cell_id,
-            "cell_index": index,
+            "cell_index": final_index if final_index >= 0 else index,
             "outputs": outputs,
             "execution_count": execution_count,
             "operation": "execute-cell",
@@ -363,6 +371,11 @@ class NotebookExecutionService:
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         notebook, _ = self.state._load_notebook(real_path)
+        identity_changed = False
+        for index, cell in enumerate(notebook.cells):
+            identity_changed = self.state._ensure_cell_identity(cell, index) or identity_changed
+        if identity_changed:
+            self.state._save_notebook(real_path, notebook)
         executions = []
         stopped_on_error = False
         failed_cell_id: str | None = None
@@ -372,8 +385,8 @@ class NotebookExecutionService:
             result = self.execute_cell(
                 real_path,
                 relative_path,
-                cell_id=self.state._cell_id(cell, index),
-                cell_index=None,
+                cell_id=None,
+                cell_index=index,
                 owner_session_id=owner_session_id,
             )
             executions.append(result)

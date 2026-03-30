@@ -91,6 +91,14 @@ class TestMcpToolRegistration(unittest.TestCase):
         resource_uris = {str(r.uri) for r in resources}
         self.assertIn("agent-repl://status", resource_uris)
 
+    def test_status_resource_returns_json_text(self):
+        state = _mock_state()
+        state.status_payload.return_value = {"status": "ok", "workspace_root": "/tmp/demo"}
+        mcp = create_mcp_server(state)
+        result = _run(mcp.read_resource("agent-repl://status"))
+        self.assertEqual(result.contents[0].mime_type, "application/json")
+        self.assertIn('"workspace_root": "/tmp/demo"', result.contents[0].content)
+
 
 class TestMcpToolDelegation(unittest.TestCase):
     def test_notebook_contents_delegates_to_state(self):

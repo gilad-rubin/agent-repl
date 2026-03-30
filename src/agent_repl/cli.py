@@ -1,11 +1,15 @@
 """CLI entry point — argparse-based subcommands talking to the bridge."""
 from __future__ import annotations
 
+import asyncio
 import argparse
 import json
 import os
+import socket
+import shutil
 import sys
 import tomllib
+import subprocess
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
@@ -13,6 +17,7 @@ from typing import Any
 from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
 from agent_repl.core.server import serve_forever
+from agent_repl.http_api import ApiError
 from agent_repl.notebook_runtime_client import (
     NotebookRuntimeClient,
     call_with_owner_session,
@@ -52,10 +57,424 @@ def _workspace_root() -> str:
     return os.path.realpath(os.getcwd())
 
 
+def _workspace_root_from_arg(workspace_root: str | None = None) -> str:
+    return os.path.realpath(workspace_root or os.getcwd())
+
+
 def _notebook_client(path: str) -> NotebookRuntimeClient:
     workspace_root = _workspace_root()
     CoreClient.start(workspace_root)
     return CoreClient.discover(workspace_hint=path)
+
+
+def _workspace_settings_path(workspace_root: str) -> Path:
+    return Path(workspace_root) / ".vscode" / "settings.json"
+
+
+def _read_workspace_settings(workspace_root: str) -> dict[str, Any]:
+    settings_path = _workspace_settings_path(workspace_root)
+    if not settings_path.exists():
+        return {}
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Workspace settings file is not valid JSON: {settings_path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Workspace settings file must contain a JSON object: {settings_path}")
+    return payload
+
+
+def _write_workspace_settings(workspace_root: str, settings: dict[str, Any]) -> Path:
+    settings_path = _workspace_settings_path(workspace_root)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return settings_path
+
+
+def _workspace_editor_config_status(workspace_root: str) -> dict[str, Any]:
+    settings_path = _workspace_settings_path(workspace_root)
+    exists = settings_path.exists()
+    settings = _read_workspace_settings(workspace_root) if exists else {}
+    associations = settings.get("workbench.editorAssociations", {})
+    if associations is not None and not isinstance(associations, dict):
+        raise RuntimeError(
+            "Workspace setting 'workbench.editorAssociations' must be a JSON object in "
+            f"{settings_path}"
+        )
+    association_value = associations.get("*.ipynb") if isinstance(associations, dict) else None
+    return {
+        "settings_path": str(settings_path),
+        "exists": exists,
+        "association": association_value,
+        "default_canvas_configured": association_value == "agent-repl.canvasEditor",
+    }
+
+
+def _configure_workspace_editor_defaults(workspace_root: str) -> dict[str, Any]:
+    settings = _read_workspace_settings(workspace_root)
+    associations_raw = settings.get("workbench.editorAssociations")
+    if associations_raw is None:
+        associations: dict[str, Any] = {}
+    elif isinstance(associations_raw, dict):
+        associations = dict(associations_raw)
+    else:
+        raise RuntimeError(
+            "Workspace setting 'workbench.editorAssociations' must be a JSON object before "
+            "Agent REPL can update it."
+        )
+    previous = associations.get("*.ipynb")
+    associations["*.ipynb"] = "agent-repl.canvasEditor"
+    settings["workbench.editorAssociations"] = associations
+    settings_path = _write_workspace_settings(workspace_root, settings)
+    return {
+        "status": "ok",
+        "settings_path": str(settings_path),
+        "previous_association": previous,
+        "association": associations["*.ipynb"],
+        "changed": previous != associations["*.ipynb"],
+    }
+
+
+def _workspace_python_candidates(workspace_root: str) -> list[str]:
+    root = Path(workspace_root)
+    candidates = [
+        root / ".venv" / "bin" / "python",
+        root / ".venv" / "Scripts" / "python.exe",
+    ]
+    return [str(candidate) for candidate in candidates if candidate.exists()]
+
+
+def _probe_kernel_capability(python_path: str) -> dict[str, Any]:
+    result = subprocess.run(
+        [python_path, "-c", "import ipykernel"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return {
+        "python_path": python_path,
+        "kernel_capable": result.returncode == 0,
+        "install_hint": (
+            f"{python_path} -m pip install ipykernel"
+            if result.returncode != 0
+            else None
+        ),
+    }
+
+
+def _detect_cli_executable() -> str | None:
+    executable = shutil.which("agent-repl")
+    if executable:
+        return os.path.realpath(executable)
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0:
+        return os.path.realpath(argv0)
+    return None
+
+
+def _detect_install_method() -> str:
+    module_path = str(Path(__file__).resolve()).lower()
+    executable = (_detect_cli_executable() or "").lower()
+    combined = f"{module_path} {executable}"
+    if "pipx" in combined:
+        return "pipx"
+    if "/uv/" in combined or "\\uv\\" in combined:
+        return "uv"
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        return "pip"
+    return "unknown"
+
+
+def _detect_editor_clis() -> dict[str, Any]:
+    return {
+        name: {"available": bool(path), "path": path}
+        for name, path in {
+            "vscode": shutil.which("code"),
+            "cursor": shutil.which("cursor"),
+            "windsurf": shutil.which("windsurf"),
+        }.items()
+    }
+
+
+def _detect_installed_extensions() -> dict[str, Any]:
+    homes = {
+        "vscode": Path.home() / ".vscode" / "extensions",
+        "cursor": Path.home() / ".cursor" / "extensions",
+        "windsurf": Path.home() / ".windsurf" / "extensions",
+    }
+    result: dict[str, Any] = {}
+    for editor, root in homes.items():
+        matches: list[str] = []
+        if root.exists():
+            for pattern in ("giladrubin.agent-repl-*", "GiladRubin.agent-repl-*"):
+                matches.extend(str(path) for path in sorted(root.glob(pattern)))
+        result[editor] = {"extensions_root": str(root), "installed": matches}
+    return result
+
+
+def _doctor_payload(
+    *,
+    workspace_root: str,
+    runtime_dir: str | None = None,
+    probe_mcp: bool = False,
+) -> dict[str, Any]:
+    python_candidates = _workspace_python_candidates(workspace_root)
+    kernel_probe = _probe_kernel_capability(python_candidates[0]) if python_candidates else None
+    editor_config = _workspace_editor_config_status(workspace_root)
+    cli_executable = _detect_cli_executable()
+
+    checks = [
+        {
+            "name": "cli-executable",
+            "status": "ok" if cli_executable else "warn",
+            "detail": cli_executable or "agent-repl executable not detected on PATH",
+        },
+        {
+            "name": "workspace-venv",
+            "status": "ok" if python_candidates else "warn",
+            "detail": python_candidates[0] if python_candidates else "No workspace .venv detected",
+        },
+        {
+            "name": "workspace-kernel",
+            "status": (
+                "skip"
+                if not python_candidates
+                else ("ok" if kernel_probe and kernel_probe["kernel_capable"] else "warn")
+            ),
+            "detail": (
+                "No workspace .venv detected"
+                if not python_candidates
+                else (
+                    python_candidates[0]
+                    if kernel_probe and kernel_probe["kernel_capable"]
+                    else (kernel_probe or {}).get("install_hint")
+                )
+            ),
+        },
+        {
+            "name": "workspace-canvas-default",
+            "status": "ok" if editor_config["default_canvas_configured"] else "warn",
+            "detail": editor_config["settings_path"],
+        },
+    ]
+
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "workspace_root": workspace_root,
+        "cli": {
+            "version": _app_version(),
+            "executable": cli_executable,
+            "python_executable": sys.executable,
+        },
+        "install": {
+            "method": _detect_install_method(),
+            "available_installers": {
+                "uv": bool(shutil.which("uv")),
+                "pipx": bool(shutil.which("pipx")),
+                "pip": True,
+            },
+        },
+        "workspace": {
+            "python_candidates": python_candidates,
+            "recommended_python": python_candidates[0] if python_candidates else None,
+            "kernel_probe": kernel_probe,
+        },
+        "editor": {
+            "workspace": editor_config,
+            "clis": _detect_editor_clis(),
+            "installed_extensions": _detect_installed_extensions(),
+        },
+        "checks": checks,
+        "recommendations": [],
+    }
+
+    if not python_candidates:
+        payload["recommendations"].append(
+            "Create a workspace .venv or pass --kernel <python-path> when creating notebooks."
+        )
+    elif kernel_probe and not kernel_probe["kernel_capable"]:
+        payload["recommendations"].append(
+            f"Install ipykernel into the workspace environment with `{kernel_probe['install_hint']}`."
+        )
+    if not editor_config["default_canvas_configured"]:
+        payload["recommendations"].append(
+            "Run `agent-repl editor configure --default-canvas` to open *.ipynb files in the Agent REPL canvas by default for this workspace."
+        )
+
+    if probe_mcp:
+        mcp = _mcp_connection_payload(workspace_root=workspace_root, runtime_dir=runtime_dir)
+        payload["mcp"] = mcp["mcp"]
+        payload["checks"].append({
+            "name": "mcp-endpoint",
+            "status": "ok",
+            "detail": mcp["mcp"]["url"],
+        })
+
+    if any(check["status"] == "warn" for check in payload["checks"]):
+        payload["status"] = "warn"
+    return payload
+
+
+def _default_smoke_test_path() -> str:
+    return f"tmp/agent-repl-smoke-{os.getpid()}.ipynb"
+
+
+def _run_notebook_smoke_test(
+    *,
+    workspace_root: str,
+    path: str,
+    runtime_dir: str | None = None,
+    kernel_id: str | None = None,
+) -> dict[str, Any]:
+    client = _core_client(workspace_root, runtime_dir=runtime_dir)
+    create = client.notebook_create(path, kernel_id=kernel_id)
+    execute = call_with_owner_session(
+        client,
+        client.notebook_insert_execute,
+        path,
+        'print("agent-repl is working")',
+        timeout=30,
+        client_type="cli",
+        label="Setup",
+    )
+    return {
+        "status": "ok",
+        "path": path,
+        "create": create,
+        "execute": execute,
+    }
+
+
+def _mcp_server_config(*, server_name: str, url: str, token: str) -> dict[str, Any]:
+    return {
+        "mcpServers": {
+            server_name: {
+                "transport": "streamable-http",
+                "url": url,
+                "headers": {
+                    "Authorization": f"token {token}",
+                },
+            }
+        }
+    }
+
+
+def _mcp_connection_payload(
+    *,
+    workspace_root: str,
+    runtime_dir: str | None = None,
+    server_name: str = "agent-repl",
+) -> dict[str, Any]:
+    start_result = CoreClient.start(workspace_root, runtime_dir=runtime_dir)
+    client = CoreClient.discover(workspace_hint=workspace_root, runtime_dir=runtime_dir)
+    canonical_url = f"{client.base_url}/mcp"
+    return {
+        "status": "ok",
+        "workspace_root": start_result["workspace_root"],
+        "already_running": start_result.get("already_running", False),
+        "daemon": {
+            key: value
+            for key, value in start_result.items()
+            if key
+            in {
+                "mode",
+                "pid",
+                "started_at",
+                "version",
+                "documents",
+                "sessions",
+                "runs",
+                "runtime_dir",
+                "capabilities",
+            }
+        },
+        "mcp": {
+            "transport": "streamable-http",
+            "url": canonical_url,
+            "legacy_url": f"{client.base_url}/mcp/mcp",
+            "authorization_header": f"token {client.token}",
+        },
+        "config": _mcp_server_config(
+            server_name=server_name,
+            url=canonical_url,
+            token=client.token,
+        ),
+    }
+
+
+def _mcp_token_auth(token: str):
+    import httpx
+
+    class TokenAuth(httpx.Auth):
+        def __init__(self, inner_token: str):
+            self._token = inner_token
+
+        def auth_flow(self, request):
+            request.headers["Authorization"] = f"token {self._token}"
+            yield request
+
+    return TokenAuth(token)
+
+
+async def _run_mcp_smoke_test(url: str, token: str) -> list[dict[str, Any]]:
+    import json as _json
+
+    from fastmcp import Client as FastMcpClient
+
+    checks: list[dict[str, Any]] = []
+    async with FastMcpClient(url, auth=_mcp_token_auth(token)) as client:
+        tools = await client.list_tools()
+        checks.append({
+            "name": "list-tools",
+            "status": "ok",
+            "tool_count": len(tools),
+        })
+
+        resources = await client.list_resources()
+        checks.append({
+            "name": "list-resources",
+            "status": "ok",
+            "resource_count": len(resources),
+        })
+
+        status_resource = await client.read_resource("agent-repl://status")
+        status_payload = _json.loads(status_resource[0].text)
+        checks.append({
+            "name": "read-status-resource",
+            "status": "ok",
+            "workspace_root": status_payload.get("workspace_root"),
+        })
+
+    return checks
+
+
+def _mcp_smoke_test_payload(
+    *,
+    workspace_root: str,
+    runtime_dir: str | None = None,
+) -> dict[str, Any]:
+    connection = _mcp_connection_payload(workspace_root=workspace_root, runtime_dir=runtime_dir)
+    checks = [
+        {
+            "name": "core-status",
+            "status": "ok",
+            "documents": connection["daemon"].get("documents"),
+            "sessions": connection["daemon"].get("sessions"),
+            "runs": connection["daemon"].get("runs"),
+        },
+        *asyncio.run(
+            _run_mcp_smoke_test(
+                connection["mcp"]["url"],
+                connection["mcp"]["authorization_header"].removeprefix("token "),
+            )
+        ),
+    ]
+    return {
+        "status": "ok",
+        "workspace_root": connection["workspace_root"],
+        "mcp": connection["mcp"],
+        "checks": checks,
+    }
 
 # ------------------------------------------------------------------
 # Subcommand handlers
@@ -319,6 +738,145 @@ def cmd_open(args: argparse.Namespace) -> int:
         browser_url=getattr(args, "browser_url", None),
     )
     _out(result, args.pretty)
+    return 0
+
+
+def _find_extension_root() -> Path:
+    """Locate the extension/ directory relative to the installed package."""
+    # In dev: repo_root/extension/
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / "extension"
+    if (candidate / "scripts" / "preview-webview.mjs").exists():
+        return candidate
+    raise FileNotFoundError(
+        "Cannot find extension/scripts/preview-webview.mjs — "
+        "browse requires a source checkout of agent-repl"
+    )
+
+
+STANDALONE_PREVIEW_PROTOCOL_VERSION = "standalone-preview-v1"
+STANDALONE_PREVIEW_REQUIRED_ROUTES = {
+    "/api/standalone/health",
+    "/api/standalone/workspace-tree",
+    "/api/standalone/notebook/contents",
+    "/api/standalone/notebook/status",
+    "/api/standalone/notebook/runtime",
+    "/api/standalone/notebook/execute-cell-async",
+}
+
+
+def _preview_server_health(host: str, port: int) -> dict[str, Any] | None:
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/api/standalone/health", timeout=1) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+            return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _preview_server_is_compatible(health: dict[str, Any] | None, *, workspace_root: str) -> bool:
+    if not isinstance(health, dict):
+        return False
+    if health.get("protocol_version") != STANDALONE_PREVIEW_PROTOCOL_VERSION:
+        return False
+    reported_root = health.get("workspace_root")
+    if not isinstance(reported_root, str) or os.path.realpath(reported_root) != workspace_root:
+        return False
+    api_routes = health.get("api_routes")
+    if not isinstance(api_routes, list):
+        return False
+    return STANDALONE_PREVIEW_REQUIRED_ROUTES.issubset({route for route in api_routes if isinstance(route, str)})
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _find_available_preview_port(host: str, start_port: int) -> int:
+    for candidate in range(start_port, start_port + 50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, candidate))
+            except OSError:
+                continue
+            return candidate
+    raise RuntimeError(f"No free preview port found starting at {start_port}")
+
+
+def _wait_for_preview_server(host: str, port: int, *, workspace_root: str, timeout_seconds: float = 6.0) -> bool:
+    import time
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _preview_server_is_compatible(_preview_server_health(host, port), workspace_root=workspace_root):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def cmd_browse(args: argparse.Namespace) -> int:
+    import subprocess
+    import webbrowser
+
+    host = "127.0.0.1"
+    requested_port = int(getattr(args, "port", None) or os.environ.get("AGENT_REPL_PREVIEW_PORT", 4173))
+    workspace_root = os.path.realpath(os.getcwd())
+    existing_health = _preview_server_health(host, requested_port)
+
+    if _preview_server_is_compatible(existing_health, workspace_root=workspace_root):
+        url = f"http://{host}:{requested_port}/preview.html"
+        webbrowser.open(url)
+        _out({"status": "ok", "url": url, "server": "already_running"}, args.pretty)
+        return 0
+
+    extension_root = _find_extension_root()
+    launch_port = requested_port
+    warning = None
+    if existing_health is not None or _port_in_use(host, requested_port):
+        launch_port = _find_available_preview_port(host, requested_port + 1)
+        warning = (
+            f"Preview port {requested_port} is already serving an incompatible or stale server; "
+            f"started a fresh preview on port {launch_port} instead."
+        )
+
+    env = {**os.environ, "AGENT_REPL_PREVIEW_PORT": str(launch_port), "AGENT_REPL_STANDALONE_WORKSPACE": workspace_root}
+    proc = subprocess.Popen(
+        ["node", "scripts/preview-webview.mjs"],
+        cwd=str(extension_root),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    if proc.poll() is not None:
+        print(f"Preview server exited with code {proc.returncode}", file=sys.stderr)
+        return 1
+    if not _wait_for_preview_server(host, launch_port, workspace_root=workspace_root):
+        proc.terminate()
+        print(json.dumps({
+            "error": "Preview server did not become healthy in time",
+            "recovery": {
+                "reason": "preview-start-timeout",
+                "summary": "The browser preview server did not finish booting or failed its health checks.",
+                "suggestions": [
+                    "Run `cd extension && npm run preview:webview` and inspect the server logs.",
+                    "If another process is already bound to the requested port, try again with `agent-repl browse --port <fresh-port>`.",
+                ],
+            },
+        }, indent=2), file=sys.stderr)
+        return 1
+
+    url = f"http://{host}:{launch_port}/preview.html"
+    webbrowser.open(url)
+    payload: dict[str, Any] = {"status": "ok", "url": url, "pid": proc.pid, "port": launch_port}
+    if warning:
+        payload["warning"] = warning
+    _out(payload, args.pretty)
     return 0
 
 
@@ -668,6 +1226,130 @@ def cmd_core(args: argparse.Namespace) -> int:
     raise RuntimeError("Unknown core command")
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    workspace_root = os.path.realpath(getattr(args, "workspace_root", None) or os.getcwd())
+    runtime_dir = getattr(args, "runtime_dir", None)
+
+    if args.mcp_command == "setup":
+        result = _mcp_connection_payload(
+            workspace_root=workspace_root,
+            runtime_dir=runtime_dir,
+            server_name=args.server_name,
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.mcp_command == "status":
+        result = _mcp_connection_payload(
+            workspace_root=workspace_root,
+            runtime_dir=runtime_dir,
+        )
+        result.pop("config", None)
+        _out(result, args.pretty)
+        return 0
+
+    if args.mcp_command == "config":
+        result = _mcp_connection_payload(
+            workspace_root=workspace_root,
+            runtime_dir=runtime_dir,
+            server_name=args.server_name,
+        )
+        _out(result["config"], args.pretty)
+        return 0
+
+    if args.mcp_command == "smoke-test":
+        result = _mcp_smoke_test_payload(
+            workspace_root=workspace_root,
+            runtime_dir=runtime_dir,
+        )
+        _out(result, args.pretty)
+        return 0
+
+    raise RuntimeError("Unknown mcp command")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    workspace_root = _workspace_root_from_arg(getattr(args, "workspace_root", None))
+    payload = _doctor_payload(
+        workspace_root=workspace_root,
+        runtime_dir=getattr(args, "runtime_dir", None),
+        probe_mcp=getattr(args, "probe_mcp", False),
+    )
+    if getattr(args, "smoke_test", False):
+        smoke_path = getattr(args, "smoke_test_path", None) or _default_smoke_test_path()
+        payload["smoke_test"] = _run_notebook_smoke_test(
+            workspace_root=workspace_root,
+            path=smoke_path,
+            runtime_dir=getattr(args, "runtime_dir", None),
+        )
+    _out(payload, args.pretty)
+    return 0
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    workspace_root = _workspace_root_from_arg(getattr(args, "workspace_root", None))
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "workspace_root": workspace_root,
+        "actions": [],
+    }
+
+    if getattr(args, "configure_editor_default", False):
+        payload["actions"].append({
+            "name": "editor-configure",
+            "result": _configure_workspace_editor_defaults(workspace_root),
+        })
+
+    if getattr(args, "with_mcp", False):
+        payload["actions"].append({
+            "name": "mcp-setup",
+            "result": _mcp_connection_payload(
+                workspace_root=workspace_root,
+                runtime_dir=getattr(args, "runtime_dir", None),
+                server_name=args.server_name,
+            ),
+        })
+        if getattr(args, "mcp_smoke_test", True):
+            payload["actions"].append({
+                "name": "mcp-smoke-test",
+                "result": _mcp_smoke_test_payload(
+                    workspace_root=workspace_root,
+                    runtime_dir=getattr(args, "runtime_dir", None),
+                ),
+            })
+
+    if getattr(args, "smoke_test", False):
+        smoke_path = getattr(args, "smoke_test_path", None) or _default_smoke_test_path()
+        payload["actions"].append({
+            "name": "notebook-smoke-test",
+            "result": _run_notebook_smoke_test(
+                workspace_root=workspace_root,
+                path=smoke_path,
+                runtime_dir=getattr(args, "runtime_dir", None),
+            ),
+        })
+
+    payload["doctor"] = _doctor_payload(
+        workspace_root=workspace_root,
+        runtime_dir=getattr(args, "runtime_dir", None),
+        probe_mcp=getattr(args, "with_mcp", False),
+    )
+    payload["recommendations"] = list(payload["doctor"].get("recommendations", []))
+    _out(payload, args.pretty)
+    return 0
+
+
+def cmd_editor(args: argparse.Namespace) -> int:
+    workspace_root = _workspace_root_from_arg(getattr(args, "workspace_root", None))
+    if args.editor_command == "configure":
+        if not getattr(args, "default_canvas", False):
+            raise SystemExit("Error: provide --default-canvas")
+        result = _configure_workspace_editor_defaults(workspace_root)
+        _out(result, args.pretty)
+        return 0
+    raise RuntimeError("Unknown editor command")
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
@@ -844,6 +1526,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--editor", choices=["canvas", "jupyter"], default="canvas", help="Editor to use (default: canvas)")
     p.add_argument("--browser-url", help="Standalone browser canvas URL to use when --target browser")
 
+    # browse
+    p = sub.add_parser("browse", help="Open the notebook explorer in a browser")
+    p.add_argument("--port", type=int, help="Preview server port (default: 4173 or AGENT_REPL_PREVIEW_PORT)")
+
     # kernels
     sub.add_parser("kernels", help="List available notebook kernels")
 
@@ -864,6 +1550,55 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", required=True, help="Prompt cell ID")
     p.add_argument("-s", "--source", help="Response code (or pipe to stdin)")
     p.add_argument("--source-file", help="Read source from this file")
+
+    # setup
+    p = sub.add_parser("setup", help="Run onboarding checks and optional workspace setup actions")
+    p.add_argument("--workspace-root", help="Workspace root to inspect and configure (default: cwd)")
+    p.add_argument("--configure-editor-default", action="store_true", help="Set *.ipynb to open in the Agent REPL canvas for this workspace")
+    p.add_argument("--with-mcp", action="store_true", help="Run the public MCP onboarding flow and include connection details")
+    p.add_argument("--mcp-smoke-test", action=argparse.BooleanOptionalAction, default=True, help="When --with-mcp is set, also run the MCP smoke test (default: enabled)")
+    p.add_argument("--server-name", default="agent-repl", help="Server name for generated MCP config when --with-mcp is used")
+    p.add_argument("--smoke-test", action="store_true", help="Create and execute a notebook smoke test in this workspace")
+    p.add_argument("--smoke-test-path", help="Notebook path to use with --smoke-test (default: tmp/agent-repl-smoke-<pid>.ipynb)")
+    p.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    # doctor
+    p = sub.add_parser("doctor", help="Inspect CLI, workspace, editor, and optional MCP readiness")
+    p.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    p.add_argument("--probe-mcp", action="store_true", help="Start or reuse the workspace daemon and report the canonical MCP endpoint")
+    p.add_argument("--smoke-test", action="store_true", help="Create and execute a notebook smoke test in this workspace")
+    p.add_argument("--smoke-test-path", help="Notebook path to use with --smoke-test (default: tmp/agent-repl-smoke-<pid>.ipynb)")
+    p.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    # editor
+    p = sub.add_parser("editor", help="Configure editor-facing workspace defaults")
+    esub = p.add_subparsers(dest="editor_command")
+
+    ep = esub.add_parser("configure", help="Update workspace settings for VS Code-family editors")
+    ep.add_argument("--workspace-root", help="Workspace root to configure (default: cwd)")
+    ep.add_argument("--default-canvas", action="store_true", help="Set *.ipynb to open in the Agent REPL canvas for this workspace")
+
+    # mcp
+    p = sub.add_parser("mcp", help="Use agent-repl as an MCP server")
+    mcpsub = p.add_subparsers(dest="mcp_command")
+
+    vp = mcpsub.add_parser("setup", help="Start or reuse the workspace MCP server and print connection details")
+    vp.add_argument("--workspace-root", help="Workspace root to bind the MCP server to (default: cwd)")
+    vp.add_argument("--server-name", default="agent-repl", help="Server name for the generated MCP config (default: agent-repl)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = mcpsub.add_parser("status", help="Show the current MCP endpoint and daemon status for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = mcpsub.add_parser("config", help="Print a standard mcpServers config block for this workspace")
+    vp.add_argument("--workspace-root", help="Workspace root to bind the MCP server to (default: cwd)")
+    vp.add_argument("--server-name", default="agent-repl", help="Server name for the generated MCP config (default: agent-repl)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = mcpsub.add_parser("smoke-test", help="Verify the MCP endpoint with a real FastMCP client round-trip")
+    vp.add_argument("--workspace-root", help="Workspace root to bind the MCP server to (default: cwd)")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     # core
     p = sub.add_parser("core", help=argparse.SUPPRESS, description="Internal core daemon diagnostics")
@@ -1115,10 +1850,15 @@ def build_parser() -> argparse.ArgumentParser:
         "restart-run-all",
         "new",
         "open",
+        "browse",
         "kernels",
         "select-kernel",
         "prompts",
         "respond",
+        "setup",
+        "doctor",
+        "editor",
+        "mcp",
     ]
     sub.metavar = "{" + ",".join(public_commands) + "}"
     sub._choices_actions = [action for action in sub._choices_actions if action.dest != "core"]
@@ -1157,10 +1897,15 @@ def main(argv: list[str] | None = None) -> int:
         "restart-run-all": cmd_restart_run_all,
         "new": cmd_new,
         "open": cmd_open,
+        "browse": cmd_browse,
         "kernels": cmd_kernels,
         "select-kernel": cmd_select_kernel,
         "prompts": cmd_prompts,
         "respond": cmd_respond,
+        "setup": cmd_setup,
+        "doctor": cmd_doctor,
+        "editor": cmd_editor,
+        "mcp": cmd_mcp,
         "core": cmd_core,
     }
 
@@ -1171,6 +1916,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return handler(args)
+    except ApiError as exc:
+        print(json.dumps(exc.to_payload(), indent=2), file=sys.stderr)
+        return 1
     except Exception as exc:
         print(json.dumps({"error": str(exc)}, indent=2), file=sys.stderr)
         return 1

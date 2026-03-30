@@ -9,8 +9,9 @@ import { coreCliPlans, sessionIdForWorkspaceState } from '../session';
 import { buildActivityPollResult } from '../shared/notebookActivity';
 import { runNotebookCommandFlow } from '../shared/notebookCommandFlow';
 import { buildReplaceSourceOperation } from '../shared/notebookEditPayload';
+import { daemonUnavailableRecovery, recoveryFromPayload } from '../shared/recovery';
 import { buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
-import { NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
+import { DefinitionTarget, NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
 import type { CellData } from './protocol';
 
 const execFile = util.promisify(childProcess.execFile);
@@ -24,6 +25,7 @@ const RUNTIME_FILE_PREFIX = 'agent-repl-core-';
 export class DaemonProxy {
     readonly disposables: vscode.Disposable[] = [];
     private pollTimer: ReturnType<typeof setInterval> | undefined;
+    private pollStarting = false;
     private activityCursor = 0;
     private notebookPath: string;
     private workspaceRoot: string;
@@ -64,6 +66,7 @@ export class DaemonProxy {
                 case 'flush-draft': await this.handleFlushDraft(msg); break;
                 case 'lsp-sync-cell': await this.handleLspSyncCell(msg); break;
                 case 'lsp-complete': await this.handleLspComplete(msg); break;
+                case 'lsp-definition': await this.handleLspDefinition(msg); break;
                 case 'open-external-link': await this.handleOpenLink(msg); break;
             }
         } catch (err: any) {
@@ -72,6 +75,7 @@ export class DaemonProxy {
                 requestId: msg.requestId ?? '',
                 message: err?.message ?? String(err),
                 conflict: Boolean(err?.conflict),
+                recovery: this.recoveryForError(err),
             });
         }
     }
@@ -316,6 +320,29 @@ export class DaemonProxy {
         });
     }
 
+    private async handleLspDefinition(msg: any): Promise<void> {
+        if (
+            typeof msg.requestId !== 'string' ||
+            typeof msg.cell_id !== 'string' ||
+            typeof msg.source !== 'string' ||
+            typeof msg.offset !== 'number'
+        ) {
+            return;
+        }
+
+        this.draftSources.set(msg.cell_id, msg.source);
+        this.updateCellSource(msg.cell_id, msg.source);
+        this.syncLsp();
+
+        const target = await this.lspClient?.resolveDefinitionAt(msg.cell_id, msg.offset) ?? null;
+        if (!target) {
+            this.postMessage({ type: 'ok', requestId: msg.requestId });
+            return;
+        }
+
+        await this.openDefinitionTarget(msg.requestId, target);
+    }
+
     // -----------------------------------------------------------------------
     // Execution
     // -----------------------------------------------------------------------
@@ -324,6 +351,7 @@ export class DaemonProxy {
         const body: any = {
             path: this.notebookPath,
             cell_id: msg.cell_id,
+            wait: false,
         };
         const ownerSessionId = this.ownerSessionId();
         if (ownerSessionId) {
@@ -425,15 +453,20 @@ export class DaemonProxy {
     }
 
     private async handleExecuteAll(msg: any): Promise<void> {
-        const body: any = { path: this.notebookPath };
+        const body: any = { path: this.notebookPath, wait: false };
         const ownerSessionId = this.ownerSessionId();
         if (ownerSessionId) {
             body.owner_session_id = ownerSessionId;
         }
         runNotebookCommandFlow({
             run: () => this.httpPost('/api/notebooks/execute-all', body),
-            onSuccess: async () => {
+            onSuccess: async (result: any) => {
+                const resultStatus = typeof result?.status === 'string' ? result.status : 'ok';
                 this.postMessage({ type: 'ok', requestId: msg.requestId });
+                if (resultStatus === 'started' || resultStatus === 'queued') {
+                    await this.handleGetRuntime({ requestId: 'execute-all-runtime' });
+                    return;
+                }
                 await this.refreshNotebookSurfaceAfterSuccess(
                     'execute-all',
                     async () => {
@@ -455,6 +488,7 @@ export class DaemonProxy {
                     requestId: msg.requestId,
                     message: err?.message ?? String(err),
                     conflict: Boolean(err?.conflict),
+                    recovery: this.recoveryForError(err),
                 });
             },
         });
@@ -489,15 +523,20 @@ export class DaemonProxy {
     }
 
     private async handleRestartAndRunAll(msg: any): Promise<void> {
-        const body: any = { path: this.notebookPath };
+        const body: any = { path: this.notebookPath, wait: false };
         const ownerSessionId = this.ownerSessionId();
         if (ownerSessionId) {
             body.owner_session_id = ownerSessionId;
         }
         runNotebookCommandFlow({
             run: () => this.httpPost('/api/notebooks/restart-and-run-all', body),
-            onSuccess: async () => {
+            onSuccess: async (result: any) => {
+                const resultStatus = typeof result?.status === 'string' ? result.status : 'ok';
                 this.postMessage({ type: 'ok', requestId: msg.requestId });
+                if (resultStatus === 'started' || resultStatus === 'queued') {
+                    await this.handleGetRuntime({ requestId: 'restart-and-run-all-runtime' });
+                    return;
+                }
                 await this.refreshNotebookSurfaceAfterSuccess(
                     'restart-and-run-all',
                     async () => {
@@ -519,6 +558,7 @@ export class DaemonProxy {
                     requestId: msg.requestId,
                     message: err?.message ?? String(err),
                     conflict: Boolean(err?.conflict),
+                    recovery: this.recoveryForError(err),
                 });
             },
         });
@@ -572,13 +612,32 @@ export class DaemonProxy {
     // -----------------------------------------------------------------------
 
     private startPolling(): void {
-        if (this.pollTimer || this.disposed) return;
-        this.pollTimer = setInterval(() => this.pollActivity(), 500);
-        void this.pollActivity();
+        if (this.pollTimer || this.disposed || this.pollStarting) return;
+        this.pollStarting = true;
+        void this.primeActivityCursor().finally(() => {
+            this.pollStarting = false;
+            if (this.pollTimer || this.disposed) return;
+            this.pollTimer = setInterval(() => this.pollActivity(), 500);
+            void this.pollActivity();
+        });
     }
 
     private stopPolling(): void {
+        this.pollStarting = false;
         if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = undefined; }
+    }
+
+    private async primeActivityCursor(): Promise<void> {
+        try {
+            const result = await this.httpPost('/api/notebooks/activity', {
+                path: this.notebookPath,
+            });
+            if (typeof result.cursor === 'number') {
+                this.activityCursor = result.cursor;
+            }
+        } catch {
+            // Non-fatal. We can still fall back to regular polling.
+        }
     }
 
     private async pollActivity(): Promise<void> {
@@ -711,6 +770,7 @@ export class DaemonProxy {
                 requestId,
                 message: err?.message ?? String(err),
                 conflict: Boolean(err?.conflict),
+                recovery: this.recoveryForError(err),
             });
         }
     }
@@ -732,8 +792,25 @@ export class DaemonProxy {
                 requestId,
                 message: err?.message ?? String(err),
                 conflict: Boolean(err?.conflict),
+                recovery: this.recoveryForError(err),
             });
         }
+    }
+
+    private recoveryForError(err: any) {
+        const payloadRecovery = recoveryFromPayload(err?.payload);
+        if (payloadRecovery) {
+            return payloadRecovery;
+        }
+        const message = err?.message ?? String(err);
+        if (
+            message.includes('Daemon not found')
+            || message.includes('Daemon request timeout')
+            || message.includes('Invalid JSON from daemon')
+        ) {
+            return daemonUnavailableRecovery();
+        }
+        return undefined;
     }
 
     private async refreshNotebookSurfaceAfterSuccess(
@@ -827,6 +904,32 @@ export class DaemonProxy {
     private syncLsp(): void {
         this.ensureLspStarted();
         this.lspClient?.syncCells(this.toLspSnapshots());
+    }
+
+    private async openDefinitionTarget(requestId: string, target: DefinitionTarget): Promise<void> {
+        if (target.kind === 'cell') {
+            this.postMessage({
+                type: 'lsp-definition-target',
+                requestId,
+                cell_id: target.cellId,
+                from: target.from,
+                to: target.to,
+            });
+            return;
+        }
+
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target.filePath));
+        const editor = await vscode.window.showTextDocument(document, {
+            preview: false,
+            preserveFocus: false,
+        });
+        const range = new vscode.Range(
+            new vscode.Position(target.range.start.line, target.range.start.character),
+            new vscode.Position(target.range.end.line, target.range.end.character),
+        );
+        editor.selection = new vscode.Selection(range.start, range.end);
+        editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+        this.postMessage({ type: 'ok', requestId });
     }
 
     // -----------------------------------------------------------------------

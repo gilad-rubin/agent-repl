@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -62,6 +62,12 @@ def create_app(
             shutdown_callback()
         return JSONResponse(body)
 
+    async def legacy_mcp_redirect(request: Request) -> Response:
+        destination = "/mcp"
+        if request.url.query:
+            destination = f"{destination}?{request.url.query}"
+        return RedirectResponse(destination, status_code=307)
+
     # ------------------------------------------------------------------
     # MCP adapter
     # ------------------------------------------------------------------
@@ -69,7 +75,7 @@ def create_app(
     from agent_repl.core.mcp_adapter import create_mcp_server
 
     mcp_server = create_mcp_server(state)
-    mcp_app = mcp_server.http_app(path="/mcp")
+    mcp_app = mcp_server.http_app(path="/")
 
     # ------------------------------------------------------------------
     # Route table — explicit per-path routes from domain modules
@@ -86,6 +92,8 @@ def create_app(
         Route("/api/health", health, methods=["GET"]),
         Route("/api/status", status, methods=["GET"]),
         Route("/api/shutdown", shutdown, methods=["POST"]),
+        Route("/mcp/mcp", legacy_mcp_redirect, methods=["GET", "POST", "DELETE"]),
+        Route("/mcp/mcp/", legacy_mcp_redirect, methods=["GET", "POST", "DELETE"]),
         *domain_routes,
         Mount("/mcp", app=mcp_app),
     ]

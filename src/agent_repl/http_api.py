@@ -8,19 +8,55 @@ from typing import Any
 import requests
 
 
-def json_error_message(response: requests.Response) -> str | None:
+def json_error_payload(response: requests.Response) -> dict[str, Any] | None:
     try:
         payload = response.json()
     except ValueError:
         return None
 
-    if not isinstance(payload, dict):
+    return payload if isinstance(payload, dict) else None
+
+
+def json_error_message(response: requests.Response) -> str | None:
+    payload = json_error_payload(response)
+    if payload is None:
         return None
 
     error = payload.get("error")
     if isinstance(error, str) and error.strip():
         return error.strip()
     return None
+
+
+class ApiError(RuntimeError):
+    """Structured HTTP API failure that preserves JSON payload details."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        reason: str | None = None,
+        url: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.reason = reason
+        self.url = url
+        self.payload = payload or {}
+        self.recovery = self.payload.get("recovery")
+
+    def to_payload(self) -> dict[str, Any]:
+        body = dict(self.payload)
+        body.setdefault("error", str(self))
+        if self.status_code is not None:
+            body.setdefault("status_code", self.status_code)
+        if self.reason:
+            body.setdefault("reason_phrase", self.reason)
+        if self.url:
+            body.setdefault("url", self.url)
+        return body
 
 
 class JsonApiClient:
@@ -66,13 +102,28 @@ class JsonApiClient:
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
+            payload = json_error_payload(response)
             detail = json_error_message(response)
+            status = getattr(response, "status_code", None)
+            reason = getattr(response, "reason", "") or "HTTP error"
+            url = getattr(response, "url", None)
             if detail:
-                status = getattr(response, "status_code", "HTTP error")
-                reason = getattr(response, "reason", "") or "HTTP error"
-                url = getattr(response, "url", None)
                 location = f" for url: {url}" if url else ""
-                raise RuntimeError(f"{status} {reason}{location}: {detail}") from exc
+                raise ApiError(
+                    f"{status} {reason}{location}: {detail}",
+                    status_code=status,
+                    reason=reason,
+                    url=url,
+                    payload=payload,
+                ) from exc
+            if payload is not None:
+                raise ApiError(
+                    payload.get("message") or payload.get("error") or f"{status} {reason}",
+                    status_code=status,
+                    reason=reason,
+                    url=url,
+                    payload=payload,
+                ) from exc
             raise
 
 

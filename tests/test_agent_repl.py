@@ -19,11 +19,12 @@ from unittest import mock
 
 import requests
 
+import agent_repl.cli as cli_module
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
 from agent_repl.core.server import CoreState, _load_or_create_state
-from agent_repl.http_api import poll_execution_until_complete
+from agent_repl.http_api import ApiError, poll_execution_until_complete
 from agent_repl.notebook_runtime_client import (
     call_with_owner_session,
     resolve_owner_session_id,
@@ -102,6 +103,82 @@ class TestHttpApiHelpers(unittest.TestCase):
             },
         )
         self.assertEqual(fetch_execution.call_count, 2)
+
+    def test_api_error_keeps_structured_recovery_payload(self):
+        error = ApiError(
+            "409 Conflict: Operation blocked",
+            status_code=409,
+            reason="Conflict",
+            url="http://example.test/api/notebooks/edit",
+            payload={
+                "error": "Operation blocked",
+                "recovery": {
+                    "reason": "lease-conflict",
+                    "summary": "Another session holds the lease.",
+                },
+            },
+        )
+
+        self.assertEqual(
+            error.to_payload(),
+            {
+                "error": "Operation blocked",
+                "recovery": {
+                    "reason": "lease-conflict",
+                    "summary": "Another session holds the lease.",
+                },
+                "status_code": 409,
+                "reason_phrase": "Conflict",
+                "url": "http://example.test/api/notebooks/edit",
+            },
+        )
+
+
+class TestPreviewServerCompatibilityHelpers(unittest.TestCase):
+    def test_preview_server_is_compatible_requires_workspace_protocol_and_routes(self):
+        self.assertTrue(
+            cli_module._preview_server_is_compatible(
+                {
+                    "protocol_version": cli_module.STANDALONE_PREVIEW_PROTOCOL_VERSION,
+                    "workspace_root": "/workspace",
+                    "api_routes": sorted(cli_module.STANDALONE_PREVIEW_REQUIRED_ROUTES),
+                },
+                workspace_root="/workspace",
+            )
+        )
+
+        self.assertFalse(
+            cli_module._preview_server_is_compatible(
+                {
+                    "protocol_version": "old-preview",
+                    "workspace_root": "/workspace",
+                    "api_routes": sorted(cli_module.STANDALONE_PREVIEW_REQUIRED_ROUTES),
+                },
+                workspace_root="/workspace",
+            )
+        )
+
+        self.assertFalse(
+            cli_module._preview_server_is_compatible(
+                {
+                    "protocol_version": cli_module.STANDALONE_PREVIEW_PROTOCOL_VERSION,
+                    "workspace_root": "/other-workspace",
+                    "api_routes": sorted(cli_module.STANDALONE_PREVIEW_REQUIRED_ROUTES),
+                },
+                workspace_root="/workspace",
+            )
+        )
+
+        self.assertFalse(
+            cli_module._preview_server_is_compatible(
+                {
+                    "protocol_version": cli_module.STANDALONE_PREVIEW_PROTOCOL_VERSION,
+                    "workspace_root": "/workspace",
+                    "api_routes": ["/api/standalone/health"],
+                },
+                workspace_root="/workspace",
+            )
+        )
 
 
 class TestNotebookRuntimeClientHelpers(unittest.TestCase):
@@ -391,6 +468,7 @@ class TestCoreState(unittest.TestCase):
 
     def tearDown(self):
         self.state.shutdown_headless_runtimes()
+        self.state._ydoc_service.close_all()
         self._test_db.close()
         self.tmpdir.cleanup()
 
@@ -578,6 +656,7 @@ class TestCoreState(unittest.TestCase):
             "cells": [{
                 "cell_type": "code",
                 "execution_count": None,
+                "id": "legacy-nbformat-id",
                 "metadata": {},
                 "outputs": [],
                 "source": ["x = 1\n"],
@@ -828,6 +907,53 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(status_status, 200)
             self.assertFalse(status_body["open"])
             self.assertEqual(status_body["kernel_state"], "idle")
+
+    def test_headless_restart_and_run_all_assigns_missing_cell_ids_before_batch_execution(self):
+        notebook_path = "notebooks/headless-restart-missing-ids.ipynb"
+        kernel_python = _python_with_ipykernel()
+        raw_notebook = {
+            "cells": [{
+                "cell_type": "code",
+                "execution_count": None,
+                "id": "cell-1",
+                "metadata": {},
+                "outputs": [],
+                "source": [
+                    "import time\n",
+                    "for i in range(3):\n",
+                    "    print(i, flush=True)\n",
+                    "    time.sleep(0.1)\n",
+                ],
+            }],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            notebook_file = self.workspace_root / notebook_path
+            notebook_file.parent.mkdir(parents=True, exist_ok=True)
+            notebook_file.write_text(json.dumps(raw_notebook))
+
+            select_body, select_status = self.state.notebook_select_kernel(
+                notebook_path,
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(select_status, 200)
+            self.assertEqual(select_body["status"], "ok")
+
+            restart_body, restart_status = self.state.notebook_restart_and_run_all(notebook_path)
+            self.assertEqual(restart_status, 200)
+            self.assertEqual(restart_body["status"], "ok")
+            self.assertEqual(len(restart_body["executions"]), 1)
+            self.assertEqual(
+                [output["text"] for output in restart_body["executions"][0]["outputs"]],
+                ["0\n", "1\n", "2\n"],
+            )
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            self.assertTrue(contents_body["cells"][0]["cell_id"])
 
     def test_headless_restart_and_run_all_allows_owner_session_leases(self):
         notebook_path = "notebooks/headless-restart-lease.ipynb"
@@ -1888,6 +2014,77 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(len(deleted_body["cells"]), 2)
             self.assertNotIn(code_cell_id, [cell["cell_id"] for cell in deleted_body["cells"]])
 
+    def test_headless_delete_can_remove_a_running_cell_without_resurrecting_it(self):
+        notebook_path = "notebooks/headless-delete-running.ipynb"
+        kernel_python = _python_with_ipykernel()
+        execution_started = threading.Event()
+        allow_finish = threading.Event()
+        execution_result: dict[str, Any] = {}
+        edit_result: dict[str, Any] = {}
+
+        def fake_execute_source(*args, **kwargs):
+            execution_started.set()
+            self.assertTrue(allow_finish.wait(timeout=5), "test did not release the mocked execution")
+            return [], 1, None
+
+        with (
+            mock.patch.object(self.state, "_projection_client", return_value=None),
+            mock.patch.object(self.state, "_execute_source", side_effect=fake_execute_source),
+        ):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "import time\ntime.sleep(5)"},
+                    {"type": "code", "source": "print('still here')"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            running_cell_id = contents_body["cells"][0]["cell_id"]
+
+            def run_execution():
+                execution_result["value"] = self.state.notebook_execute_cell(
+                    notebook_path,
+                    cell_id=running_cell_id,
+                    cell_index=None,
+                )
+
+            def delete_running_cell():
+                edit_result["value"] = self.state.notebook_edit(
+                    notebook_path,
+                    [{"op": "delete", "cell_id": running_cell_id}],
+                )
+
+            execution_thread = threading.Thread(target=run_execution, daemon=True)
+            execution_thread.start()
+            self.assertTrue(execution_started.wait(timeout=5), "mocked execution never started")
+
+            edit_thread = threading.Thread(target=delete_running_cell, daemon=True)
+            edit_thread.start()
+            edit_thread.join(timeout=2)
+            self.assertFalse(edit_thread.is_alive(), "delete should not wait for the running cell to finish")
+
+            allow_finish.set()
+            execution_thread.join(timeout=5)
+            self.assertFalse(execution_thread.is_alive(), "mocked execution should finish after release")
+
+            edit_body, edit_status = edit_result["value"]
+            self.assertEqual(edit_status, 200)
+            self.assertTrue(edit_body["results"][0]["changed"])
+
+            exec_body, exec_status = execution_result["value"]
+            self.assertEqual(exec_status, 200)
+            self.assertEqual(exec_body["status"], "ok")
+
+            final_body, final_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(final_status, 200)
+            self.assertEqual(len(final_body["cells"]), 1)
+            self.assertNotIn(running_cell_id, [cell["cell_id"] for cell in final_body["cells"]])
+
     def test_headless_clear_outputs_all_clears_every_code_cell(self):
         notebook_path = "notebooks/headless-clear-outputs.ipynb"
         kernel_python = _python_with_ipykernel()
@@ -2061,6 +2258,8 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(suggested_branch["action"], "branch-start")
             self.assertEqual(suggested_branch["document_id"], opened["document"]["document_id"])
             self.assertEqual(suggested_branch["owner_session_id"], "sess-agent")
+            self.assertEqual(conflict_body["recovery"]["reason"], "lease-conflict")
+            self.assertIn("Refresh the notebook surface", conflict_body["recovery"]["suggestions"][0])
 
     def test_finish_run_keeps_runtime_busy_while_another_run_is_active(self):
         opened, status = self.state.open_document("notebooks/demo.ipynb")
@@ -2911,7 +3110,7 @@ class TestCoreEndpoints(unittest.TestCase):
         self.client.notebook_execute_cell("nb.ipynb", cell_id="cell-1", owner_session_id="sess-1", wait=False)
         self.assertEqual(
             self.mock_post.call_args.kwargs["json"],
-            {"path": "nb.ipynb", "cell_id": "cell-1", "owner_session_id": "sess-1"},
+            {"path": "nb.ipynb", "cell_id": "cell-1", "owner_session_id": "sess-1", "wait": False},
         )
 
     def test_notebook_insert_execute_calls_post_with_owner_session(self):
@@ -2924,6 +3123,7 @@ class TestCoreEndpoints(unittest.TestCase):
                 "cell_type": "code",
                 "at_index": -1,
                 "owner_session_id": "sess-1",
+                "wait": False,
             },
         )
 
@@ -3236,6 +3436,41 @@ class TestParser(unittest.TestCase):
     def test_open_in_browser(self):
         args = build_parser().parse_args(["open", "nb.ipynb", "--target", "browser"])
         self.assertEqual(args.target, "browser")
+
+    def test_mcp_setup(self):
+        args = build_parser().parse_args(["mcp", "setup"])
+        self.assertEqual(args.command, "mcp")
+        self.assertEqual(args.mcp_command, "setup")
+
+    def test_mcp_config(self):
+        args = build_parser().parse_args(["mcp", "config", "--server-name", "analysis-repl"])
+        self.assertEqual(args.command, "mcp")
+        self.assertEqual(args.mcp_command, "config")
+        self.assertEqual(args.server_name, "analysis-repl")
+
+    def test_mcp_smoke_test(self):
+        args = build_parser().parse_args(["mcp", "smoke-test"])
+        self.assertEqual(args.command, "mcp")
+        self.assertEqual(args.mcp_command, "smoke-test")
+
+    def test_setup(self):
+        args = build_parser().parse_args(["setup", "--with-mcp", "--configure-editor-default", "--smoke-test"])
+        self.assertEqual(args.command, "setup")
+        self.assertTrue(args.with_mcp)
+        self.assertTrue(args.configure_editor_default)
+        self.assertTrue(args.smoke_test)
+
+    def test_doctor(self):
+        args = build_parser().parse_args(["doctor", "--probe-mcp", "--smoke-test"])
+        self.assertEqual(args.command, "doctor")
+        self.assertTrue(args.probe_mcp)
+        self.assertTrue(args.smoke_test)
+
+    def test_editor_configure(self):
+        args = build_parser().parse_args(["editor", "configure", "--default-canvas"])
+        self.assertEqual(args.command, "editor")
+        self.assertEqual(args.editor_command, "configure")
+        self.assertTrue(args.default_canvas)
 
     def test_reload(self):
         args = build_parser().parse_args(["reload"])
@@ -4863,6 +5098,152 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         client.finish_run.assert_called_once_with("run-1", status="completed")
 
+    def test_mcp_setup_returns_canonical_connection_details(self):
+        discovered = self._mock_core_client()
+        discovered.base_url = "http://127.0.0.1:4312"
+        discovered.token = "secret-token"
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch(
+                    "agent_repl.cli.CoreClient.start",
+                    return_value={"status": "ok", "workspace_root": "/workspace", "already_running": False},
+                ) as mock_start,
+                mock.patch("agent_repl.cli.CoreClient.discover", return_value=discovered),
+            ):
+                code = main(["mcp", "setup", "--workspace-root", "/workspace"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        mock_start.assert_called_once_with("/workspace", runtime_dir=None)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["mcp"]["url"], "http://127.0.0.1:4312/mcp")
+        self.assertEqual(payload["mcp"]["legacy_url"], "http://127.0.0.1:4312/mcp/mcp")
+        self.assertEqual(
+            payload["config"]["mcpServers"]["agent-repl"]["headers"]["Authorization"],
+            "token secret-token",
+        )
+
+    def test_mcp_config_prints_standard_mcp_servers_block(self):
+        discovered = self._mock_core_client()
+        discovered.base_url = "http://127.0.0.1:4312"
+        discovered.token = "secret-token"
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch(
+                    "agent_repl.cli.CoreClient.start",
+                    return_value={"status": "ok", "workspace_root": os.getcwd(), "already_running": True},
+                ),
+                mock.patch("agent_repl.cli.CoreClient.discover", return_value=discovered),
+            ):
+                code = main(["mcp", "config", "--server-name", "analysis-repl"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(list(payload["mcpServers"].keys()), ["analysis-repl"])
+        self.assertEqual(payload["mcpServers"]["analysis-repl"]["url"], "http://127.0.0.1:4312/mcp")
+
+    def test_mcp_smoke_test_runs_reported_checks(self):
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch(
+                "agent_repl.cli._mcp_smoke_test_payload",
+                return_value={
+                    "status": "ok",
+                    "mcp": {"url": "http://127.0.0.1:4312/mcp"},
+                    "checks": [
+                        {"name": "core-status", "status": "ok"},
+                        {"name": "list-tools", "status": "ok", "tool_count": 42},
+                    ],
+                },
+            ) as mock_smoke:
+                code = main(["mcp", "smoke-test"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        mock_smoke.assert_called_once()
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["checks"][1]["tool_count"], 42)
+
+    def test_doctor_reports_workspace_canvas_status_and_recommendations(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli.shutil.which", side_effect=lambda name: "/usr/bin/code" if name == "code" else None):
+                code = main(["doctor", "--workspace-root", str(workspace_root)])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["workspace_root"], os.path.realpath(str(workspace_root)))
+        self.assertFalse(payload["editor"]["workspace"]["default_canvas_configured"])
+        self.assertTrue(
+            any("agent-repl editor configure --default-canvas" in item for item in payload["recommendations"])
+        )
+
+    def test_editor_configure_sets_workspace_default_canvas(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        settings_path = workspace_root / ".vscode" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({"python.defaultInterpreterPath": ".venv/bin/python"}), encoding="utf-8")
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            code = main(["editor", "configure", "--workspace-root", str(workspace_root), "--default-canvas"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["association"], "agent-repl.canvasEditor")
+        updated = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertEqual(updated["workbench.editorAssociations"]["*.ipynb"], "agent-repl.canvasEditor")
+        self.assertEqual(updated["python.defaultInterpreterPath"], ".venv/bin/python")
+
+    def test_setup_can_configure_editor_and_include_public_mcp_surface(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._mcp_connection_payload", return_value={"status": "ok", "mcp": {"url": "http://127.0.0.1:4312/mcp"}}),
+                mock.patch("agent_repl.cli._mcp_smoke_test_payload", return_value={"status": "ok", "checks": [{"name": "list-tools", "status": "ok"}]}),
+            ):
+                code = main([
+                    "setup",
+                    "--workspace-root",
+                    str(workspace_root),
+                    "--configure-editor-default",
+                    "--with-mcp",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["actions"][0]["name"], "editor-configure")
+        self.assertEqual(payload["actions"][1]["name"], "mcp-setup")
+        self.assertEqual(payload["actions"][2]["name"], "mcp-smoke-test")
+        self.assertTrue(payload["doctor"]["editor"]["workspace"]["default_canvas_configured"])
+        updated = json.loads((workspace_root / ".vscode" / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(updated["workbench.editorAssociations"]["*.ipynb"], "agent-repl.canvasEditor")
+
 
 class TestVersionSurface(unittest.TestCase):
     def test_cli_exposes_version_flag(self):
@@ -4928,6 +5309,9 @@ class TestDocsSurface(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         install = (root / "docs" / "installation.md").read_text()
         self.assertIn("uv tool install . --reinstall", install)
+        self.assertIn("agent-repl setup --smoke-test", install)
+        self.assertIn("agent-repl mcp setup", install)
+        self.assertIn("agent-repl editor configure --default-canvas", install)
         self.assertIn("npx --yes @vscode/vsce package", install)
         self.assertNotIn("make install-dev", install)
         self.assertNotIn("make install-ext", install)
@@ -4937,12 +5321,23 @@ class TestDocsSurface(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         commands = (root / "docs" / "commands.md").read_text()
         self.assertIn("live `cell_id` values", commands)
+        self.assertIn("agent-repl setup", commands)
+        self.assertIn("agent-repl doctor", commands)
+        self.assertIn("agent-repl editor configure --default-canvas", commands)
+        self.assertIn("`agent-repl mcp setup`", commands)
         self.assertIn("`--session-id` overrides the default session reuse", commands)
         self.assertIn("agent-repl reload --pretty", commands)
         self.assertNotIn("index-1", commands)
         self.assertNotIn("fire-and-forget behavior", commands)
         self.assertNotIn("## v2", commands)
         self.assertNotIn("agent-repl v2", commands)
+
+    def test_readme_and_docs_summary_link_to_mcp_guide(self):
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / "README.md").read_text()
+        summary = (root / "docs" / "SUMMARY.md").read_text()
+        self.assertIn("[MCP](", readme)
+        self.assertIn("[MCP](", summary)
 
     def test_public_docs_lock_in_workspace_venv_as_default_kernel(self):
         root = Path(__file__).resolve().parents[1]
@@ -4955,6 +5350,93 @@ class TestDocsSurface(unittest.TestCase):
 
 
 class TestServerRobustness(unittest.TestCase):
+    def test_asgi_execute_cell_keeps_activity_polling_live_while_running(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        workspace_root = Path(tmpdir.name)
+        runtime_dir = workspace_root / "runtime"
+        runtime_dir.mkdir()
+        state = CoreState(
+            workspace_root=str(workspace_root),
+            runtime_dir=str(runtime_dir),
+            token="tok",
+            pid=1234,
+            started_at=1.0,
+        )
+
+        notebook_path = "notebooks/live-http-stream.ipynb"
+        source = "import time\nprint('start', flush=True)\ntime.sleep(0.4)\nprint('done', flush=True)"
+
+        with mock.patch.object(state, "_projection_client", return_value=None):
+            create_body, create_status = state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": source}],
+                kernel_id=_python_with_ipykernel(),
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+        state.start_session("agent", "cli", "worker", "sess-agent", ["projection", "ops", "automation"])
+
+        import uvicorn
+        from agent_repl.core.asgi import create_app
+
+        app = create_app(state)
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            log_level="error",
+            ws="none",
+        )
+        uv_server = uvicorn.Server(config)
+        thread = threading.Thread(target=uv_server.run, daemon=True)
+        thread.start()
+        for _ in range(50):
+            if uv_server.started:
+                break
+            time.sleep(0.05)
+
+        def _stop_server() -> None:
+            uv_server.should_exit = True
+            thread.join(timeout=5)
+
+        self.addCleanup(_stop_server)
+
+        port = uv_server.servers[0].sockets[0].getsockname()[1]
+        client = CoreClient(f"http://127.0.0.1:{port}", "tok")
+        activity_before = client.notebook_activity(notebook_path)
+
+        result_holder: dict[str, Any] = {}
+
+        def run_execution() -> None:
+            result_holder["body"] = client.notebook_execute_cell(
+                notebook_path,
+                cell_index=0,
+                wait=False,
+                owner_session_id="sess-agent",
+            )
+
+        execution_thread = threading.Thread(target=run_execution, daemon=True)
+        execution_thread.start()
+
+        stream_event: dict[str, Any] | None = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            body = client.notebook_activity(notebook_path, since=activity_before["cursor"])
+            stream_event = next((event for event in body["recent_events"] if event["type"] == "cell-output-appended"), None)
+            if stream_event is not None:
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(stream_event)
+        execution_thread.join(timeout=2)
+        self.assertFalse(execution_thread.is_alive(), "wait=False should return once the execution is queued")
+        self.assertEqual(result_holder["body"]["status"], "started")
+        self.assertEqual(stream_event["data"]["output"]["output_type"], "stream")
+        self.assertIn("start", stream_event["data"]["output"]["text"])
+
     def test_server_returns_json_error_when_run_finish_handler_raises(self):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -4980,7 +5462,13 @@ class TestServerRobustness(unittest.TestCase):
         from agent_repl.core.asgi import create_app
 
         app = create_app(state)
-        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            log_level="error",
+            ws="none",
+        )
         uv_server = uvicorn.Server(config)
         thread = threading.Thread(target=uv_server.run, daemon=True)
         thread.start()
@@ -4990,7 +5478,10 @@ class TestServerRobustness(unittest.TestCase):
             if uv_server.started:
                 break
             time.sleep(0.05)
-        self.addCleanup(lambda: setattr(uv_server, "should_exit", True))
+        def _stop_server() -> None:
+            uv_server.should_exit = True
+            thread.join(timeout=5)
+        self.addCleanup(_stop_server)
 
         port = uv_server.servers[0].sockets[0].getsockname()[1]
         client = CoreClient(f"http://127.0.0.1:{port}", "tok")

@@ -21,6 +21,38 @@ class TestOpenDb(unittest.TestCase):
             self.assertTrue(os.path.exists(db_path))
             conn.close()
 
+    def test_creates_gitignore_entry_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = open_db(tmpdir)
+            gitignore_path = os.path.join(tmpdir, ".gitignore")
+            with open(gitignore_path, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), ".agent-repl/\n")
+            conn.close()
+
+    def test_appends_gitignore_entry_without_clobbering_existing_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gitignore_path = os.path.join(tmpdir, ".gitignore")
+            with open(gitignore_path, "w", encoding="utf-8") as handle:
+                handle.write(".venv/\n__pycache__/")
+
+            conn = open_db(tmpdir)
+
+            with open(gitignore_path, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), ".venv/\n__pycache__/\n.agent-repl/\n")
+            conn.close()
+
+    def test_existing_gitignore_entry_is_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gitignore_path = os.path.join(tmpdir, ".gitignore")
+            with open(gitignore_path, "w", encoding="utf-8") as handle:
+                handle.write(".venv/\n/.agent-repl/\n")
+
+            conn = open_db(tmpdir)
+
+            with open(gitignore_path, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), ".venv/\n/.agent-repl/\n")
+            conn.close()
+
     def test_wal_mode_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             conn = open_db(tmpdir)

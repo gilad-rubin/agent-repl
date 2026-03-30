@@ -19,12 +19,18 @@ The output below is injected dynamically when available. If you see the raw `!` 
 
 1. Confirm you are in the correct workspace directory.
 2. Run `agent-repl --version` to verify the CLI is current.
-3. If the workspace has a `.venv`, it must contain `ipykernel`.
-4. If the installed CLI is stale: `uv tool install /path/to/agent-repl --reinstall`
+3. Run `agent-repl doctor` when you need a structured readiness check for CLI, kernel, editor defaults, or MCP.
+4. If the workspace has a `.venv`, it must contain `ipykernel`.
+5. If the installed CLI is stale: `uv tool install /path/to/agent-repl --reinstall`
 
 ## Quick Start
 
 ```bash
+# Guided onboarding / verification
+agent-repl setup --smoke-test
+agent-repl doctor --probe-mcp
+agent-repl editor configure --default-canvas
+
 # New notebook
 agent-repl new scratch.ipynb
 agent-repl ix scratch.ipynb -s 'x = 2; x * 3'
@@ -46,6 +52,9 @@ agent-repl exec demo.ipynb --cell-id <id>
 - `status` — check execution state for long-running or uncertain cells
 - `run-all` / `restart` / `restart-run-all` — notebook-wide execution control
 - `select-kernel` — switch the notebook kernel
+- `setup` — onboarding helper that can configure editor defaults, run MCP setup, and execute a notebook smoke test
+- `doctor` — JSON readiness report for install method, workspace kernel, editor defaults, and optional MCP
+- `editor configure --default-canvas` — make the Agent REPL canvas the workspace default for `*.ipynb`
 - `prompts` / `respond` — editor-driven prompt loop (requires extension)
 
 ## Best Practices
@@ -61,6 +70,8 @@ agent-repl ix demo.ipynb --cells-json '[{"type":"code","source":"import pandas a
 ```
 
 **Verify your environment before starting work.** Check that you're in the right directory, the CLI is current, and the kernel resolves. Fixing these after creating cells wastes more time than checking upfront.
+
+When onboarding a fresh workspace, prefer `agent-repl setup --smoke-test` over manually stitching together verification commands. When you only need diagnostics, prefer `agent-repl doctor`.
 
 **Understand rollback behavior.** If `ix` fails due to infrastructure (kernel crash, timeout, connection lost), the inserted cell is rolled back and the notebook is unchanged. Python exceptions in your code are *not* rolled back — those produce normal error output.
 
@@ -82,10 +93,13 @@ agent-repl ix demo.ipynb --cells-json '[{"type":"code","source":"import pandas a
 
 These commands require the VS Code / Cursor extension: `respond`, `kernels`, `reload`, `open --target vscode`, `new --open`. The `prompts` command works from the CLI but the prompt loop itself is editor-driven.
 
+`agent-repl editor configure --default-canvas` only writes workspace settings. It does not install the extension for the user.
+
 ## Troubleshooting
 
 - **Need a cell ID:** `agent-repl cat notebook.ipynb --no-outputs`
 - **Notebook still busy:** `agent-repl status notebook.ipynb`
 - **No workspace kernel:** create a `.venv` with `ipykernel`, or pass `--kernel /path/to/python`
+- **Need a full readiness report:** `agent-repl doctor --probe-mcp`
 - **Stale CLI:** `uv tool install /path/to/agent-repl --reinstall`
 - **Stale extension:** rebuild with `cd extension && npm run compile`, repackage the VSIX, reinstall, then `agent-repl reload --pretty`

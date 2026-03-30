@@ -8,13 +8,14 @@ import time
 from typing import Any
 
 DB_FILENAME = "core-state.db"
+STATE_DIRNAME = ".agent-repl"
+STATE_GITIGNORE_ENTRY = f"{STATE_DIRNAME}/"
 ACTIVITY_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 
 def open_db(workspace_root: str) -> sqlite3.Connection:
     """Open (or create) the operational database under the workspace."""
-    db_dir = os.path.join(workspace_root, ".agent-repl")
-    os.makedirs(db_dir, exist_ok=True)
+    db_dir = _ensure_state_dir(workspace_root)
     db_path = os.path.join(db_dir, DB_FILENAME)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -27,6 +28,42 @@ def open_db(workspace_root: str) -> sqlite3.Connection:
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     _create_tables(conn)
     conn.commit()
+
+
+def _ensure_state_dir(workspace_root: str) -> str:
+    db_dir = os.path.join(workspace_root, STATE_DIRNAME)
+    os.makedirs(db_dir, exist_ok=True)
+    _ensure_workspace_gitignore(workspace_root)
+    return db_dir
+
+
+def _ensure_workspace_gitignore(workspace_root: str) -> None:
+    gitignore_path = os.path.join(workspace_root, ".gitignore")
+    existing = ""
+    if os.path.exists(gitignore_path):
+        with open(gitignore_path, encoding="utf-8") as handle:
+            existing = handle.read()
+        if _gitignore_ignores_state_dir(existing):
+            return
+    prefix = ""
+    if existing and not existing.endswith("\n"):
+        prefix = "\n"
+    with open(gitignore_path, "a", encoding="utf-8") as handle:
+        handle.write(f"{prefix}{STATE_GITIGNORE_ENTRY}\n")
+
+
+def _gitignore_ignores_state_dir(contents: str) -> bool:
+    valid_entries = {
+        STATE_DIRNAME,
+        STATE_GITIGNORE_ENTRY,
+        f"/{STATE_DIRNAME}",
+        f"/{STATE_GITIGNORE_ENTRY}",
+    }
+    for raw_line in contents.splitlines():
+        line = raw_line.strip()
+        if line in valid_entries:
+            return True
+    return False
 
 
 def _create_tables(conn: sqlite3.Connection) -> None:

@@ -17,6 +17,7 @@ This canvas does not need to copy the VS Code Jupyter extension internals, but i
 - `a` inserts a code cell above in command mode.
 - `Cmd/Ctrl+A` selects all cells instead of inserting above.
 - `dd` deletes the selected or focused cells.
+- `z` undoes the last notebook-structure action in command mode.
 - `ArrowUp` and `ArrowDown` move focus.
 - `Shift+ArrowUp` and `Shift+ArrowDown` extend the selection.
 
@@ -38,6 +39,7 @@ This canvas does not need to copy the VS Code Jupyter extension internals, but i
 - Unit-test the pure command controller for keyboard routing decisions.
 - Keep regression tests for:
   - `b` then `Enter` promoting the new cell into edit mode
+  - `z` restoring the last deleted or inserted cell without entering edit mode
   - `Shift+Enter` executing once
   - editor-originated `Shift+Enter` not leaking into command mode
   - empty new notebooks opening as blank notebooks

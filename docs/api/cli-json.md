@@ -143,3 +143,16 @@ How to fix:
 - `prompts`
 - `respond`
 - `reload`
+
+### Onboarding and diagnostics commands
+
+- `setup`
+- `doctor`
+- `editor configure`
+
+### MCP commands
+
+- `mcp setup`
+- `mcp status`
+- `mcp config`
+- `mcp smoke-test`

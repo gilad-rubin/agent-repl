@@ -1,3 +1,5 @@
+import type { RecoveryAdvice } from '../shared/recovery';
+
 /**
  * Message protocol between the Canvas Editor WebView and the extension host.
  * All messages carry a `type` discriminator. Requests from the WebView include
@@ -22,6 +24,7 @@ export type WebViewRequest =
     | FlushDraftRequest
     | LspSyncCellRequest
     | LspCompletionRequest
+    | LspDefinitionRequest
     | OpenExternalLinkRequest;
 
 interface BaseRequest {
@@ -102,6 +105,13 @@ export interface LspCompletionRequest extends BaseRequest {
     trigger_character?: string;
 }
 
+export interface LspDefinitionRequest extends BaseRequest {
+    type: 'lsp-definition';
+    cell_id: string;
+    source: string;
+    offset: number;
+}
+
 export interface OpenExternalLinkRequest {
     type: 'open-external-link';
     requestId: string;
@@ -123,6 +133,7 @@ export type ExtensionMessage =
     | ActivityUpdate
     | LspDiagnosticsMessage
     | LspCompletionMessage
+    | LspDefinitionTargetMessage
     | LspStatusMessage
     | ErrorResponse
     | GenericOkResponse;
@@ -130,6 +141,7 @@ export type ExtensionMessage =
 export interface ContentsResponse {
     type: 'contents';
     requestId?: string;
+    path?: string;
     cells: CellData[];
 }
 
@@ -234,6 +246,14 @@ export interface LspCompletionMessage {
     }>;
  }
 
+export interface LspDefinitionTargetMessage {
+    type: 'lsp-definition-target';
+    requestId?: string;
+    cell_id: string;
+    from: number;
+    to: number;
+}
+
 export interface ActivityUpdate {
     type: 'activity-update';
     events: ActivityEvent[];
@@ -283,6 +303,7 @@ export interface ErrorResponse {
     requestId: string;
     message: string;
     conflict?: boolean;
+    recovery?: RecoveryAdvice;
 }
 
 export interface GenericOkResponse {

@@ -43,6 +43,12 @@ import {
 } from '@codemirror/search';
 import { indentationMarkers } from '@replit/codemirror-indentation-markers';
 import { tags } from '@lezer/highlight';
+import {
+  DEFAULT_COMPLETION_TYPING_DELAY_MS,
+  IDENTIFIER_COMPLETION_PATTERN,
+  IDENTIFIER_COMPLETION_VALID_FOR,
+  shouldRequestCompletion,
+} from '../src/shared/completion';
 
 // ── Cursor Dark highlight theme ──────────────────────────
 
@@ -209,10 +215,22 @@ function buildExtensions(opts: {
     offset: number,
     options?: CompletionRequestOptions,
   ) => Promise<CompletionOptionData[]>>;
+  requestDefinitionRef: React.RefObject<DefinitionRequestHandler>;
   onMoveToAdjacentCellRef: React.RefObject<((direction: 'up' | 'down') => boolean) | undefined>;
 }): Extension[] {
   const cellKeymap = keymap.of([
     { key: 'Shift-Enter', run: () => { opts.callbacksRef.current.onRunCell(); return true; } },
+    { key: 'Mod-Enter', run: () => { opts.callbacksRef.current.onRunCell(); return true; } },
+    {
+      key: 'F12',
+      run: (view) => {
+        void opts.requestDefinitionRef.current(
+          view.state.doc.toString(),
+          view.state.selection.main.head,
+        );
+        return true;
+      },
+    },
     { key: 'Escape', run: () => { opts.callbacksRef.current.onEscape(); return true; } },
     {
       key: 'ArrowUp',
@@ -235,15 +253,14 @@ function buildExtensions(opts: {
   ]);
 
   const completionSource = async (context: CompletionContext): Promise<CompletionResult | null> => {
-    const before = context.matchBefore(/\w*/);
+    const before = context.matchBefore(IDENTIFIER_COMPLETION_PATTERN);
     const charBefore = context.pos > 0 ? context.state.sliceDoc(context.pos - 1, context.pos) : '';
-    const currentLine = context.state.doc.lineAt(context.pos);
-    const linePrefix = currentLine.text.slice(0, context.pos - currentLine.from);
     const typedText = before?.text ?? '';
-    const shouldQuery =
-      context.explicit ||
-      typedText.length > 0 ||
-      charBefore === '.';
+    const shouldQuery = shouldRequestCompletion({
+      explicit: context.explicit,
+      typedText,
+      triggerCharacter: charBefore === '.' ? '.' : undefined,
+    });
 
     if (!shouldQuery) {
       return null;
@@ -259,6 +276,7 @@ function buildExtensions(opts: {
 
     return {
       from: before?.from ?? context.pos,
+      validFor: IDENTIFIER_COMPLETION_VALID_FOR,
       options: items.map((item) => ({
         label: item.label,
         type: item.kind,
@@ -286,6 +304,33 @@ function buildExtensions(opts: {
     }
   });
 
+  const definitionHandlers = EditorView.domEventHandlers({
+    mousedown(event, view) {
+      if (!isDefinitionModifierEvent(event) || event.button !== 0) {
+        return false;
+      }
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (pos == null || !positionIsNavigable(view.state, pos)) {
+        return false;
+      }
+      event.preventDefault();
+      void opts.requestDefinitionRef.current(view.state.doc.toString(), pos);
+      return true;
+    },
+    mousemove(event, view) {
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      const shouldShowPointer = pos != null
+        && isDefinitionModifierEvent(event)
+        && positionIsNavigable(view.state, pos);
+      view.contentDOM.style.cursor = shouldShowPointer ? 'pointer' : '';
+      return false;
+    },
+    mouseleave(_event, view) {
+      view.contentDOM.style.cursor = '';
+      return false;
+    },
+  });
+
   // CSP nonce — required so CodeMirror's dynamic <style> tags aren't blocked
   const nonce = document.body.dataset.nonce ?? '';
   const tabKeymap = keymap.of([
@@ -293,7 +338,10 @@ function buildExtensions(opts: {
       key: 'Tab',
       run: (view) => {
         if (completionStatus(view.state) === 'active') {
-          return acceptCompletion(view);
+          const accepted = acceptCompletion(view);
+          if (accepted) {
+            return true;
+          }
         }
         if (!selectionStartsInLeadingWhitespace(view.state)) {
           return true;
@@ -342,7 +390,9 @@ function buildExtensions(opts: {
     // Autocomplete
     autocompletion({
       override: [completionSource],
+      activateOnTypingDelay: DEFAULT_COMPLETION_TYPING_DELAY_MS,
       filterStrict: true,
+      selectOnOpen: false,
     }),
 
     // Diagnostics are pushed in from the extension host.
@@ -381,7 +431,17 @@ function buildExtensions(opts: {
     EditorView.editable.of(true),
 
     updateListener,
+    definitionHandlers,
   ];
+}
+
+function isDefinitionModifierEvent(event: MouseEvent): boolean {
+  const isMac = navigator.platform.toLowerCase().includes('mac');
+  return isMac ? event.metaKey : event.ctrlKey;
+}
+
+function positionIsNavigable(state: EditorState, pos: number): boolean {
+  return Boolean(state.wordAt(pos) ?? state.wordAt(Math.max(0, pos - 1)));
 }
 
 function selectionStartsInLeadingWhitespace(state: EditorState): boolean {
@@ -407,6 +467,7 @@ export type CodeMirrorCellHandle = {
   focus: () => void;
   focusAtLineEnd: () => void;
   focusAtBoundary: (boundary: 'start' | 'end') => void;
+  selectRange: (from: number, to?: number) => void;
   blur: () => void;
   getView: () => EditorView | null;
 };
@@ -426,6 +487,8 @@ type CompletionRequestOptions = {
   triggerCharacter?: string;
 };
 
+type DefinitionRequestHandler = (source: string, offset: number) => void | Promise<void>;
+
 export type CodeMirrorCellProps = {
   source: string;
   diagnostics: Diagnostic[];
@@ -435,6 +498,7 @@ export type CodeMirrorCellProps = {
     offset: number,
     options?: CompletionRequestOptions,
   ) => Promise<CompletionOptionData[]>;
+  requestDefinition: DefinitionRequestHandler;
   onFocus: () => void;
   onBlur: (value: string) => void;
   onSelectionChange?: (selection: { anchor: number; head: number }) => void;
@@ -463,6 +527,7 @@ export function CodeMirrorCell({
   diagnostics,
   onSourceChange,
   requestCompletions,
+  requestDefinition,
   onFocus,
   onBlur,
   onSelectionChange,
@@ -497,6 +562,8 @@ export function CodeMirrorCell({
   };
   const requestCompletionsRef = useRef(requestCompletions);
   requestCompletionsRef.current = requestCompletions;
+  const requestDefinitionRef = useRef(requestDefinition);
+  requestDefinitionRef.current = requestDefinition;
   const onMoveToAdjacentCellRef = useRef(onMoveToAdjacentCell);
   onMoveToAdjacentCellRef.current = onMoveToAdjacentCell;
 
@@ -508,7 +575,7 @@ export function CodeMirrorCell({
         doc: source,
         extensions: buildExtensions({
           fontSize, lineHeight, topPadding, bottomPadding, dark,
-          callbacksRef, externalUpdateRef, requestCompletionsRef, onMoveToAdjacentCellRef,
+          callbacksRef, externalUpdateRef, requestCompletionsRef, requestDefinitionRef, onMoveToAdjacentCellRef,
         }),
       }),
       parent: containerRef.current,
@@ -540,6 +607,18 @@ export function CodeMirrorCell({
         view.focus();
       },
       focusAtBoundary,
+      selectRange: (from: number, to = from) => {
+        const anchor = Math.max(0, Math.min(from, view.state.doc.length));
+        const head = Math.max(0, Math.min(to, view.state.doc.length));
+        view.dispatch({
+          selection: {
+            anchor,
+            head,
+          },
+          scrollIntoView: true,
+        });
+        view.focus();
+      },
       blur: () => {
         (view.contentDOM as HTMLElement | null)?.blur?.();
       },
@@ -591,7 +670,7 @@ export function CodeMirrorCell({
       selection: view.state.selection,
         extensions: buildExtensions({
           fontSize, lineHeight, topPadding, bottomPadding, dark,
-          callbacksRef, externalUpdateRef, requestCompletionsRef, onMoveToAdjacentCellRef,
+          callbacksRef, externalUpdateRef, requestCompletionsRef, requestDefinitionRef, onMoveToAdjacentCellRef,
         }),
       }));
   }, [dark, fontSize, lineHeight, topPadding, bottomPadding]);

@@ -75,6 +75,24 @@ test('startExecutionBuckets promotes cells into executing while clearing queued,
     });
 });
 
+test('primeBulkExecutionBuckets starts the first bulk cell immediately while queueing the rest', () => {
+    const { primeBulkExecutionBuckets } = loadExecutionStateModule();
+
+    const result = primeBulkExecutionBuckets({
+        queuedIds: ['old-queued'],
+        executingIds: ['old-running'],
+        failedCellIds: ['cell-1', 'cell-2', 'cell-3'],
+        pausedCellIds: ['cell-1', 'cell-3', 'cell-paused'],
+    }, ['cell-1', 'cell-2', 'cell-3']);
+
+    assert.deepEqual(result, {
+        queuedIds: ['old-queued', 'cell-2', 'cell-3'],
+        executingIds: ['old-running', 'cell-1'],
+        failedCellIds: [],
+        pausedCellIds: ['cell-paused'],
+    });
+});
+
 test('syncExecutionBuckets keeps server-owned queued and running ids while clearing stale failures and pauses', () => {
     const { syncExecutionBuckets } = loadExecutionStateModule();
 
