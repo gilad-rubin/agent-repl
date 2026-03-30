@@ -621,35 +621,18 @@ class CoreState:
 
     def persist(self) -> None:
         with self._lock:
-            if self._db is not None:
-                from agent_repl.core.db import persist_all
-                persist_all(
-                    self._db,
-                    sessions=[r.payload() for r in self.session_records.values()],
-                    documents=[r.payload() for r in self.document_records.values()],
-                    branches=[r.payload() for r in self.branch_records.values()],
-                    runtimes=[r.payload() for r in self.runtime_records.values()],
-                    runs=[r.payload() for r in self.run_records.values()],
-                    activity=[r.payload() for r in self.activity_records],
-                )
+            if self._db is None:
                 return
-            if self.state_file is None:
-                return
-            Path(self.state_file).parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "version": self.version,
-                "workspace_root": self.workspace_root,
-                "saved_at": time.time(),
-                "sessions": [record.payload() for record in self.session_records.values()],
-                "documents": [record.payload() for record in self.document_records.values()],
-                "branches": [record.payload() for record in self.branch_records.values()],
-                "runtimes": [record.payload() for record in self.runtime_records.values()],
-                "runs": [record.payload() for record in self.run_records.values()],
-                "activity": [record.payload() for record in self.activity_records],
-            }
-            tmp_path = f"{self.state_file}.tmp"
-            Path(tmp_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
-            os.replace(tmp_path, self.state_file)
+            from agent_repl.core.db import persist_all
+            persist_all(
+                self._db,
+                sessions=[r.payload() for r in self.session_records.values()],
+                documents=[r.payload() for r in self.document_records.values()],
+                branches=[r.payload() for r in self.branch_records.values()],
+                runtimes=[r.payload() for r in self.runtime_records.values()],
+                runs=[r.payload() for r in self.run_records.values()],
+                activity=[r.payload() for r in self.activity_records],
+            )
 
     def touch_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
         return self._collaboration_service.touch_session(session_id)

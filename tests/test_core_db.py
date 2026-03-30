@@ -176,5 +176,34 @@ class TestMigrateFromJson(unittest.TestCase):
             conn.close()
 
 
+class TestPersistNoJsonFallback(unittest.TestCase):
+    """persist() with _db set must NOT write to state_file."""
+
+    def test_persist_does_not_write_json_state_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = open_db(tmpdir)
+            state_file = os.path.join(tmpdir, ".agent-repl", "core-state.json")
+
+            # Build a minimal CoreState-like object to call persist()
+            from agent_repl.core.server import CoreState
+            state = CoreState(
+                workspace_root=tmpdir,
+                runtime_dir=tmpdir,
+                token="test-token",
+                pid=1,
+                started_at=1.0,
+                state_file=state_file,
+            )
+            state._db = conn
+
+            state.persist()
+
+            self.assertFalse(
+                os.path.exists(state_file),
+                "persist() should not write JSON state file when _db is set",
+            )
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

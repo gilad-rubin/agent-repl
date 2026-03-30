@@ -454,9 +454,13 @@ class TestCoreState(unittest.TestCase):
             pid=1234,
             started_at=1.0,
         )
+        from agent_repl.core.db import open_db
+        self._test_db = open_db(str(self.workspace_root))
+        self.state._db = self._test_db
 
     def tearDown(self):
         self.state.shutdown_headless_runtimes()
+        self._test_db.close()
         self.tmpdir.cleanup()
 
     def test_open_document_captures_bound_file_snapshot(self):
@@ -546,28 +550,27 @@ class TestCoreState(unittest.TestCase):
         overlap_detected = threading.Event()
         active_writers = 0
         active_lock = threading.Lock()
-        original_write_text = Path.write_text
 
-        def guarded_write_text(path_obj, *args, **kwargs):
+        original_persist_all = __import__("agent_repl.core.db", fromlist=["persist_all"]).persist_all
+
+        def guarded_persist_all(conn, **kwargs):
             nonlocal active_writers
-            if str(path_obj).endswith(".tmp"):
+            with active_lock:
+                active_writers += 1
+                if active_writers > 1:
+                    overlap_detected.set()
+                started.set()
+            release.wait(timeout=2)
+            try:
+                return original_persist_all(conn, **kwargs)
+            finally:
                 with active_lock:
-                    active_writers += 1
-                    if active_writers > 1:
-                        overlap_detected.set()
-                    started.set()
-                release.wait(timeout=2)
-                try:
-                    return original_write_text(path_obj, *args, **kwargs)
-                finally:
-                    with active_lock:
-                        active_writers -= 1
-            return original_write_text(path_obj, *args, **kwargs)
+                    active_writers -= 1
 
         first = threading.Thread(target=self.state.persist)
         second = threading.Thread(target=self.state.persist)
 
-        with mock.patch("pathlib.Path.write_text", new=guarded_write_text):
+        with mock.patch("agent_repl.core.db.persist_all", new=guarded_persist_all):
             first.start()
             self.assertTrue(started.wait(timeout=1))
             second.start()
