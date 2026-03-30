@@ -170,6 +170,103 @@ class TestYDocServiceMove(unittest.TestCase):
         self.assertFalse(self.svc.move_cell("nope.ipynb", 0, 1))
 
 
+def _cell_with_id(source: str, cell_id: str) -> dict:
+    """Helper to create a cell dict with a stable agent-repl cell_id."""
+    return {
+        "cell_type": "code",
+        "source": source,
+        "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
+        "outputs": [],
+    }
+
+
+class TestYDocServiceCellIdMapping(unittest.TestCase):
+    def setUp(self):
+        self.svc = YDocService()
+        self.svc.load_from_nbformat("nb.ipynb", {
+            "cells": [
+                _cell_with_id("a", "id-a"),
+                _cell_with_id("b", "id-b"),
+                _cell_with_id("c", "id-c"),
+            ],
+        })
+
+    def test_index_for_cell_id(self):
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-a"), 0)
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-b"), 1)
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-c"), 2)
+
+    def test_cell_id_at_index(self):
+        self.assertEqual(self.svc.cell_id_at_index("nb.ipynb", 0), "id-a")
+        self.assertEqual(self.svc.cell_id_at_index("nb.ipynb", 1), "id-b")
+        self.assertEqual(self.svc.cell_id_at_index("nb.ipynb", 2), "id-c")
+
+    def test_unknown_cell_id_returns_none(self):
+        self.assertIsNone(self.svc.index_for_cell_id("nb.ipynb", "id-missing"))
+
+    def test_unknown_index_returns_none(self):
+        self.assertIsNone(self.svc.cell_id_at_index("nb.ipynb", 99))
+
+    def test_set_cell_source_by_cell_id(self):
+        self.assertTrue(self.svc.set_cell_source("nb.ipynb", cell_id="id-b", source="modified"))
+        cells = self.svc.get_cells("nb.ipynb")
+        self.assertEqual(cells[1]["source"], "modified")
+
+    def test_remove_cell_by_cell_id(self):
+        self.assertTrue(self.svc.remove_cell("nb.ipynb", cell_id="id-b"))
+        cells = self.svc.get_cells("nb.ipynb")
+        self.assertEqual([c["source"] for c in cells], ["a", "c"])
+
+    def test_move_cell_by_cell_id(self):
+        self.assertTrue(self.svc.move_cell("nb.ipynb", from_cell_id="id-a", to_cell_id="id-c"))
+        cells = self.svc.get_cells("nb.ipynb")
+        self.assertEqual([c["source"] for c in cells], ["b", "a", "c"])
+
+    def test_insert_before_cell_id(self):
+        self.assertTrue(self.svc.insert_cell("nb.ipynb", 0, _cell_with_id("x", "id-x"), cell_id="id-b"))
+        cells = self.svc.get_cells("nb.ipynb")
+        self.assertEqual([c["source"] for c in cells], ["a", "x", "b", "c"])
+
+    def test_ids_stay_consistent_through_insert_remove_move(self):
+        # Insert a new cell before "b"
+        self.svc.insert_cell("nb.ipynb", 0, _cell_with_id("x", "id-x"), cell_id="id-b")
+        # Now: a, x, b, c
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-x"), 1)
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-b"), 2)
+
+        # Remove "a" (index 0)
+        self.svc.remove_cell("nb.ipynb", cell_id="id-a")
+        # Now: x, b, c
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-x"), 0)
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-b"), 1)
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-c"), 2)
+        self.assertIsNone(self.svc.index_for_cell_id("nb.ipynb", "id-a"))
+
+        # Move "c" to front
+        self.svc.move_cell("nb.ipynb", from_cell_id="id-c", to_index=0)
+        # Now: c, x, b
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-c"), 0)
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-x"), 1)
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-b"), 2)
+
+    def test_cells_without_ids_not_in_mapping(self):
+        svc = YDocService()
+        svc.load_from_nbformat("nb2.ipynb", {
+            "cells": [
+                {"cell_type": "code", "source": "bare", "metadata": {}, "outputs": []},
+                _cell_with_id("tagged", "id-t"),
+            ],
+        })
+        self.assertIsNone(svc.cell_id_at_index("nb2.ipynb", 0))
+        self.assertEqual(svc.cell_id_at_index("nb2.ipynb", 1), "id-t")
+        self.assertEqual(svc.index_for_cell_id("nb2.ipynb", "id-t"), 1)
+
+    def test_close_clears_id_mapping(self):
+        self.svc.close("nb.ipynb")
+        self.assertIsNone(self.svc.index_for_cell_id("nb.ipynb", "id-a"))
+        self.assertIsNone(self.svc.cell_id_at_index("nb.ipynb", 0))
+
+
 class TestYDocServiceSync(unittest.TestCase):
     def test_get_update_and_apply(self):
         svc_a = YDocService()

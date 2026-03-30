@@ -14,12 +14,24 @@ import pycrdt
 from jupyter_ydoc import YNotebook
 
 
+def _extract_cell_id(cell: dict[str, Any]) -> str | None:
+    """Extract the stable cell_id from cell metadata, if present."""
+    metadata = cell.get("metadata") or {}
+    custom = metadata.get("custom") or {}
+    agent_repl = custom.get("agent-repl") or {}
+    cell_id = agent_repl.get("cell_id")
+    return cell_id if isinstance(cell_id, str) and cell_id else None
+
+
 class YDocService:
     """Manage YDoc-backed notebook documents."""
 
     def __init__(self) -> None:
         self._documents: dict[str, YNotebook] = {}
         self._awareness: dict[str, pycrdt.Awareness] = {}
+        # Bidirectional cell_id <-> index mapping per path
+        self._id_to_index: dict[str, dict[str, int]] = {}
+        self._index_to_id: dict[str, dict[int, str]] = {}
         self._lock = threading.Lock()
 
     def get_or_create(self, path: str) -> YNotebook:
@@ -37,9 +49,44 @@ class YDocService:
     def load_from_nbformat(self, path: str, nb_dict: dict[str, Any]) -> YNotebook:
         """Load a notebook from nbformat dict into YDoc."""
         ynb = self.get_or_create(path)
-        for cell_data in nb_dict.get("cells", []):
+        id_to_idx: dict[str, int] = {}
+        idx_to_id: dict[int, str] = {}
+        for index, cell_data in enumerate(nb_dict.get("cells", [])):
             ynb.append_cell(cell_data)
+            cell_id = _extract_cell_id(cell_data)
+            if cell_id:
+                id_to_idx[cell_id] = index
+                idx_to_id[index] = cell_id
+        self._id_to_index[path] = id_to_idx
+        self._index_to_id[path] = idx_to_id
         return ynb
+
+    def _rebuild_id_map(self, path: str) -> None:
+        """Rebuild bidirectional cell ID mapping from current YDoc state."""
+        cells = self.get_cells(path)
+        id_to_idx: dict[str, int] = {}
+        idx_to_id: dict[int, str] = {}
+        for index, cell in enumerate(cells):
+            cell_id = _extract_cell_id(cell)
+            if cell_id:
+                id_to_idx[cell_id] = index
+                idx_to_id[index] = cell_id
+        self._id_to_index[path] = id_to_idx
+        self._index_to_id[path] = idx_to_id
+
+    def index_for_cell_id(self, path: str, cell_id: str) -> int | None:
+        """Return the current index for a cell_id, or None if not found."""
+        return self._id_to_index.get(path, {}).get(cell_id)
+
+    def cell_id_at_index(self, path: str, index: int) -> str | None:
+        """Return the cell_id at a given index, or None if not mapped."""
+        return self._index_to_id.get(path, {}).get(index)
+
+    def _resolve_index(self, path: str, *, index: int | None = None, cell_id: str | None = None) -> int | None:
+        """Resolve a cell_id or index to a concrete index. cell_id takes priority."""
+        if cell_id is not None:
+            return self.index_for_cell_id(path, cell_id)
+        return index
 
     def get_cells(self, path: str) -> list[dict[str, Any]]:
         """Get the current cells from a YDoc notebook."""
@@ -48,17 +95,22 @@ class YDocService:
             return []
         return json.loads(str(ynb.ycells))
 
-    def set_cell_source(self, path: str, index: int, source: str) -> bool:
+    def set_cell_source(
+        self, path: str, index: int | None = None, source: str = "", *, cell_id: str | None = None,
+    ) -> bool:
         """Update a cell's source via CRDT mutation."""
         ynb = self._documents.get(path)
         if ynb is None:
             return False
-        cells = json.loads(str(ynb.ycells))
-        if index < 0 or index >= len(cells):
+        resolved = self._resolve_index(path, index=index, cell_id=cell_id)
+        if resolved is None:
             return False
-        cell = cells[index]
+        cells = json.loads(str(ynb.ycells))
+        if resolved < 0 or resolved >= len(cells):
+            return False
+        cell = cells[resolved]
         cell["source"] = source
-        ynb.set_cell(index, cell)
+        ynb.set_cell(resolved, cell)
         return True
 
     def append_cell(self, path: str, cell_data: dict[str, Any]) -> bool:
@@ -69,11 +121,21 @@ class YDocService:
         ynb.append_cell(cell_data)
         return True
 
-    def insert_cell(self, path: str, index: int, cell_data: dict[str, Any]) -> bool:
-        """Insert a cell at the given index via CRDT mutation."""
+    def insert_cell(
+        self, path: str, index: int, cell_data: dict[str, Any], *, cell_id: str | None = None,
+    ) -> bool:
+        """Insert a cell at the given index via CRDT mutation.
+
+        If cell_id is provided, it overrides index (inserts before the cell with that ID).
+        """
         ynb = self._documents.get(path)
         if ynb is None:
             return False
+        if cell_id is not None:
+            resolved = self.index_for_cell_id(path, cell_id)
+            if resolved is None:
+                return False
+            index = resolved
         cell_count = len(ynb.ycells)
         if index < 0 or index > cell_count:
             return False
@@ -82,31 +144,46 @@ class YDocService:
         else:
             ynb.append_cell(cell_data)
             ynb.ycells.move(cell_count, index)
+        self._rebuild_id_map(path)
         return True
 
-    def remove_cell(self, path: str, index: int) -> bool:
+    def remove_cell(
+        self, path: str, index: int | None = None, *, cell_id: str | None = None,
+    ) -> bool:
         """Remove the cell at the given index via CRDT mutation."""
         ynb = self._documents.get(path)
         if ynb is None:
             return False
-        if index < 0 or index >= len(ynb.ycells):
+        resolved = self._resolve_index(path, index=index, cell_id=cell_id)
+        if resolved is None:
             return False
-        ynb.ycells.pop(index)
+        if resolved < 0 or resolved >= len(ynb.ycells):
+            return False
+        ynb.ycells.pop(resolved)
+        self._rebuild_id_map(path)
         return True
 
-    def move_cell(self, path: str, from_index: int, to_index: int) -> bool:
+    def move_cell(
+        self, path: str, from_index: int | None = None, to_index: int | None = None,
+        *, from_cell_id: str | None = None, to_cell_id: str | None = None,
+    ) -> bool:
         """Move a cell from one position to another via CRDT mutation."""
         ynb = self._documents.get(path)
         if ynb is None:
             return False
+        resolved_from = self._resolve_index(path, index=from_index, cell_id=from_cell_id)
+        resolved_to = self._resolve_index(path, index=to_index, cell_id=to_cell_id)
+        if resolved_from is None or resolved_to is None:
+            return False
         cell_count = len(ynb.ycells)
-        if from_index < 0 or from_index >= cell_count:
+        if resolved_from < 0 or resolved_from >= cell_count:
             return False
-        if to_index < 0 or to_index >= cell_count:
+        if resolved_to < 0 or resolved_to >= cell_count:
             return False
-        if from_index == to_index:
+        if resolved_from == resolved_to:
             return True
-        ynb.ycells.move(from_index, to_index)
+        ynb.ycells.move(resolved_from, resolved_to)
+        self._rebuild_id_map(path)
         return True
 
     def get_update(self, path: str) -> bytes | None:
@@ -154,3 +231,5 @@ class YDocService:
         with self._lock:
             self._documents.pop(path, None)
             self._awareness.pop(path, None)
+            self._id_to_index.pop(path, None)
+            self._index_to_id.pop(path, None)
