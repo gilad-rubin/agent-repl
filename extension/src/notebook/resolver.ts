@@ -72,14 +72,20 @@ export async function ensureNotebookEditor(
     doc: vscode.NotebookDocument,
     options: vscode.NotebookDocumentShowOptions = { preserveFocus: true, preview: false }
 ): Promise<vscode.NotebookEditor> {
+    const showOptions = options.selections
+        ? { ...options, selections: [...options.selections] }
+        : options;
     const editor = visibleEditor(doc);
     if (editor) {
-        if (options.selections) {
-            editor.selections = [...options.selections];
+        if (showOptions.selections) {
+            editor.selections = [...showOptions.selections];
+        }
+        if (showOptions.preserveFocus === false) {
+            return vscode.window.showNotebookDocument(doc, showOptions);
         }
         return editor;
     }
-    return vscode.window.showNotebookDocument(doc, options);
+    return vscode.window.showNotebookDocument(doc, showOptions);
 }
 
 type EditorFocus =

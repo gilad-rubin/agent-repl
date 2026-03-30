@@ -62,33 +62,6 @@ test('normalizeNotebookPath rejects escaping the workspace root', async () => {
   );
 });
 
-test('chooseReusableHumanSessionId prefers an attached VS Code human session', async () => {
-  const { chooseReusableHumanSessionId } = await import('../scripts/standalone-server.mjs');
-
-  const sessionId = chooseReusableHumanSessionId([
-    {
-      session_id: 'sess-browser',
-      actor: 'human',
-      client: 'browser',
-      status: 'attached',
-      capabilities: ['projection', 'presence'],
-      last_seen_at: 10,
-      created_at: 1,
-    },
-    {
-      session_id: 'sess-vscode',
-      actor: 'human',
-      client: 'vscode',
-      status: 'attached',
-      capabilities: ['projection', 'editor', 'presence'],
-      last_seen_at: 9,
-      created_at: 2,
-    },
-  ]);
-
-  assert.equal(sessionId, 'sess-vscode');
-});
-
 test('standalone attach reuses the preferred human session instead of creating a new one', async () => {
   const { createStandaloneServices } = await import('../scripts/standalone-server.mjs');
   const fetchCalls = [];
@@ -100,20 +73,18 @@ test('standalone attach reuses the preferred human session instead of creating a
     locateDaemon: () => ({ baseUrl: 'http://daemon', token: 'secret' }),
     fetchJson: async (url, init) => {
       fetchCalls.push({ url, init });
-      assert.equal(url, 'http://daemon/api/sessions');
+      assert.equal(url, 'http://daemon/api/sessions/resolve');
       return {
         status: 'ok',
-        sessions: [
-          {
-            session_id: 'sess-vscode',
-            actor: 'human',
-            client: 'vscode',
-            status: 'attached',
-            capabilities: ['projection', 'editor', 'presence'],
-            last_seen_at: 42,
-            created_at: 24,
-          },
-        ],
+        session: {
+          session_id: 'sess-vscode',
+          actor: 'human',
+          client: 'vscode',
+          status: 'attached',
+          capabilities: ['projection', 'editor', 'presence'],
+          last_seen_at: 42,
+          created_at: 24,
+        },
       };
     },
     runAgentRepl: async () => {
@@ -177,4 +148,247 @@ test('listNotebookWorkspaceTree keeps notebook folders, prunes empty ones, and s
   } finally {
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   }
+});
+
+test('standalone notebook status proxies to the daemon status endpoint', async () => {
+  const { createStandaloneServices } = await import('../scripts/standalone-server.mjs');
+  const fetchCalls = [];
+  const services = createStandaloneServices({
+    repoRoot: '/repo',
+    workspaceRoot: '/workspace',
+    extensionRoot: '/extension',
+    locateDaemon: () => ({ baseUrl: 'http://daemon', token: 'secret' }),
+    fetchJson: async (url, init) => {
+      fetchCalls.push({ url, init });
+      if (url === 'http://daemon/api/sessions/resolve') {
+        return {
+          status: 'ok',
+          session: {
+            session_id: 'sess-browser',
+            actor: 'human',
+            client: 'browser',
+            status: 'attached',
+            capabilities: ['projection', 'presence'],
+            last_seen_at: 42,
+            created_at: 24,
+          },
+        };
+      }
+      if (url === 'http://daemon/api/notebooks/status') {
+        return {
+          status: 'ok',
+          running: [{ cell_id: 'cell-1' }],
+          queued: [{ cell_id: 'cell-2' }],
+        };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    },
+  });
+
+  const result = await invokeApi(services, '/api/standalone/notebook/status', {
+    client_id: 'client-1',
+    path: 'tmp/demo.ipynb',
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(result.body.running, [{ cell_id: 'cell-1' }]);
+  assert.deepEqual(result.body.queued, [{ cell_id: 'cell-2' }]);
+  assert.equal(fetchCalls.at(-1)?.url, 'http://daemon/api/notebooks/status');
+});
+
+test('standalone execute-all forwards the browser owner session to the daemon', async () => {
+  const { createStandaloneServices } = await import('../scripts/standalone-server.mjs');
+  const fetchCalls = [];
+  const services = createStandaloneServices({
+    repoRoot: '/repo',
+    workspaceRoot: '/workspace',
+    extensionRoot: '/extension',
+    locateDaemon: () => ({ baseUrl: 'http://daemon', token: 'secret' }),
+    fetchJson: async (url, init) => {
+      fetchCalls.push({ url, init });
+      if (url === 'http://daemon/api/sessions/resolve') {
+        return {
+          status: 'ok',
+          session: {
+            session_id: 'sess-browser',
+            actor: 'human',
+            client: 'browser',
+            status: 'attached',
+            capabilities: ['projection', 'presence'],
+            last_seen_at: 42,
+            created_at: 24,
+          },
+        };
+      }
+      if (url === 'http://daemon/api/notebooks/execute-all') {
+        return { status: 'ok' };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    },
+  });
+
+  const result = await invokeApi(services, '/api/standalone/notebook/execute-all', {
+    client_id: 'client-1',
+    path: 'tmp/demo.ipynb',
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.status, 'ok');
+  const executeCall = fetchCalls.find((call) => call.url === 'http://daemon/api/notebooks/execute-all');
+  assert.ok(executeCall);
+  assert.equal(
+    JSON.parse(executeCall.init.body).owner_session_id,
+    'sess-browser',
+  );
+});
+
+test('standalone restart-and-run-all forwards the browser owner session to the daemon', async () => {
+  const { createStandaloneServices } = await import('../scripts/standalone-server.mjs');
+  const fetchCalls = [];
+  const services = createStandaloneServices({
+    repoRoot: '/repo',
+    workspaceRoot: '/workspace',
+    extensionRoot: '/extension',
+    locateDaemon: () => ({ baseUrl: 'http://daemon', token: 'secret' }),
+    fetchJson: async (url, init) => {
+      fetchCalls.push({ url, init });
+      if (url === 'http://daemon/api/sessions/resolve') {
+        return {
+          status: 'ok',
+          session: {
+            session_id: 'sess-browser',
+            actor: 'human',
+            client: 'browser',
+            status: 'attached',
+            capabilities: ['projection', 'presence'],
+            last_seen_at: 42,
+            created_at: 24,
+          },
+        };
+      }
+      if (url === 'http://daemon/api/notebooks/restart-and-run-all') {
+        return { status: 'ok' };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    },
+  });
+
+  const result = await invokeApi(services, '/api/standalone/notebook/restart-and-run-all', {
+    client_id: 'client-1',
+    path: 'tmp/demo.ipynb',
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.status, 'ok');
+  const restartCall = fetchCalls.find((call) => call.url === 'http://daemon/api/notebooks/restart-and-run-all');
+  assert.ok(restartCall);
+  assert.equal(
+    JSON.parse(restartCall.init.body).owner_session_id,
+    'sess-browser',
+  );
+});
+
+test('standalone execute-cell async endpoint acknowledges immediately while the daemon request stays in flight', async () => {
+  const { createStandaloneServices } = await import('../scripts/standalone-server.mjs');
+  const fetchCalls = [];
+  let resolveExecution;
+  const executionPromise = new Promise((resolve) => {
+    resolveExecution = resolve;
+  });
+  const services = createStandaloneServices({
+    repoRoot: '/repo',
+    workspaceRoot: '/workspace',
+    extensionRoot: '/extension',
+    locateDaemon: () => ({ baseUrl: 'http://daemon', token: 'secret' }),
+    fetchJson: async (url, init) => {
+      fetchCalls.push({ url, init });
+      if (url === 'http://daemon/api/sessions/resolve') {
+        return {
+          status: 'ok',
+          session: {
+            session_id: 'sess-browser',
+            actor: 'human',
+            client: 'browser',
+            status: 'attached',
+            capabilities: ['projection', 'presence'],
+            last_seen_at: 42,
+            created_at: 24,
+          },
+        };
+      }
+      if (url === 'http://daemon/api/notebooks/execute-cell') {
+        await executionPromise;
+        return { status: 'ok', cell_id: 'cell-1' };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    },
+  });
+
+  const result = await invokeApi(services, '/api/standalone/notebook/execute-cell-async', {
+    client_id: 'client-1',
+    path: 'tmp/demo.ipynb',
+    cell_id: 'cell-1',
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.status, 'started');
+  assert.equal(result.body.cell_id, 'cell-1');
+  const executeCall = fetchCalls.find((call) => call.url === 'http://daemon/api/notebooks/execute-cell');
+  assert.ok(executeCall);
+  resolveExecution();
+  await executionPromise;
+});
+
+test('standalone restart-and-run-all async endpoint acknowledges immediately while the daemon request stays in flight', async () => {
+  const { createStandaloneServices } = await import('../scripts/standalone-server.mjs');
+  const fetchCalls = [];
+  let resolveExecution;
+  const executionPromise = new Promise((resolve) => {
+    resolveExecution = resolve;
+  });
+  const services = createStandaloneServices({
+    repoRoot: '/repo',
+    workspaceRoot: '/workspace',
+    extensionRoot: '/extension',
+    locateDaemon: () => ({ baseUrl: 'http://daemon', token: 'secret' }),
+    fetchJson: async (url, init) => {
+      fetchCalls.push({ url, init });
+      if (url === 'http://daemon/api/sessions/resolve') {
+        return {
+          status: 'ok',
+          session: {
+            session_id: 'sess-browser',
+            actor: 'human',
+            client: 'browser',
+            status: 'attached',
+            capabilities: ['projection', 'presence'],
+            last_seen_at: 42,
+            created_at: 24,
+          },
+        };
+      }
+      if (url === 'http://daemon/api/notebooks/restart-and-run-all') {
+        await executionPromise;
+        return { status: 'ok' };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    },
+  });
+
+  const result = await invokeApi(services, '/api/standalone/notebook/restart-and-run-all-async', {
+    client_id: 'client-1',
+    path: 'tmp/demo.ipynb',
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.status, 'started');
+  const restartCall = fetchCalls.find((call) => call.url === 'http://daemon/api/notebooks/restart-and-run-all');
+  assert.ok(restartCall);
+  resolveExecution();
+  await executionPromise;
 });

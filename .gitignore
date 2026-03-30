@@ -13,3 +13,4 @@ extension/media/preview-python-worker.js
 extension/media/fonts/
 notebooks/
 .agent-repl/
+tmp/

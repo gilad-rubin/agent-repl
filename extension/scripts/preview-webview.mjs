@@ -21,6 +21,30 @@ const standaloneServices = createStandaloneServices({
   workspaceRoot,
   extensionRoot,
 });
+const standaloneApiRoutes = [
+  '/api/standalone/health',
+  '/api/standalone/attach',
+  '/api/standalone/session-touch',
+  '/api/standalone/session-end',
+  '/api/standalone/kernels',
+  '/api/standalone/workspace-tree',
+  '/api/standalone/lsp/sync',
+  '/api/standalone/notebook/contents',
+  '/api/standalone/notebook/edit',
+  '/api/standalone/notebook/execute-cell',
+  '/api/standalone/notebook/interrupt',
+  '/api/standalone/notebook/execute-all',
+  '/api/standalone/notebook/select-kernel',
+  '/api/standalone/notebook/restart',
+  '/api/standalone/notebook/restart-and-run-all',
+  '/api/standalone/notebook/runtime',
+  '/api/standalone/notebook/status',
+  '/api/standalone/notebook/activity',
+  '/api/standalone/notebook/execute-cell-async',
+  '/api/standalone/notebook/execute-all-async',
+  '/api/standalone/notebook/restart-and-run-all-async',
+];
+const standaloneProtocolVersion = 'standalone-preview-v1';
 
 const contentTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -84,6 +108,22 @@ function safePathname(urlPath) {
 }
 
 const server = createServer(async (request, response) => {
+  if ((request.url || '').startsWith('/api/standalone/health')) {
+    response.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    response.end(JSON.stringify({
+      status: 'ok',
+      protocol_version: standaloneProtocolVersion,
+      workspace_root: workspaceRoot,
+      extension_root: extensionRoot,
+      pid: process.pid,
+      api_routes: standaloneApiRoutes,
+    }));
+    return;
+  }
+
   if ((request.url || '').startsWith('/api/standalone/')) {
     const handled = await standaloneServices.handleApiRequest(request, response);
     if (handled) {

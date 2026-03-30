@@ -1,14 +1,17 @@
 # Development Docs
 
-**Internal reference** - This folder explains how the current system is built, where the compatibility seams still are, and which design docs are aspirational rather than shipped.
+**Internal reference** - This folder explains how the current system is built and which design docs are aspirational rather than shipped.
 
 **Not the public surface** - End-user guides live under `docs/` and should describe the supported workflow only.
 
 **Runtime-first framing** - The product now centers on a shared workspace runtime. VS Code, Cursor, and the browser preview are clients of that runtime rather than the primary source of truth.
 
+**Onboarding is now public CLI surface** - `agent-repl setup`, `agent-repl doctor`, and `agent-repl editor configure --default-canvas` are shipped commands, so internal docs should treat them as current product behavior rather than aspirational UX only.
+
 ## Read These First
 
 - [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md) - shipped topology, live module boundaries, runtime/session model, and preview/editor split
+- [Browser Verification Guide](/Users/giladrubin/python_workspace/agent-repl/dev/browser-verification-guide.md) - how to QA browser preview properly, verify streamed cell output, and avoid stale-build false alarms
 - [VS Code Jupyter Parity Checklist](/Users/giladrubin/python_workspace/agent-repl/dev/jupyter-parity-checklist.md) - integration gaps and parity work against native notebooks
 
 ## Design Docs
@@ -27,5 +30,6 @@
 
 - When a feature, workflow, architecture note, or developer loop changes, update the affected durable docs in the same change: `AGENTS.md`, `SKILL.md`, `docs/`, and `dev/`.
 - Update this folder when the runtime surface, preview/editor topology, or extension build loop changes in a user-visible way
+- When onboarding or install flows change, update the developer-facing explanation here as well as the public docs
 - Prefer [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md) for shipped details and keep design docs clearly labeled as targets
 - When preview and installed VS Code behavior differ, document which asset source is authoritative and how to verify sync

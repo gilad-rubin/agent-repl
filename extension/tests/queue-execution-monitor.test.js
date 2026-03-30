@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const path = require('node:path');
 
-function loadQueueModule(vscode) {
+function loadQueueModule(vscode, identityOverrides = {}) {
     const modulePath = path.resolve(__dirname, '../out/execution/queue.js');
     const originalLoad = Module._load;
     Module._load = function patchedLoad(request, parent, isMain) {
@@ -14,6 +14,7 @@ function loadQueueModule(vscode) {
             return {
                 resolveCell: () => 0,
                 getCellId: () => undefined,
+                ...identityOverrides,
             };
         }
         if (request === '../notebook/outputs') {
@@ -62,14 +63,19 @@ function makeChange(summary) {
 
 test('execution monitor treats success summaries as completed executions', () => {
     let onChange;
-    const queue = loadQueueModule({
-        workspace: {
-            onDidChangeNotebookDocument(callback) {
-                onChange = callback;
-                return { dispose() {} };
+    const queue = loadQueueModule(
+        {
+            workspace: {
+                onDidChangeNotebookDocument(callback) {
+                    onChange = callback;
+                    return { dispose() {} };
+                },
             },
         },
-    });
+        {
+            getCellId: () => 'cell-1',
+        },
+    );
 
     queue.resetExecutionState();
     queue.initExecutionMonitor();
@@ -96,5 +102,23 @@ test('execution monitor does not treat cleared execution summaries as a new runn
     queue.initExecutionMonitor();
 
     onChange(makeChange(null));
+    assert.equal(queue.getKernelState(), 'idle');
+});
+
+test('execution monitor ignores start events when the cell has no stable id', () => {
+    let onChange;
+    const queue = loadQueueModule({
+        workspace: {
+            onDidChangeNotebookDocument(callback) {
+                onChange = callback;
+                return { dispose() {} };
+            },
+        },
+    });
+
+    queue.resetExecutionState();
+    queue.initExecutionMonitor();
+
+    onChange(makeChange({ timing: { startTime: 1 } }));
     assert.equal(queue.getKernelState(), 'idle');
 });

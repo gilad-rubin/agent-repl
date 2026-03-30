@@ -44,7 +44,7 @@ The key design choice is:
    The canonical notebook state lives in the core runtime, not in VS Code and not in `.ipynb`.
 
 2. **Durable identity from birth**
-   Every node has a durable ID at creation time. No fallback IDs like `index-1`.
+   Every node has a durable ID at creation time, with no fallback IDs.
 
 3. **Ops before mutation**
    All changes are represented as operations/events applied by the core.

@@ -4,9 +4,14 @@ version = "0.3.0"
 description = "CLI for AI agents to work with Jupyter notebooks via the VS Code bridge"
 requires-python = ">=3.10"
 dependencies = [
+    "fastmcp>=2.3.2",
     "jupyter-client>=8",
+    "jupyter-ydoc>=2",
     "nbformat>=5",
+    "pycrdt>=0.10",
     "requests>=2",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
 ]
 
 [project.scripts]
@@ -24,5 +29,9 @@ reportUnusedExpression = "none"
 
 [dependency-groups]
 dev = [
+    "httpx",
+    "ipykernel>=6",
+    "jupyter-ydoc>=2",
+    "pycrdt>=0.10",
     "pytest",
 ]

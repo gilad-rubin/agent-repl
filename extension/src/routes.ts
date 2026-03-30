@@ -287,10 +287,6 @@ function rawCellSource(source: unknown): string {
     return typeof source === 'string' ? source : '';
 }
 
-function rawCellId(metadata: Record<string, any> | undefined, fallback: string): string {
-    return metadata?.custom?.['agent-repl']?.cell_id ?? metadata?.custom?.id ?? metadata?.id ?? fallback;
-}
-
 async function readNotebookContents(relPath: string, cwd?: string): Promise<{ path: string; cells: any[] }> {
     resolveNotebookUri(relPath, cwd);
     const openDoc = findOpenNotebook(relPath, cwd);
@@ -301,12 +297,16 @@ async function readNotebookContents(relPath: string, cwd?: string): Promise<{ pa
         let codeIndex = 0;
         for (let i = 0; i < openDoc.cellCount; i++) {
             const cell = openDoc.cellAt(i);
+            const cellId = getCellId(cell);
+            if (!cellId) {
+                throw new Error(`Missing agent-repl cell ID for notebook cell at index ${i}`);
+            }
             const isCode = cell.kind === vscode.NotebookCellKind.Code;
             const outputs = toJupyter(cell);
             cells.push({
                 index: i,
                 display_number: isCode ? ++codeIndex : null,
-                cell_id: getCellId(cell) ?? `index-${i}`,
+                cell_id: cellId,
                 cell_type: isCode ? 'code' : 'markdown',
                 source: cell.document.getText(),
                 outputs: stripForAgent(outputs),
@@ -346,10 +346,14 @@ async function readNotebookContents(relPath: string, cwd?: string): Promise<{ pa
     for (const [index, cell] of (notebook.cells ?? []).entries()) {
         const cellType = cell.cell_type === 'markdown' ? 'markdown' : 'code';
         const isCode = cellType === 'code';
+        const cellId = cell.metadata?.custom?.['agent-repl']?.cell_id;
+        if (typeof cellId !== 'string' || !cellId) {
+            throw new Error(`Missing agent-repl cell ID for notebook cell at index ${index}`);
+        }
         cells.push({
             index,
             display_number: isCode ? ++codeIndex : null,
-            cell_id: rawCellId(cell.metadata, `index-${index}`),
+            cell_id: cellId,
             cell_type: cellType,
             source: rawCellSource(cell.source),
             outputs: stripForAgent(Array.isArray(cell.outputs) ? cell.outputs : []),

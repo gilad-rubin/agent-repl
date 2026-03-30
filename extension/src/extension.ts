@@ -63,7 +63,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Commands
     context.subscriptions.push(
         vscode.commands.registerCommand('agent-repl.start', () => startBridge(config, promptProvider)),
-        vscode.commands.registerCommand('agent-repl.stop', () => stopBridge()),
+        vscode.commands.registerCommand('agent-repl.stop', async () => stopBridge()),
         vscode.commands.registerCommand('agent-repl.askAgent', () => insertPromptCell()),
         vscode.commands.registerCommand('agent-repl.reload', async () => reloadBridge())
     );
@@ -81,7 +81,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
 }
 
-export function deactivate(): void { stopBridge(); }
+export async function deactivate(): Promise<void> {
+    await stopBridge();
+}
 
 async function reloadBridge(): Promise<void> {
     if (!server) {
@@ -218,8 +220,8 @@ async function startBridge(
 const extraDisposables: vscode.Disposable[] = [];
 function context_subscriptions_push(d: vscode.Disposable): void { extraDisposables.push(d); }
 
-function stopBridge(): void {
-    void sessionAutoAttach?.detachIfAttached();
+async function stopBridge(): Promise<void> {
+    await sessionAutoAttach?.detachIfAttached();
     headlessProjection?.dispose();
     headlessProjection = undefined;
     canvasEditorProvider = undefined;

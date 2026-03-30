@@ -17,6 +17,10 @@ agent-repl ix tmp/validation.ipynb -s 'x = 2\nx * 3'
 
 That is the default path. Use `cat` or `status` only when you need diagnostics.
 
+If you want to connect an external MCP client, start with `agent-repl mcp setup`.
+
+If you want onboarding help after installing the CLI, start with `agent-repl setup` or `agent-repl doctor`.
+
 ## Core Notebook Commands
 
 ### `new`
@@ -90,7 +94,7 @@ agent-repl ix analysis.ipynb --cells-json '[{"type":"markdown","source":"# Step 
 Notes:
 
 - waits for completion by default
-- `--no-wait` returns after the execution record is created and keeps the older fire-and-forget behavior
+- `--no-wait` returns after the execution record is created
 - `--at-index` controls insertion point; `-1` means append
 - when `--session-id` is omitted, `ix` reuses the active human workspace session when possible
 - `--session-id` overrides the default session reuse and attributes the run to that collaboration session
@@ -139,7 +143,7 @@ Notes:
 - `exec --cell-id` reruns an existing cell
 - `exec -c` inserts a real persistent code cell and runs it
 - when `--session-id` is omitted, `exec` reuses the active human workspace session when possible
-- `--session-id` overrides the default session reuse and attributes the execution to that collaboration session
+- `--session-id` attributes the execution to that collaboration session
 
 ### `cat`
 
@@ -151,8 +155,7 @@ agent-repl cat PATH [--no-outputs]
 
 Use this when you need:
 
-- live `cell_id` values
-- fallback ids like `index-1` when the notebook is closed and no live stable id is available
+- live `cell_id` values from the notebook
 - a source or output inspection pass
 - prompt metadata
 
@@ -222,6 +225,123 @@ Notes:
 - without `--interactive`, the public path goes through the shared runtime
 - `--interactive` explicitly uses the VS Code kernel picker through the bridge
 - changing kernels restarts the notebook runtime when needed
+
+## Onboarding Commands
+
+### `setup`
+
+Run onboarding checks and optional workspace setup actions.
+
+```bash
+agent-repl setup [--workspace-root PATH] [--configure-editor-default] [--with-mcp] [--mcp-smoke-test|--no-mcp-smoke-test] [--server-name NAME] [--smoke-test] [--smoke-test-path PATH]
+```
+
+Examples:
+
+```bash
+agent-repl setup
+agent-repl setup --configure-editor-default
+agent-repl setup --with-mcp --smoke-test
+```
+
+Notes:
+
+- returns structured JSON so a coding agent can drive onboarding safely
+- `--configure-editor-default` writes `.vscode/settings.json` for the current workspace
+- `--with-mcp` reuses the public MCP onboarding flow
+- `--smoke-test` creates and executes a notebook smoke test in the workspace
+
+### `doctor`
+
+Inspect CLI, workspace, editor, and optional MCP readiness.
+
+```bash
+agent-repl doctor [--workspace-root PATH] [--probe-mcp] [--smoke-test] [--smoke-test-path PATH]
+```
+
+Examples:
+
+```bash
+agent-repl doctor
+agent-repl doctor --probe-mcp
+agent-repl doctor --smoke-test
+```
+
+Notes:
+
+- reports available installers, workspace `.venv` detection, and kernel readiness
+- shows whether the workspace is already configured to open `*.ipynb` in the Agent REPL canvas
+- `--probe-mcp` starts or reuses the workspace daemon and reports the canonical public MCP endpoint
+- `--smoke-test` creates and executes a notebook smoke test in the workspace
+
+### `editor configure`
+
+Update workspace settings for VS Code-family editors.
+
+```bash
+agent-repl editor configure --default-canvas [--workspace-root PATH]
+```
+
+Example:
+
+```bash
+agent-repl editor configure --default-canvas
+```
+
+Notes:
+
+- writes or updates `.vscode/settings.json`
+- sets `workbench.editorAssociations["*.ipynb"] = "agent-repl.canvasEditor"`
+- is idempotent and preserves unrelated workspace settings
+
+## MCP Commands
+
+### `mcp setup`
+
+Start or reuse the workspace-scoped MCP server and print the canonical connection details.
+
+```bash
+agent-repl mcp setup [--workspace-root PATH] [--server-name NAME]
+```
+
+This returns:
+
+- the canonical `/mcp` URL
+- the legacy `/mcp/mcp` URL for compatibility
+- the exact `Authorization` header value
+- a standard `mcpServers` config block
+
+### `mcp status`
+
+Show the current MCP endpoint and daemon status for the workspace.
+
+```bash
+agent-repl mcp status [--workspace-root PATH]
+```
+
+### `mcp config`
+
+Print only the ready-to-paste `mcpServers` config block.
+
+```bash
+agent-repl mcp config [--workspace-root PATH] [--server-name NAME]
+```
+
+Example:
+
+```bash
+agent-repl mcp config --server-name analysis-repl
+```
+
+### `mcp smoke-test`
+
+Verify the public MCP surface with a real client round-trip.
+
+```bash
+agent-repl mcp smoke-test [--workspace-root PATH]
+```
+
+The smoke test checks the core daemon, lists MCP tools, lists resources, and reads the `agent-repl://status` resource.
 
 ## Editor-Assisted Commands
 
@@ -296,4 +416,11 @@ Source-accepting commands support three input modes:
 | `select-kernel` | Yes | Only with `--interactive` |
 | `prompts` | Yes | No on the normal path |
 | `respond` | Yes | Yes |
+| `setup` | Yes | No |
+| `doctor` | Yes | No |
+| `editor configure` | Yes | No |
+| `mcp setup` | Yes | No |
+| `mcp status` | Yes | No |
+| `mcp config` | Yes | No |
+| `mcp smoke-test` | Yes | No |
 | `reload` | No | Yes |

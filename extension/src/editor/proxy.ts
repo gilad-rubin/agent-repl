@@ -6,7 +6,12 @@ import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as util from 'util';
 import { coreCliPlans, sessionIdForWorkspaceState } from '../session';
-import { NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
+import { buildActivityPollResult } from '../shared/notebookActivity';
+import { runNotebookCommandFlow } from '../shared/notebookCommandFlow';
+import { buildReplaceSourceOperation } from '../shared/notebookEditPayload';
+import { daemonUnavailableRecovery, recoveryFromPayload } from '../shared/recovery';
+import { buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
+import { DefinitionTarget, NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
 import type { CellData } from './protocol';
 
 const execFile = util.promisify(childProcess.execFile);
@@ -20,6 +25,7 @@ const RUNTIME_FILE_PREFIX = 'agent-repl-core-';
 export class DaemonProxy {
     readonly disposables: vscode.Disposable[] = [];
     private pollTimer: ReturnType<typeof setInterval> | undefined;
+    private pollStarting = false;
     private activityCursor = 0;
     private notebookPath: string;
     private workspaceRoot: string;
@@ -60,6 +66,7 @@ export class DaemonProxy {
                 case 'flush-draft': await this.handleFlushDraft(msg); break;
                 case 'lsp-sync-cell': await this.handleLspSyncCell(msg); break;
                 case 'lsp-complete': await this.handleLspComplete(msg); break;
+                case 'lsp-definition': await this.handleLspDefinition(msg); break;
                 case 'open-external-link': await this.handleOpenLink(msg); break;
             }
         } catch (err: any) {
@@ -68,6 +75,7 @@ export class DaemonProxy {
                 requestId: msg.requestId ?? '',
                 message: err?.message ?? String(err),
                 conflict: Boolean(err?.conflict),
+                recovery: this.recoveryForError(err),
             });
         }
     }
@@ -217,7 +225,7 @@ export class DaemonProxy {
     private async loadContents(requestId: string): Promise<void> {
         const result = await this.httpPost('/api/notebooks/contents', { path: this.notebookPath });
         this.replaceCells(result.cells ?? []);
-        this.postMessage({ type: 'contents', requestId, cells: this.cells });
+        this.postMessage({ type: 'contents', requestId, path: this.notebookPath, cells: this.cells });
     }
 
     // -----------------------------------------------------------------------
@@ -240,7 +248,7 @@ export class DaemonProxy {
                     body.operations = [{ op: 'delete', cell_id: op.cell_id }];
                     break;
                 case 'replace-source':
-                    body.operations = [{ op: 'replace-source', cell_id: op.cell_id, source: op.source }];
+                    body.operations = [buildReplaceSourceOperation({ cell_id: op.cell_id, source: op.source })];
                     break;
                 case 'change-cell-type':
                     body.operations = [{
@@ -263,7 +271,7 @@ export class DaemonProxy {
     private async handleFlushDraft(msg: any): Promise<void> {
         const body: any = {
             path: this.notebookPath,
-            operations: [{ op: 'replace-source', cell_id: msg.cell_id, source: msg.source }],
+            operations: [buildReplaceSourceOperation({ cell_id: msg.cell_id, source: msg.source })],
         };
         const ownerSessionId = this.ownerSessionId();
         if (ownerSessionId) {
@@ -312,6 +320,29 @@ export class DaemonProxy {
         });
     }
 
+    private async handleLspDefinition(msg: any): Promise<void> {
+        if (
+            typeof msg.requestId !== 'string' ||
+            typeof msg.cell_id !== 'string' ||
+            typeof msg.source !== 'string' ||
+            typeof msg.offset !== 'number'
+        ) {
+            return;
+        }
+
+        this.draftSources.set(msg.cell_id, msg.source);
+        this.updateCellSource(msg.cell_id, msg.source);
+        this.syncLsp();
+
+        const target = await this.lspClient?.resolveDefinitionAt(msg.cell_id, msg.offset) ?? null;
+        if (!target) {
+            this.postMessage({ type: 'ok', requestId: msg.requestId });
+            return;
+        }
+
+        await this.openDefinitionTarget(msg.requestId, target);
+    }
+
     // -----------------------------------------------------------------------
     // Execution
     // -----------------------------------------------------------------------
@@ -320,6 +351,7 @@ export class DaemonProxy {
         const body: any = {
             path: this.notebookPath,
             cell_id: msg.cell_id,
+            wait: false,
         };
         const ownerSessionId = this.ownerSessionId();
         if (ownerSessionId) {
@@ -331,7 +363,7 @@ export class DaemonProxy {
             if (sourceOverride !== undefined) {
                 const editBody: any = {
                     path: this.notebookPath,
-                    operations: [{ op: 'replace-source', cell_id: msg.cell_id, source: sourceOverride }],
+                    operations: [buildReplaceSourceOperation({ cell_id: msg.cell_id, source: sourceOverride })],
                 };
                 if (ownerSessionId) {
                     editBody.owner_session_id = ownerSessionId;
@@ -421,14 +453,20 @@ export class DaemonProxy {
     }
 
     private async handleExecuteAll(msg: any): Promise<void> {
-        const body: any = { path: this.notebookPath };
+        const body: any = { path: this.notebookPath, wait: false };
         const ownerSessionId = this.ownerSessionId();
         if (ownerSessionId) {
             body.owner_session_id = ownerSessionId;
         }
-        this.httpPost('/api/notebooks/execute-all', body)
-            .then(async () => {
+        runNotebookCommandFlow({
+            run: () => this.httpPost('/api/notebooks/execute-all', body),
+            onSuccess: async (result: any) => {
+                const resultStatus = typeof result?.status === 'string' ? result.status : 'ok';
                 this.postMessage({ type: 'ok', requestId: msg.requestId });
+                if (resultStatus === 'started' || resultStatus === 'queued') {
+                    await this.handleGetRuntime({ requestId: 'execute-all-runtime' });
+                    return;
+                }
                 await this.refreshNotebookSurfaceAfterSuccess(
                     'execute-all',
                     async () => {
@@ -436,19 +474,24 @@ export class DaemonProxy {
                         await this.handleGetRuntime({ requestId: 'execute-all-runtime' });
                     },
                 );
-            })
-            .catch((err: any) => {
+            },
+            onConflict: async (err: any) => {
                 if (this.isSelfLeaseConflict(err, ownerSessionId)) {
                     void this.executeAllViaOwnedCells(msg.requestId, ownerSessionId);
-                    return;
+                    return true;
                 }
+                return false;
+            },
+            onError: async (err: any) => {
                 this.postMessage({
                     type: 'error',
                     requestId: msg.requestId,
                     message: err?.message ?? String(err),
                     conflict: Boolean(err?.conflict),
+                    recovery: this.recoveryForError(err),
                 });
-            });
+            },
+        });
     }
 
     private async handleInterruptExecution(msg: any): Promise<void> {
@@ -480,14 +523,20 @@ export class DaemonProxy {
     }
 
     private async handleRestartAndRunAll(msg: any): Promise<void> {
-        const body: any = { path: this.notebookPath };
+        const body: any = { path: this.notebookPath, wait: false };
         const ownerSessionId = this.ownerSessionId();
         if (ownerSessionId) {
             body.owner_session_id = ownerSessionId;
         }
-        this.httpPost('/api/notebooks/restart-and-run-all', body)
-            .then(async () => {
+        runNotebookCommandFlow({
+            run: () => this.httpPost('/api/notebooks/restart-and-run-all', body),
+            onSuccess: async (result: any) => {
+                const resultStatus = typeof result?.status === 'string' ? result.status : 'ok';
                 this.postMessage({ type: 'ok', requestId: msg.requestId });
+                if (resultStatus === 'started' || resultStatus === 'queued') {
+                    await this.handleGetRuntime({ requestId: 'restart-and-run-all-runtime' });
+                    return;
+                }
                 await this.refreshNotebookSurfaceAfterSuccess(
                     'restart-and-run-all',
                     async () => {
@@ -495,19 +544,24 @@ export class DaemonProxy {
                         await this.handleGetRuntime({ requestId: 'restart-and-run-all-runtime' });
                     },
                 );
-            })
-            .catch((err: any) => {
+            },
+            onConflict: async (err: any) => {
                 if (this.isSelfLeaseConflict(err, ownerSessionId)) {
                     void this.restartAndExecuteAllViaOwnedCells(msg.requestId, ownerSessionId);
-                    return;
+                    return true;
                 }
+                return false;
+            },
+            onError: async (err: any) => {
                 this.postMessage({
                     type: 'error',
                     requestId: msg.requestId,
                     message: err?.message ?? String(err),
                     conflict: Boolean(err?.conflict),
+                    recovery: this.recoveryForError(err),
                 });
-            });
+            },
+        });
     }
 
     private async handleGetKernels(msg: any): Promise<void> {
@@ -530,19 +584,26 @@ export class DaemonProxy {
     }
 
     private async handleGetRuntime(msg: any): Promise<void> {
-        const result = await this.httpPost('/api/notebooks/runtime', { path: this.notebookPath });
-        const kernelLabel = result.runtime_record?.label
-            ?? (typeof result.runtime?.python_path === 'string' ? path.basename(result.runtime.python_path) : undefined)
-            ?? (typeof result.runtime?.environment === 'string' ? path.basename(result.runtime.environment) : undefined);
+        const [runtimeResult, statusResult] = await Promise.all([
+            this.httpPost('/api/notebooks/runtime', { path: this.notebookPath }),
+            this.httpPost('/api/notebooks/status', { path: this.notebookPath }),
+        ]);
+        const snapshot = buildRuntimeSnapshot({
+            ...runtimeResult,
+            running: Array.isArray(statusResult?.running) ? statusResult.running : undefined,
+            queued: Array.isArray(statusResult?.queued) ? statusResult.queued : undefined,
+        });
         this.postMessage({
             type: 'runtime',
             requestId: msg.requestId,
-            active: result.active ?? Boolean(result.runtime),
-            busy: result.runtime?.busy ?? false,
-            kernel_label: kernelLabel,
-            runtime_id: result.runtime?.runtime_id ?? result.runtime_record?.runtime_id,
-            kernel_generation: result.runtime?.kernel_generation ?? result.runtime_record?.kernel_generation ?? null,
-            current_execution: result.runtime?.current_execution ?? result.current_execution ?? null,
+            active: snapshot.active,
+            busy: snapshot.busy,
+            kernel_label: snapshot.kernel_label,
+            runtime_id: snapshot.runtime_id,
+            kernel_generation: snapshot.kernel_generation,
+            current_execution: snapshot.current_execution,
+            running_cell_ids: snapshot.running_cell_ids,
+            queued_cell_ids: snapshot.queued_cell_ids,
         });
     }
 
@@ -551,13 +612,32 @@ export class DaemonProxy {
     // -----------------------------------------------------------------------
 
     private startPolling(): void {
-        if (this.pollTimer || this.disposed) return;
-        this.pollTimer = setInterval(() => this.pollActivity(), 500);
-        void this.pollActivity();
+        if (this.pollTimer || this.disposed || this.pollStarting) return;
+        this.pollStarting = true;
+        void this.primeActivityCursor().finally(() => {
+            this.pollStarting = false;
+            if (this.pollTimer || this.disposed) return;
+            this.pollTimer = setInterval(() => this.pollActivity(), 500);
+            void this.pollActivity();
+        });
     }
 
     private stopPolling(): void {
+        this.pollStarting = false;
         if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = undefined; }
+    }
+
+    private async primeActivityCursor(): Promise<void> {
+        try {
+            const result = await this.httpPost('/api/notebooks/activity', {
+                path: this.notebookPath,
+            });
+            if (typeof result.cursor === 'number') {
+                this.activityCursor = result.cursor;
+            }
+        } catch {
+            // Non-fatal. We can still fall back to regular polling.
+        }
     }
 
     private async pollActivity(): Promise<void> {
@@ -567,59 +647,30 @@ export class DaemonProxy {
             if (this.activityCursor > 0) body.since = this.activityCursor;
             const result = await this.httpPost('/api/notebooks/activity', body);
 
-            const events = result.recent_events ?? [];
-            let shouldReloadContents = false;
-            let shouldSyncLsp = false;
-            for (const event of events) {
-                if (event.type === 'cell-source-updated' && event.data?.cell) {
-                    this.upsertCell(event.data.cell);
-                    shouldSyncLsp = true;
-                } else if (
-                    event.type === 'cell-inserted' ||
-                    event.type === 'cell-removed' ||
-                    event.type === 'notebook-reset-needed'
-                ) {
-                    shouldReloadContents = true;
-                }
+            const activityResult = buildActivityPollResult(result, {
+                cursorFallback: this.activityCursor,
+                includeDetachedRuntime: true,
+                inlineSourceUpdates: true,
+                reloadOnSourceUpdates: false,
+            });
+            for (const cell of activityResult.sourceUpdates) {
+                this.upsertCell(cell as CellData);
             }
-            if (shouldReloadContents) {
+            if (activityResult.shouldReloadContents) {
                 await this.loadContents('activity-reload');
-                shouldSyncLsp = false;
-            } else if (shouldSyncLsp) {
+            } else if (activityResult.shouldSyncLsp) {
                 this.syncLsp();
             }
-            if (events.length === 0 && !result.runtime) return;
+            const activitySnapshot = activityResult.activityUpdate;
+            if (!activitySnapshot) return;
 
             this.postMessage({
                 type: 'activity-update',
-                events: events.map((e: any) => ({
-                    event_id: e.event_id, path: e.path, event_type: e.type,
-                    detail: e.detail, actor: e.actor, session_id: e.session_id,
-                    cell_id: e.cell_id, cell_index: e.cell_index,
-                    data: e.data, timestamp: e.timestamp,
-                })),
-                presence: result.presence ?? [],
-                leases: result.leases ?? [],
-                runtime: result.runtime
-                    ? {
-                        active: true,
-                        busy: result.runtime.busy ?? false,
-                        current_execution: result.runtime.current_execution ?? result.current_execution ?? null,
-                        runtime_id: result.runtime.runtime_id ?? result.runtime_record?.runtime_id,
-                        kernel_generation: result.runtime.kernel_generation ?? result.runtime_record?.kernel_generation ?? null,
-                        kernel_label: result.runtime_record?.label
-                            ?? (typeof result.runtime.python_path === 'string' ? path.basename(result.runtime.python_path) : undefined)
-                            ?? (typeof result.runtime.environment === 'string' ? path.basename(result.runtime.environment) : undefined),
-                    }
-                    : {
-                        active: false,
-                        busy: false,
-                        current_execution: null,
-                        kernel_label: result.runtime_record?.label ?? undefined,
-                        runtime_id: result.runtime_record?.runtime_id,
-                        kernel_generation: result.runtime_record?.kernel_generation ?? null,
-                    },
-                cursor: result.cursor ?? this.activityCursor,
+                events: activitySnapshot.events,
+                presence: activitySnapshot.presence,
+                leases: activitySnapshot.leases,
+                runtime: activitySnapshot.runtime,
+                cursor: activitySnapshot.cursor,
             });
 
             if (typeof result.cursor === 'number') this.activityCursor = result.cursor;
@@ -719,6 +770,7 @@ export class DaemonProxy {
                 requestId,
                 message: err?.message ?? String(err),
                 conflict: Boolean(err?.conflict),
+                recovery: this.recoveryForError(err),
             });
         }
     }
@@ -740,8 +792,25 @@ export class DaemonProxy {
                 requestId,
                 message: err?.message ?? String(err),
                 conflict: Boolean(err?.conflict),
+                recovery: this.recoveryForError(err),
             });
         }
+    }
+
+    private recoveryForError(err: any) {
+        const payloadRecovery = recoveryFromPayload(err?.payload);
+        if (payloadRecovery) {
+            return payloadRecovery;
+        }
+        const message = err?.message ?? String(err);
+        if (
+            message.includes('Daemon not found')
+            || message.includes('Daemon request timeout')
+            || message.includes('Invalid JSON from daemon')
+        ) {
+            return daemonUnavailableRecovery();
+        }
+        return undefined;
     }
 
     private async refreshNotebookSurfaceAfterSuccess(
@@ -835,6 +904,32 @@ export class DaemonProxy {
     private syncLsp(): void {
         this.ensureLspStarted();
         this.lspClient?.syncCells(this.toLspSnapshots());
+    }
+
+    private async openDefinitionTarget(requestId: string, target: DefinitionTarget): Promise<void> {
+        if (target.kind === 'cell') {
+            this.postMessage({
+                type: 'lsp-definition-target',
+                requestId,
+                cell_id: target.cellId,
+                from: target.from,
+                to: target.to,
+            });
+            return;
+        }
+
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target.filePath));
+        const editor = await vscode.window.showTextDocument(document, {
+            preview: false,
+            preserveFocus: false,
+        });
+        const range = new vscode.Range(
+            new vscode.Position(target.range.start.line, target.range.start.character),
+            new vscode.Position(target.range.end.line, target.range.end.character),
+        );
+        editor.selection = new vscode.Selection(range.start, range.end);
+        editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+        this.postMessage({ type: 'ok', requestId });
     }
 
     // -----------------------------------------------------------------------

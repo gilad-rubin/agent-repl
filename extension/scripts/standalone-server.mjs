@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,17 +9,6 @@ import { StandaloneNotebookLspSession } from './standalone-lsp.mjs';
 
 const execFileAsync = promisify(execFile);
 const RUNTIME_FILE_PREFIX = 'agent-repl-core-';
-const SESSION_STATUS_RANK = {
-  attached: 3,
-  stale: 2,
-  detached: 1,
-};
-const SESSION_CLIENT_RANK = {
-  vscode: 3,
-  browser: 2,
-  cli: 1,
-  worker: 0,
-};
 
 function standaloneDebug(event, data = {}) {
   const record = {
@@ -36,48 +26,6 @@ function standaloneDebug(event, data = {}) {
   }
 }
 const DEFAULT_SESSION_LABEL = 'Standalone Canvas';
-
-export function chooseReusableHumanSessionId(sessions) {
-  if (!Array.isArray(sessions)) {
-    return null;
-  }
-
-  let bestSessionId = null;
-  let bestKey = null;
-  for (const session of sessions) {
-    if (!session || typeof session !== 'object') {
-      continue;
-    }
-    if (session.actor !== 'human') {
-      continue;
-    }
-    if (typeof session.session_id !== 'string' || !session.session_id) {
-      continue;
-    }
-    const statusRank = SESSION_STATUS_RANK[session.status] ?? 0;
-    if (statusRank === 0) {
-      continue;
-    }
-    const clientRank = SESSION_CLIENT_RANK[session.client] ?? 0;
-    const capabilities = Array.isArray(session.capabilities) ? session.capabilities : [];
-    const editorRank = capabilities.includes('editor') || session.client === 'vscode' ? 1 : 0;
-    const lastSeenAt = typeof session.last_seen_at === 'number' ? session.last_seen_at : 0;
-    const createdAt = typeof session.created_at === 'number' ? session.created_at : 0;
-    const sortKey = [statusRank, editorRank, clientRank, lastSeenAt, createdAt];
-    if (
-      bestKey == null
-      || sortKey[0] > bestKey[0]
-      || (sortKey[0] === bestKey[0] && sortKey[1] > bestKey[1])
-      || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] > bestKey[2])
-      || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] === bestKey[2] && sortKey[3] > bestKey[3])
-      || (sortKey[0] === bestKey[0] && sortKey[1] === bestKey[1] && sortKey[2] === bestKey[2] && sortKey[3] === bestKey[3] && sortKey[4] > bestKey[4])
-    ) {
-      bestKey = sortKey;
-      bestSessionId = session.session_id;
-    }
-  }
-  return bestSessionId;
-}
 
 function runtimeDir() {
   return process.env.AGENT_REPL_RUNTIME_DIR
@@ -415,6 +363,7 @@ export function createStandaloneServices({
 }) {
   const sessions = new Map();
   const lspSessions = new Map();
+  const backgroundNotebookCommands = new Map();
   const locateDaemon = locateDaemonOverride ?? createDaemonLocator(workspaceRoot);
   const fetchJsonFn = fetchJsonOverride ?? fetchJson;
   const pyrightServerScript = path.join(extensionRoot, 'node_modules', 'pyright', 'langserver.index.js');
@@ -476,12 +425,15 @@ export function createStandaloneServices({
 
     const daemon = locateDaemon();
     try {
-      const payload = await fetchJsonFn(`${daemon.baseUrl}/api/sessions`, {
+      const payload = await fetchJsonFn(`${daemon.baseUrl}/api/sessions/resolve`, {
+        method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           Authorization: `token ${daemon.token}`,
         },
+        body: JSON.stringify({ actor: 'human' }),
       });
-      const reusableSessionId = chooseReusableHumanSessionId(payload?.sessions);
+      const reusableSessionId = payload?.session?.session_id;
       if (reusableSessionId) {
         const session = {
           sessionId: reusableSessionId,
@@ -655,6 +607,63 @@ export function createStandaloneServices({
     }
   }
 
+  async function startBackgroundNotebookProxy(
+    endpoint,
+    payload,
+    {
+      withOwnerSession = false,
+      responsePayload = {},
+    } = {},
+  ) {
+    const clientId = typeof payload.client_id === 'string' && payload.client_id ? payload.client_id : null;
+    if (!clientId) {
+      throw new Error('Missing client_id');
+    }
+    const notebookPath = normalizeNotebookPath(workspaceRoot, payload.path);
+    const commandId = randomUUID();
+    const startMs = Date.now();
+
+    const task = (async () => {
+      standaloneDebug('proxy:background-request', {
+        endpoint,
+        commandId,
+        clientId,
+        notebookPath,
+        cell_id: payload.cell_id ?? null,
+        cell_index: payload.cell_index ?? null,
+      });
+      try {
+        await handleNotebookProxy(endpoint, payload, { withOwnerSession });
+        standaloneDebug('proxy:background-response', {
+          endpoint,
+          commandId,
+          clientId,
+          status: 'ok',
+          durationMs: Date.now() - startMs,
+        });
+      } catch (error) {
+        standaloneDebug('proxy:background-error', {
+          endpoint,
+          commandId,
+          clientId,
+          error: error?.message ?? String(error),
+          conflict: Boolean(error?.conflict),
+          durationMs: Date.now() - startMs,
+        });
+      } finally {
+        backgroundNotebookCommands.delete(commandId);
+      }
+    })();
+
+    backgroundNotebookCommands.set(commandId, task);
+    return {
+      status: 'started',
+      path: notebookPath,
+      command_id: commandId,
+      ...responsePayload,
+    };
+  }
+
   async function handleWorkspaceTree(payload) {
     const notebookPath = typeof payload.path === 'string' && payload.path.trim()
       ? normalizeNotebookPath(workspaceRoot, payload.path)
@@ -717,17 +726,38 @@ export function createStandaloneServices({
           ['/api/standalone/notebook/edit', ['/api/notebooks/edit', true]],
           ['/api/standalone/notebook/execute-cell', ['/api/notebooks/execute-cell', true]],
           ['/api/standalone/notebook/interrupt', ['/api/notebooks/interrupt', false]],
-          ['/api/standalone/notebook/execute-all', ['/api/notebooks/execute-all', false]],
+          ['/api/standalone/notebook/execute-all', ['/api/notebooks/execute-all', true]],
           ['/api/standalone/notebook/select-kernel', ['/api/notebooks/select-kernel', false]],
           ['/api/standalone/notebook/restart', ['/api/notebooks/restart', false]],
-          ['/api/standalone/notebook/restart-and-run-all', ['/api/notebooks/restart-and-run-all', false]],
+          ['/api/standalone/notebook/restart-and-run-all', ['/api/notebooks/restart-and-run-all', true]],
           ['/api/standalone/notebook/runtime', ['/api/notebooks/runtime', false]],
+          ['/api/standalone/notebook/status', ['/api/notebooks/status', false]],
           ['/api/standalone/notebook/activity', ['/api/notebooks/activity', false]],
+        ]);
+
+        const notebookAsyncRouteMap = new Map([
+          ['/api/standalone/notebook/execute-cell-async', ['/api/notebooks/execute-cell', true]],
+          ['/api/standalone/notebook/execute-all-async', ['/api/notebooks/execute-all', true]],
+          ['/api/standalone/notebook/restart-and-run-all-async', ['/api/notebooks/restart-and-run-all', true]],
         ]);
 
         if (notebookRouteMap.has(requestPath)) {
           const [endpoint, withOwnerSession] = notebookRouteMap.get(requestPath);
           sendJson(response, 200, await handleNotebookProxy(endpoint, payload, { withOwnerSession }));
+          return true;
+        }
+
+        if (notebookAsyncRouteMap.has(requestPath)) {
+          const [endpoint, withOwnerSession] = notebookAsyncRouteMap.get(requestPath);
+          const responsePayload = requestPath === '/api/standalone/notebook/execute-cell-async'
+            ? {
+                cell_id: typeof payload.cell_id === 'string' ? payload.cell_id : null,
+              }
+            : {};
+          sendJson(response, 200, await startBackgroundNotebookProxy(endpoint, payload, {
+            withOwnerSession,
+            responsePayload,
+          }));
           return true;
         }
 

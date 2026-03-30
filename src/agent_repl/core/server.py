@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import hashlib
 import os
 import secrets
 import shutil
@@ -13,7 +14,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -22,13 +22,19 @@ from jupyter_client import KernelManager
 from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
+from agent_repl.core.collaboration import CollaborationConflictError
+from agent_repl.core.collaboration_service import CollaborationService
+from agent_repl.core.execution_ledger_service import ExecutionLedgerService
+from agent_repl.core.notebook_execution_service import NotebookExecutionService
+from agent_repl.core.notebook_mutation_service import NotebookMutationService
+from agent_repl.core.notebook_read_service import NotebookReadService
+from agent_repl.core.notebook_write_service import NotebookWriteService
+from agent_repl.core.ydoc_service import YDocService
+from agent_repl.recovery import runtime_busy_recovery
 
 
 CORE_VERSION = "0.1.0"
-SESSION_STALE_AFTER_SECONDS = 60.0
-CELL_LEASE_TTL_SECONDS = 45.0
 STATE_DIRNAME = ".agent-repl"
-STATE_FILENAME = "core-state.json"
 MAX_ACTIVITY_RECORDS = 500
 RUNTIME_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "provisioning": {"idle", "busy", "failed"},
@@ -43,12 +49,6 @@ RUNTIME_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "recovery-needed": {"provisioning", "stopped", "reaped"},
     "ready": {"recovery-needed"},
 }
-
-
-class CollaborationConflictError(RuntimeError):
-    def __init__(self, message: str, *, payload: dict[str, Any] | None = None):
-        super().__init__(message)
-        self.payload = payload or {"error": message}
 
 
 @dataclass
@@ -192,6 +192,7 @@ class RunRecord:
     status: str
     created_at: float
     updated_at: float
+    queue_position: int | None = None
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -201,6 +202,7 @@ class RunRecord:
             "target_ref": self.target_ref,
             "kind": self.kind,
             "status": self.status,
+            "queue_position": self.queue_position,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -310,7 +312,6 @@ class CoreState:
     token: str
     pid: int
     started_at: float
-    state_file: str | None = None
     version: str = CORE_VERSION
     documents: int = 0
     sessions: int = 0
@@ -323,6 +324,7 @@ class CoreState:
     branch_records: dict[str, BranchRecord] = field(default_factory=dict)
     runtime_records: dict[str, RuntimeRecord] = field(default_factory=dict)
     run_records: dict[str, RunRecord] = field(default_factory=dict)
+    execution_records: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     activity_records: list[ActivityEventRecord] = field(default_factory=list, repr=False)
     headless_runtimes: dict[str, HeadlessNotebookRuntime] = field(default_factory=dict, repr=False)
     _validated_kernel_pythons: set[str] = field(default_factory=set, init=False, repr=False)
@@ -330,18 +332,41 @@ class CoreState:
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _notebook_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _notebook_locks_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _collaboration_service: CollaborationService = field(init=False, repr=False)
+    _execution_ledger_service: ExecutionLedgerService = field(init=False, repr=False)
+    _notebook_execution_service: NotebookExecutionService = field(init=False, repr=False)
+    _notebook_mutation_service: NotebookMutationService = field(init=False, repr=False)
+    _notebook_read_service: NotebookReadService = field(init=False, repr=False)
+    _notebook_write_service: NotebookWriteService = field(init=False, repr=False)
+    _ydoc_service: YDocService = field(init=False, repr=False)
+    _db: Any = field(default=None, init=False, repr=False)
+    _owner_thread_id: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = os.path.realpath(self.workspace_root)
         self.runtime_dir = os.path.realpath(self.runtime_dir)
-        if self.state_file is None:
-            self.state_file = _state_file_path(self.workspace_root)
-        else:
-            self.state_file = os.path.realpath(self.state_file)
+        self._owner_thread_id = threading.get_ident()
         self._last_activity_timestamp = max(
             (record.timestamp for record in self.activity_records),
             default=self.started_at,
         )
+        self._collaboration_service = CollaborationService(
+            self,
+            session_record_type=SessionRecord,
+            cell_lease_record_type=CellLeaseRecord,
+            notebook_presence_record_type=NotebookPresenceRecord,
+            branch_record_type=BranchRecord,
+            default_session_capabilities=_default_session_capabilities,
+        )
+        self._execution_ledger_service = ExecutionLedgerService(
+            self,
+            run_record_type=RunRecord,
+        )
+        self._notebook_execution_service = NotebookExecutionService(self)
+        self._notebook_mutation_service = NotebookMutationService(self)
+        self._notebook_read_service = NotebookReadService(self)
+        self._notebook_write_service = NotebookWriteService(self)
+        self._ydoc_service = YDocService()
         self._recompute_counts()
 
     def _next_activity_timestamp(self) -> float:
@@ -359,9 +384,7 @@ class CoreState:
             "workspace_root": self.workspace_root,
             "pid": self.pid,
             "started_at": self.started_at,
-            "state_file": self.state_file,
             "version": self.version,
-            "code_hash": _current_package_hash(),
             "documents": self.documents,
             "sessions": self.sessions,
             "runs": self.runs,
@@ -385,14 +408,7 @@ class CoreState:
         return payload
 
     def list_sessions_payload(self) -> dict[str, Any]:
-        self._refresh_session_liveness()
-        self._recompute_counts()
-        return {
-            "status": "ok",
-            "sessions": [record.payload() for record in self.session_records.values()],
-            "count": self.sessions,
-            "workspace_root": self.workspace_root,
-        }
+        return self._collaboration_service.list_sessions_payload()
 
     def _append_activity_event(
         self,
@@ -460,50 +476,22 @@ class CoreState:
         return record
 
     def _clear_session_presence(self, session_id: str) -> None:
-        with self._lock:
-            self.notebook_presence.pop(session_id, None)
+        self._collaboration_service.clear_session_presence(session_id)
 
     def _refresh_session_leases(self, session_id: str) -> None:
-        with self._lock:
-            now = time.time()
-            changed = False
-            for lease in list(self.cell_leases.values()):
-                if lease.session_id != session_id:
-                    continue
-                lease.updated_at = now
-                lease.expires_at = now + CELL_LEASE_TTL_SECONDS
-                changed = True
-        if changed:
-            self.persist()
+        self._collaboration_service.refresh_session_leases(session_id)
 
     def _clear_session_leases(self, session_id: str) -> None:
-        with self._lock:
-            removed = [key for key, lease in list(self.cell_leases.items()) if lease.session_id == session_id]
-            for key in removed:
-                self.cell_leases.pop(key, None)
+        self._collaboration_service.clear_session_leases(session_id)
 
     def _lease_key(self, relative_path: str, cell_id: str) -> str:
         return f"{relative_path}::{cell_id}"
 
     def _reap_expired_cell_leases(self) -> None:
-        with self._lock:
-            now = time.time()
-            expired = [key for key, lease in list(self.cell_leases.items()) if lease.expires_at <= now]
-            for key in expired:
-                self.cell_leases.pop(key, None)
+        self._collaboration_service.reap_expired_cell_leases()
 
     def _leases_payload_for_path(self, relative_path: str) -> list[dict[str, Any]]:
-        self._reap_expired_cell_leases()
-        with self._lock:
-            leases = [lease for lease in list(self.cell_leases.values()) if lease.path == relative_path]
-            sessions = {session_id: record.payload() for session_id, record in self.session_records.items()}
-        items: list[dict[str, Any]] = []
-        for lease in leases:
-            payload = lease.payload()
-            payload["session"] = sessions.get(lease.session_id)
-            items.append(payload)
-        items.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
-        return items
+        return self._collaboration_service.leases_payload_for_path(relative_path)
 
     def _conflicting_lease(
         self,
@@ -513,26 +501,15 @@ class CoreState:
         owner_session_id: str | None,
         kinds: set[str] | None = None,
     ) -> CellLeaseRecord | None:
-        self._reap_expired_cell_leases()
-        with self._lock:
-            lease = self.cell_leases.get(self._lease_key(relative_path, cell_id))
-        if lease is None:
-            return None
-        if owner_session_id is not None and lease.session_id == owner_session_id:
-            return None
-        if kinds is not None and lease.kind not in kinds:
-            return None
-        return lease
+        return self._collaboration_service.conflicting_lease(
+            relative_path=relative_path,
+            cell_id=cell_id,
+            owner_session_id=owner_session_id,
+            kinds=kinds,
+        )
 
     def _active_structure_leases(self, relative_path: str, owner_session_id: str | None) -> list[CellLeaseRecord]:
-        self._reap_expired_cell_leases()
-        with self._lock:
-            return [
-                lease
-                for lease in list(self.cell_leases.values())
-                if lease.path == relative_path and lease.kind == "structure"
-                and not (owner_session_id is not None and lease.session_id == owner_session_id)
-            ]
+        return self._collaboration_service.active_structure_leases(relative_path, owner_session_id)
 
     def _assert_structure_not_leased(
         self,
@@ -541,18 +518,10 @@ class CoreState:
         owner_session_id: str | None,
         operation: str,
     ) -> None:
-        structure_leases = self._active_structure_leases(relative_path, owner_session_id)
-        if not structure_leases:
-            return
-        lease = structure_leases[0]
-        raise CollaborationConflictError(
-            f"Operation '{operation}' is blocked by an active structure lease",
-            payload=self._lease_conflict_payload(
-                relative_path=relative_path,
-                lease=lease,
-                operation=operation,
-                owner_session_id=owner_session_id,
-            ),
+        self._collaboration_service.assert_structure_not_leased(
+            relative_path=relative_path,
+            owner_session_id=owner_session_id,
+            operation=operation,
         )
 
     def _lease_conflict_payload(
@@ -563,31 +532,12 @@ class CoreState:
         operation: str,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        with self._lock:
-            session = self.session_records.get(lease.session_id)
-            document = next(
-                (record for record in list(self.document_records.values()) if record.relative_path == relative_path),
-                None,
-            )
-        suggested_branch = None
-        if owner_session_id is not None and document is not None:
-            suggested_branch = {
-                "action": "branch-start",
-                "document_id": document.document_id,
-                "owner_session_id": owner_session_id,
-                "reason": "lease-conflict",
-                "title": f"Conflict draft: {operation}",
-            }
-        return {
-            "error": f"Operation '{operation}' is blocked by an active cell lease",
-            "path": relative_path,
-            "conflict": {
-                "lease": lease.payload(),
-                "holder": session.payload() if session is not None else None,
-                "operation": operation,
-                "suggested_branch": suggested_branch,
-            },
-        }
+        return self._collaboration_service.lease_conflict_payload(
+            relative_path=relative_path,
+            lease=lease,
+            operation=operation,
+            owner_session_id=owner_session_id,
+        )
 
     def _assert_cell_not_leased(
         self,
@@ -598,22 +548,12 @@ class CoreState:
         operation: str,
         kinds: set[str] | None = None,
     ) -> None:
-        lease = self._conflicting_lease(
+        self._collaboration_service.assert_cell_not_leased(
             relative_path=relative_path,
             cell_id=cell_id,
             owner_session_id=owner_session_id,
+            operation=operation,
             kinds=kinds,
-        )
-        if lease is None:
-            return
-        raise CollaborationConflictError(
-            f"Operation '{operation}' is blocked by an active lease",
-            payload=self._lease_conflict_payload(
-                relative_path=relative_path,
-                lease=lease,
-                operation=operation,
-                owner_session_id=owner_session_id,
-            ),
         )
 
     def acquire_cell_lease(
@@ -626,72 +566,14 @@ class CoreState:
         kind: str = "edit",
         ttl_seconds: float | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        if kind not in {"edit", "structure"}:
-            return {"error": f"Invalid lease kind: {kind}"}, HTTPStatus.BAD_REQUEST
-        with self._lock:
-            session = self.session_records.get(session_id)
-        if session is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        real_path, relative_path = self._resolve_document_path(path)
-        with self._notebook_lock(real_path):
-            notebook, changed = self._load_notebook(real_path)
-            if changed:
-                self._save_notebook(real_path, notebook)
-            resolved_cell_id = cell_id
-            if resolved_cell_id is None and cell_index is not None:
-                index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
-                resolved_cell_id = self._cell_id(notebook.cells[index], index)
-        if not resolved_cell_id:
-            return {"error": "Missing cell_id or cell_index"}, HTTPStatus.BAD_REQUEST
-        conflict = self._conflicting_lease(
-            relative_path=relative_path,
-            cell_id=resolved_cell_id,
-            owner_session_id=session_id,
-        )
-        if conflict is not None:
-            return self._lease_conflict_payload(
-                relative_path=relative_path,
-                lease=conflict,
-                operation="lease-acquire",
-                owner_session_id=session_id,
-            ), HTTPStatus.CONFLICT
-        key = self._lease_key(relative_path, resolved_cell_id)
-        now = time.time()
-        expires_at = now + (ttl_seconds if ttl_seconds is not None else CELL_LEASE_TTL_SECONDS)
-        with self._lock:
-            existing = self.cell_leases.get(key)
-            created = existing is None
-            if existing is None:
-                lease = CellLeaseRecord(
-                    lease_id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    path=relative_path,
-                    cell_id=resolved_cell_id,
-                    kind=kind,
-                    created_at=now,
-                    updated_at=now,
-                    expires_at=expires_at,
-                )
-                self.cell_leases[key] = lease
-            else:
-                existing.session_id = session_id
-                existing.kind = kind
-                existing.updated_at = now
-                existing.expires_at = expires_at
-                lease = existing
-        self._append_activity_event(
-            path=relative_path,
-            event_type="lease-acquired",
-            detail=f"{session.actor} acquired {kind} lease",
-            actor=session.actor,
+        return self._collaboration_service.acquire_cell_lease(
             session_id=session_id,
-            cell_id=resolved_cell_id,
+            path=path,
+            cell_id=cell_id,
             cell_index=cell_index,
+            kind=kind,
+            ttl_seconds=ttl_seconds,
         )
-        self.persist()
-        payload = lease.payload()
-        payload["session"] = session.payload()
-        return {"status": "ok", "created": created, "lease": payload, "workspace_root": self.workspace_root}, HTTPStatus.OK
 
     def release_cell_lease(
         self,
@@ -701,49 +583,15 @@ class CoreState:
         cell_id: str | None = None,
         cell_index: int | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        with self._lock:
-            session = self.session_records.get(session_id)
-        if session is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        real_path, relative_path = self._resolve_document_path(path)
-        with self._notebook_lock(real_path):
-            notebook, changed = self._load_notebook(real_path)
-            if changed:
-                self._save_notebook(real_path, notebook)
-            resolved_cell_id = cell_id
-            if resolved_cell_id is None and cell_index is not None:
-                index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
-                resolved_cell_id = self._cell_id(notebook.cells[index], index)
-        if not resolved_cell_id:
-            return {"error": "Missing cell_id or cell_index"}, HTTPStatus.BAD_REQUEST
-        key = self._lease_key(relative_path, resolved_cell_id)
-        with self._lock:
-            lease = self.cell_leases.get(key)
-            if lease is None or lease.session_id != session_id:
-                return {"status": "ok", "released": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-            removed = self.cell_leases.pop(key)
-        self._append_activity_event(
-            path=relative_path,
-            event_type="lease-released",
-            detail=f"{session.actor} released {removed.kind} lease",
-            actor=session.actor,
+        return self._collaboration_service.release_cell_lease(
             session_id=session_id,
-            cell_id=resolved_cell_id,
+            path=path,
+            cell_id=cell_id,
             cell_index=cell_index,
         )
-        self.persist()
-        return {"status": "ok", "released": True, "workspace_root": self.workspace_root}, HTTPStatus.OK
 
     def _presence_payload_for_path(self, relative_path: str) -> list[dict[str, Any]]:
-        with self._lock:
-            presence_records = [record.payload() for record in self.notebook_presence.values() if record.path == relative_path]
-            session_payloads = {session_id: record.payload() for session_id, record in self.session_records.items()}
-        items: list[dict[str, Any]] = []
-        for payload in presence_records:
-            payload["session"] = session_payloads.get(payload["session_id"])
-            items.append(payload)
-        items.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
-        return items
+        return self._collaboration_service.presence_payload_for_path(relative_path)
 
     def start_session(
         self,
@@ -753,121 +601,47 @@ class CoreState:
         session_id: str,
         capabilities: list[str] | None = None,
     ) -> dict[str, Any]:
-        now = time.time()
-        resolved_capabilities = capabilities or _default_session_capabilities(client)
-        existing = self.session_records.get(session_id)
-        if existing is None:
-            record = SessionRecord(
-                session_id=session_id,
-                actor=actor,
-                client=client,
-                label=label,
-                status="attached",
-                capabilities=resolved_capabilities,
-                resume_count=0,
-                created_at=now,
-                last_seen_at=now,
-            )
-            self.session_records[session_id] = record
-            created = True
-        else:
-            existing.actor = actor
-            existing.client = client
-            existing.label = label
-            existing.status = "attached"
-            existing.capabilities = resolved_capabilities
-            existing.resume_count += 1
-            existing.last_seen_at = now
-            record = existing
-            created = False
-        self.sessions = len(self.session_records)
-        self.persist()
-        return {
-            "status": "ok",
-            "created": created,
-            "session": record.payload(),
-            "workspace_root": self.workspace_root,
-        }
+        return self._collaboration_service.start_session(
+            actor,
+            client,
+            label,
+            session_id,
+            capabilities=capabilities,
+        )
+
+    def resolve_preferred_session(self, actor: str = "human") -> dict[str, Any]:
+        return self._collaboration_service.resolve_preferred_session(actor)
 
     def _refresh_session_liveness(self) -> None:
-        with self._lock:
-            now = time.time()
-            changed = False
-            for record in self.session_records.values():
-                if record.status == "attached" and (now - record.last_seen_at) > SESSION_STALE_AFTER_SECONDS:
-                    record.status = "stale"
-                    changed = True
-        if changed:
-            self.persist()
+        self._collaboration_service.refresh_session_liveness()
 
     def _recompute_counts(self) -> None:
-        self.documents = len(self.document_records)
-        self.sessions = len(self.session_records)
-        self.runs = sum(1 for record in self.run_records.values() if record.status in {"queued", "running"})
+        self._execution_ledger_service.recompute_counts()
 
     def persist(self) -> None:
-        if self.state_file is None:
-            return
         with self._lock:
-            Path(self.state_file).parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "version": self.version,
-                "workspace_root": self.workspace_root,
-                "saved_at": time.time(),
-                "sessions": [record.payload() for record in self.session_records.values()],
-                "documents": [record.payload() for record in self.document_records.values()],
-                "branches": [record.payload() for record in self.branch_records.values()],
-                "runtimes": [record.payload() for record in self.runtime_records.values()],
-                "runs": [record.payload() for record in self.run_records.values()],
-                "activity": [record.payload() for record in self.activity_records],
-            }
-            tmp_path = f"{self.state_file}.tmp"
-            Path(tmp_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
-            os.replace(tmp_path, self.state_file)
+            if self._db is None:
+                return
+            from agent_repl.core.db import persist_all
+            persist_all(
+                self._db,
+                sessions=[r.payload() for r in self.session_records.values()],
+                documents=[r.payload() for r in self.document_records.values()],
+                branches=[r.payload() for r in self.branch_records.values()],
+                runtimes=[r.payload() for r in self.runtime_records.values()],
+                runs=[r.payload() for r in self.run_records.values()],
+                activity=[r.payload() for r in self.activity_records],
+                executions=list(self.execution_records.values()),
+            )
 
     def touch_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        record = self.session_records.get(session_id)
-        if record is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        record.status = "attached"
-        record.last_seen_at = time.time()
-        self._refresh_session_leases(session_id)
-        self.persist()
-        return {
-            "status": "ok",
-            "session": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.touch_session(session_id)
 
     def detach_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        record = self.session_records.get(session_id)
-        if record is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        record.status = "detached"
-        record.last_seen_at = time.time()
-        self._clear_session_presence(session_id)
-        self._clear_session_leases(session_id)
-        self.persist()
-        return {
-            "status": "ok",
-            "session": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.detach_session(session_id)
 
     def end_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        record = self.session_records.pop(session_id, None)
-        self.sessions = len(self.session_records)
-        if record is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        self._clear_session_presence(session_id)
-        self._clear_session_leases(session_id)
-        self.persist()
-        return {
-            "status": "ok",
-            "ended": True,
-            "session_id": session_id,
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.end_session(session_id)
 
     def list_documents_payload(self) -> dict[str, Any]:
         self._recompute_counts()
@@ -920,18 +694,10 @@ class CoreState:
         }, HTTPStatus.OK
 
     def notebook_contents(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        # Readers should be able to observe the last committed notebook snapshot
-        # even while a long-running execution still holds the per-notebook lock.
-        payload = self._headless_notebook_contents(real_path, relative_path)
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_read_service.contents(path)
 
     def notebook_status(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_status(real_path, relative_path)
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_read_service.status(path)
 
     def notebook_create(
         self,
@@ -940,11 +706,7 @@ class CoreState:
         cells: list[dict[str, Any]] | None,
         kernel_id: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        with self._notebook_lock(real_path):
-            payload = self._headless_notebook_create(real_path, relative_path, cells=cells, kernel_id=kernel_id)
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.create(path, cells=cells, kernel_id=kernel_id)
 
     def notebook_edit(
         self,
@@ -953,14 +715,7 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_edit(real_path, relative_path, operations, owner_session_id=owner_session_id)
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.edit(path, operations, owner_session_id=owner_session_id)
 
     def notebook_execute_cell(
         self,
@@ -970,20 +725,12 @@ class CoreState:
         cell_index: int | None,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_execute_cell(
-                    real_path,
-                    relative_path,
-                    cell_id=cell_id,
-                    cell_index=cell_index,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.execute_cell(
+            path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            owner_session_id=owner_session_id,
+        )
 
     def notebook_insert_execute(
         self,
@@ -994,28 +741,19 @@ class CoreState:
         at_index: int,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_insert_execute(
-                    real_path,
-                    relative_path,
-                    source=source,
-                    cell_type=cell_type,
-                    at_index=at_index,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.insert_execute(
+            path,
+            source=source,
+            cell_type=cell_type,
+            at_index=at_index,
+            owner_session_id=owner_session_id,
+        )
 
     def notebook_execution(self, execution_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        client = self._projection_client(self.workspace_root)
-        if client is None:
-            return {"error": f"Unknown execution: {execution_id}"}, HTTPStatus.NOT_FOUND
-        payload = client.execution(execution_id)
-        return payload, HTTPStatus.OK
+        payload = self._execution_ledger_service.notebook_execution(execution_id)
+        if payload is not None:
+            return payload, HTTPStatus.OK
+        return {"error": f"Unknown execution: {execution_id}"}, HTTPStatus.NOT_FOUND
 
     def notebook_execute_all(
         self,
@@ -1023,47 +761,10 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_execute_all(
-                    real_path,
-                    relative_path,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.execute_all(path, owner_session_id=owner_session_id)
 
     def notebook_interrupt(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        if runtime is None:
-            return {"status": "ok", "interrupted": False, "reason": "no-runtime"}, HTTPStatus.OK
-        current_execution = runtime.current_execution
-        if not current_execution:
-            return {"status": "ok", "interrupted": False, "reason": "idle"}, HTTPStatus.OK
-        try:
-            runtime.manager.interrupt_kernel()
-        except Exception as err:
-            return {"error": f"Failed to interrupt execution: {err}"}, HTTPStatus.INTERNAL_SERVER_ERROR
-        self._append_activity_event(
-            path=relative_path,
-            event_type="execution-interrupt-requested",
-            detail="Interrupt requested for current execution",
-            actor="agent",
-            session_id=None,
-            runtime_id=runtime.runtime_id,
-            cell_id=current_execution.get("cell_id"),
-            cell_index=current_execution.get("cell_index"),
-        )
-        self.persist()
-        return {
-            "status": "ok",
-            "interrupted": True,
-            "current_execution": current_execution,
-        }, HTTPStatus.OK
+        return self._notebook_write_service.interrupt(path)
 
     def notebook_select_kernel(
         self,
@@ -1071,89 +772,16 @@ class CoreState:
         *,
         kernel_id: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        python_path = self._resolve_python_path(kernel_id)
-        venv_path = os.path.join(self.workspace_root, ".venv", "bin", "python")
-        source_hint = venv_path if not kernel_id and os.path.exists(venv_path) else None
-        self._ensure_kernel_capable_python(python_path, source_hint=source_hint)
-        existing = self.headless_runtimes.get(real_path)
-        if existing is not None and existing.python_path == python_path:
-            existing.last_used_at = time.time()
-        else:
-            if existing is not None:
-                self._shutdown_headless_runtime(real_path)
-            self._ensure_headless_runtime(real_path, kernel_id=python_path)
-        runtime = self.headless_runtimes.get(real_path)
-        if runtime is not None:
-            self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime)
-            self.persist()
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "kernel": {
-                "id": python_path,
-                "label": Path(python_path).name,
-                "python": python_path,
-                "type": "headless",
-            },
-            "message": f"Selected kernel: {python_path}",
-            "mode": "headless",
-        }, HTTPStatus.OK
+        return self._notebook_write_service.select_kernel(path, kernel_id=kernel_id)
 
     def notebook_runtime(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self._reap_expired_runtimes()
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        reattach_policy = self._notebook_reattach_policy(real_path=real_path, relative_path=relative_path)
-        runtime_record = self._runtime_record_for_notebook(relative_path)
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "active": runtime is not None,
-            "mode": "headless" if (runtime is not None or reattach_policy.get("action") != "none") else None,
-            "runtime": runtime.payload() if runtime is not None else None,
-            "runtime_record": runtime_record.payload() if runtime_record is not None else None,
-            "reattach_policy": reattach_policy,
-        }, HTTPStatus.OK
+        return self._notebook_read_service.runtime(path)
 
     def notebook_projection(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self._reap_expired_runtimes()
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        runtime_record = self._runtime_record_for_notebook(relative_path)
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "active": runtime is not None,
-            "mode": "headless" if runtime is not None else None,
-            "runtime": runtime.payload() if runtime is not None else None,
-            "runtime_record": runtime_record.payload() if runtime_record is not None else None,
-            "contents": self._headless_notebook_contents(real_path, relative_path) if runtime is not None else None,
-        }, HTTPStatus.OK
+        return self._notebook_read_service.projection(path)
 
     def notebook_activity(self, path: str, *, since: float | None = None) -> tuple[dict[str, Any], HTTPStatus]:
-        self._refresh_session_liveness()
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        runtime_record = self._runtime_record_for_notebook(relative_path)
-        with self._lock:
-            events = [
-                record.payload()
-                for record in self.activity_records
-                if record.path == relative_path and (since is None or record.timestamp > since)
-            ]
-        cursor = max((event["timestamp"] for event in events), default=since or 0.0)
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "presence": self._presence_payload_for_path(relative_path),
-            "leases": self._leases_payload_for_path(relative_path),
-            "recent_events": events,
-            "cursor": cursor,
-            "runtime": runtime.payload() if runtime is not None else None,
-            "runtime_record": runtime_record.payload() if runtime_record is not None else None,
-            "current_execution": runtime.current_execution if runtime is not None else None,
-        }, HTTPStatus.OK
+        return self._notebook_read_service.activity(path, since=since)
 
     def upsert_notebook_presence(
         self,
@@ -1164,83 +792,16 @@ class CoreState:
         cell_id: str | None = None,
         cell_index: int | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        with self._lock:
-            session = self.session_records.get(session_id)
-        if session is None:
-            return {"error": f"Unknown session_id: {session_id}"}, HTTPStatus.NOT_FOUND
-        _real_path, relative_path = self._resolve_document_path(path)
-        now = time.time()
-        with self._lock:
-            existing = self.notebook_presence.get(session_id)
-            changed = (
-                existing is None
-                or existing.path != relative_path
-                or existing.activity != activity
-                or existing.cell_id != cell_id
-                or existing.cell_index != cell_index
-            )
-            if existing is None:
-                record = NotebookPresenceRecord(
-                    session_id=session_id,
-                    path=relative_path,
-                    activity=activity,
-                    cell_id=cell_id,
-                    cell_index=cell_index,
-                    created_at=now,
-                    updated_at=now,
-                )
-                self.notebook_presence[session_id] = record
-            else:
-                existing.path = relative_path
-                existing.activity = activity
-                existing.cell_id = cell_id
-                existing.cell_index = cell_index
-                existing.updated_at = now
-                record = existing
-        if changed:
-            self._append_activity_event(
-                path=relative_path,
-                event_type="presence-updated",
-                detail=f"{session.actor} {activity}",
-                actor=session.actor,
-                session_id=session_id,
-                cell_id=cell_id,
-                cell_index=cell_index,
-            )
-        self.persist()
-        payload = record.payload()
-        payload["session"] = session.payload()
-        return {
-            "status": "ok",
-            "presence": payload,
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.upsert_notebook_presence(
+            session_id=session_id,
+            path=path,
+            activity=activity,
+            cell_id=cell_id,
+            cell_index=cell_index,
+        )
 
     def clear_notebook_presence(self, *, session_id: str, path: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
-        with self._lock:
-            session = self.session_records.get(session_id)
-            existing = self.notebook_presence.get(session_id)
-        if existing is None:
-            return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-        if path is not None:
-            _real_path, relative_path = self._resolve_document_path(path)
-            if existing.path != relative_path:
-                return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-        with self._lock:
-            removed = self.notebook_presence.pop(session_id, None)
-        if removed is None:
-            return {"status": "ok", "cleared": False, "workspace_root": self.workspace_root}, HTTPStatus.OK
-        self._append_activity_event(
-            path=removed.path,
-            event_type="presence-cleared",
-            detail=f"{session.actor if session is not None else 'session'} left notebook",
-            actor=session.actor if session is not None else None,
-            session_id=session_id,
-            cell_id=removed.cell_id,
-            cell_index=removed.cell_index,
-        )
-        self.persist()
-        return {"status": "ok", "cleared": True, "workspace_root": self.workspace_root}, HTTPStatus.OK
+        return self._collaboration_service.clear_notebook_presence(session_id=session_id, path=path)
 
     def notebook_project_visible(
         self,
@@ -1249,24 +810,7 @@ class CoreState:
         cells: list[dict[str, Any]],
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        if runtime is None:
-            runtime = self._ensure_headless_runtime(real_path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_project_visible(
-                    real_path,
-                    relative_path,
-                    cells=cells,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime)
-        self.persist()
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.project_visible(path, cells=cells, owner_session_id=owner_session_id)
 
     def notebook_execute_visible_cell(
         self,
@@ -1276,31 +820,15 @@ class CoreState:
         source: str,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        runtime = self.headless_runtimes.get(real_path)
-        if runtime is None:
-            runtime = self._ensure_headless_runtime(real_path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_execute_visible_cell(
-                    real_path,
-                    relative_path,
-                    cell_index=cell_index,
-                    source=source,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime)
-        self.persist()
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.execute_visible_cell(
+            path,
+            cell_index=cell_index,
+            source=source,
+            owner_session_id=owner_session_id,
+        )
 
     def notebook_restart(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        payload = self._headless_notebook_restart(real_path, relative_path)
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.restart(path)
 
     def notebook_restart_and_run_all(
         self,
@@ -1308,18 +836,7 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        real_path, relative_path = self._resolve_document_path(path)
-        try:
-            with self._notebook_lock(real_path):
-                payload = self._headless_notebook_restart_and_run_all(
-                    real_path,
-                    relative_path,
-                    owner_session_id=owner_session_id,
-                )
-        except CollaborationConflictError as err:
-            return err.payload, HTTPStatus.CONFLICT
-        self._sync_document_record(real_path, relative_path)
-        return payload, HTTPStatus.OK
+        return self._notebook_write_service.restart_and_run_all(path, owner_session_id=owner_session_id)
 
     def refresh_document(self, document_id: str) -> tuple[dict[str, Any], HTTPStatus]:
         record = self.document_records.get(document_id)
@@ -1770,6 +1287,10 @@ class CoreState:
         changed = False
         for index, cell in enumerate(notebook.cells):
             changed = self._ensure_cell_identity(cell, index) or changed
+        # Shadow-load into YDoc if not already populated
+        relative_path = os.path.relpath(real_path, self.workspace_root)
+        if not self._ydoc_service.has_cells(relative_path):
+            self._sync_notebook_to_ydoc(relative_path, notebook)
         return notebook, created or changed
 
     def _save_notebook(self, real_path: str, notebook: Any) -> None:
@@ -1790,6 +1311,17 @@ class CoreState:
             except OSError:
                 pass
             raise
+        # Keep YDoc shadow in sync after every save
+        relative_path = os.path.relpath(real_path, self.workspace_root)
+        self._sync_notebook_to_ydoc(relative_path, notebook)
+
+    def _sync_notebook_to_ydoc(self, relative_path: str, notebook: Any) -> None:
+        """Sync an nbformat notebook into the YDoc shadow."""
+        if threading.get_ident() != self._owner_thread_id:
+            return
+        cells = [dict(cell) for cell in notebook.cells]
+        self._ydoc_service.close(relative_path)
+        self._ydoc_service.load_from_nbformat(relative_path, {"cells": cells})
 
     def _ensure_cell_identity(self, cell: Any, index: int) -> bool:
         metadata = dict(getattr(cell, "metadata", {}) or {})
@@ -1873,12 +1405,7 @@ class CoreState:
         return normalized
 
     def _session_actor(self, session_id: str | None, fallback: str | None = None) -> str | None:
-        if session_id is None:
-            return fallback
-        session = self.session_records.get(session_id)
-        if session is None:
-            return fallback
-        return session.actor
+        return self._collaboration_service.session_actor(session_id, fallback)
 
     def _cell_payload(self, cell: Any, index: int) -> dict[str, Any]:
         is_code = cell.cell_type == "code"
@@ -1958,30 +1485,25 @@ class CoreState:
 
     def _headless_notebook_status(self, real_path: str, relative_path: str) -> dict[str, Any]:
         runtime = self.headless_runtimes.get(real_path)
-        running = []
-        if runtime and runtime.current_execution:
-            running.append(runtime.current_execution)
+        runtime_record = self._runtime_record_for_notebook(relative_path)
+        running: list[dict[str, Any]]
+        queued: list[dict[str, Any]]
+        if runtime_record is not None:
+            running, queued = self._execution_ledger_service.notebook_status(runtime=runtime, runtime_record=runtime_record)
+        else:
+            running = [dict(runtime.current_execution)] if runtime and runtime.current_execution else []
+            queued = []
         return {
             "path": relative_path,
             "open": False,
             "kernel_state": "busy" if runtime and runtime.busy else ("idle" if runtime else "not_open"),
             "busy": bool(runtime and runtime.busy),
             "running": running,
-            "queued": [],
+            "queued": queued,
         }
 
     def _create_notebook_cells(self, cells: list[dict[str, Any]] | None) -> list[Any]:
-        notebook_cells: list[Any] = []
-        for index, cell in enumerate(cells or []):
-            cell_type = "code" if cell.get("type") == "code" else "markdown"
-            source = cell.get("source", "")
-            if cell_type == "code":
-                notebook_cell = nbformat.v4.new_code_cell(source=source)
-            else:
-                notebook_cell = nbformat.v4.new_markdown_cell(source=source)
-            self._ensure_cell_identity(notebook_cell, index)
-            notebook_cells.append(notebook_cell)
-        return notebook_cells
+        return self._notebook_mutation_service.create_notebook_cells(cells)
 
     def _headless_notebook_create(
         self,
@@ -1991,30 +1513,12 @@ class CoreState:
         cells: list[dict[str, Any]] | None,
         kernel_id: str | None,
     ) -> dict[str, Any]:
-        python_path = self._resolve_python_path(kernel_id)
-        runtime = self._ensure_headless_runtime(real_path, python_path)
-        notebook = nbformat.v4.new_notebook(cells=self._create_notebook_cells(cells))
-        notebook.metadata["kernelspec"] = {
-            "display_name": f"{Path(python_path).parent.parent.name or Path(python_path).name}",
-            "language": "python",
-            "name": "python3",
-        }
-        self._save_notebook(real_path, notebook)
-        runtime.last_used_at = time.time()
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "kernel_status": "selected",
-            "ready": True,
-            "kernel": {
-                "id": python_path,
-                "label": Path(python_path).name,
-                "python": python_path,
-                "type": "headless",
-            },
-            "message": f"Selected kernel: {python_path}",
-            "mode": "headless",
-        }
+        return self._notebook_mutation_service.create(
+            real_path,
+            relative_path,
+            cells=cells,
+            kernel_id=kernel_id,
+        )
 
     def _headless_notebook_project_visible(
         self,
@@ -2024,70 +1528,12 @@ class CoreState:
         cells: list[dict[str, Any]],
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, _ = self._load_notebook(real_path)
-        self._assert_structure_not_leased(
-            relative_path=relative_path,
+        return self._notebook_mutation_service.project_visible(
+            real_path,
+            relative_path,
+            cells=cells,
             owner_session_id=owner_session_id,
-            operation="project-visible-notebook",
         )
-        existing_by_id = {
-            self._cell_id(cell, index): cell
-            for index, cell in enumerate(notebook.cells)
-        }
-        incoming_ids = {self._incoming_cell_id(payload) for payload in cells if self._incoming_cell_id(payload)}
-        for existing_id in existing_by_id:
-            if existing_id not in incoming_ids:
-                self._assert_cell_not_leased(
-                    relative_path=relative_path,
-                    cell_id=existing_id,
-                    owner_session_id=owner_session_id,
-                    operation="project-visible-notebook",
-                )
-        for incoming_id in incoming_ids:
-            self._assert_cell_not_leased(
-                relative_path=relative_path,
-                cell_id=incoming_id,
-                owner_session_id=owner_session_id,
-                operation="project-visible-notebook",
-            )
-            if owner_session_id is not None:
-                self.acquire_cell_lease(
-                    session_id=owner_session_id,
-                    path=relative_path,
-                    cell_id=incoming_id,
-                    kind="edit",
-                )
-        notebook.cells = [
-            self._materialize_visible_cell(payload, existing_by_id)
-            for payload in cells
-        ]
-        for index, cell in enumerate(notebook.cells):
-            self._ensure_cell_identity(cell, index)
-        self._save_notebook(real_path, notebook)
-        self._append_activity_event(
-            path=relative_path,
-            event_type="notebook-projected",
-            detail=f"Projected {len(notebook.cells)} visible cells",
-            runtime_id=self._selected_runtime_record_for_notebook(relative_path).runtime_id
-            if self._selected_runtime_record_for_notebook(relative_path) is not None else None,
-            session_id=owner_session_id,
-            actor=self._session_actor(owner_session_id, "human"),
-        )
-        self._append_activity_event(
-            path=relative_path,
-            event_type="notebook-reset-needed",
-            detail="Visible projection changed notebook structure",
-            runtime_id=self._selected_runtime_record_for_notebook(relative_path).runtime_id
-            if self._selected_runtime_record_for_notebook(relative_path) is not None else None,
-            session_id=owner_session_id,
-            actor=self._session_actor(owner_session_id, "human"),
-        )
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "cell_count": len(notebook.cells),
-            "mode": "headless",
-        }
 
     def _headless_notebook_edit(
         self,
@@ -2097,195 +1543,12 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, changed = self._load_notebook(real_path)
-        results: list[dict[str, Any]] = []
-        actor = self._session_actor(owner_session_id, "agent")
-        runtime_id = (
-            self._selected_runtime_record_for_notebook(relative_path).runtime_id
-            if self._selected_runtime_record_for_notebook(relative_path) is not None else None
+        return self._notebook_mutation_service.edit(
+            real_path,
+            relative_path,
+            operations,
+            owner_session_id=owner_session_id,
         )
-        for op in operations:
-            command = op.get("op")
-            if command == "replace-source":
-                index = self._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
-                cell = notebook.cells[index]
-                stable_cell_id = self._cell_id(cell, index)
-                self._assert_cell_not_leased(
-                    relative_path=relative_path,
-                    cell_id=stable_cell_id,
-                    owner_session_id=owner_session_id,
-                    operation="replace-source",
-                )
-                cell.source = op.get("source", "")
-                if cell.cell_type == "code":
-                    cell.outputs = []
-                    cell.execution_count = None
-                    self._clear_cell_runtime_provenance(cell)
-                results.append({"op": "replace-source", "changed": True, "cell_id": stable_cell_id, "cell_count": len(notebook.cells)})
-                self._append_activity_event(
-                    path=relative_path,
-                    event_type="cell-source-updated",
-                    detail=f"Updated source for cell {index + 1}",
-                    actor=actor,
-                    session_id=owner_session_id,
-                    runtime_id=runtime_id,
-                    cell_id=stable_cell_id,
-                    cell_index=index,
-                    data={"cell": self._cell_payload(cell, index)},
-                )
-                changed = True
-            elif command == "insert":
-                self._assert_structure_not_leased(
-                    relative_path=relative_path,
-                    owner_session_id=owner_session_id,
-                    operation="insert",
-                )
-                index = self._normalize_insert_index(notebook, op.get("at_index", -1))
-                cell_type = op.get("cell_type", "code")
-                source = op.get("source", "")
-                cell = nbformat.v4.new_code_cell(source=source) if cell_type == "code" else nbformat.v4.new_markdown_cell(source=source)
-                notebook.cells.insert(index, cell)
-                for position, current in enumerate(notebook.cells):
-                    self._ensure_cell_identity(current, position)
-                inserted_cell = notebook.cells[index]
-                results.append({"op": "insert", "changed": True, "cell_id": self._cell_id(inserted_cell, index), "cell_count": len(notebook.cells)})
-                self._append_activity_event(
-                    path=relative_path,
-                    event_type="cell-inserted",
-                    detail=f"Inserted {cell_type} cell at index {index}",
-                    actor=actor,
-                    session_id=owner_session_id,
-                    runtime_id=runtime_id,
-                    cell_id=self._cell_id(inserted_cell, index),
-                    cell_index=index,
-                    data={"cell": self._cell_payload(inserted_cell, index)},
-                )
-                changed = True
-            elif command == "delete":
-                index = self._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
-                cell = notebook.cells[index]
-                stable_cell_id = self._cell_id(cell, index)
-                self._assert_structure_not_leased(
-                    relative_path=relative_path,
-                    owner_session_id=owner_session_id,
-                    operation="delete",
-                )
-                self._assert_cell_not_leased(
-                    relative_path=relative_path,
-                    cell_id=stable_cell_id,
-                    owner_session_id=owner_session_id,
-                    operation="delete",
-                )
-                notebook.cells.pop(index)
-                for position, current in enumerate(notebook.cells):
-                    self._ensure_cell_identity(current, position)
-                self.cell_leases.pop(self._lease_key(relative_path, stable_cell_id), None)
-                results.append({"op": "delete", "changed": True, "cell_id": stable_cell_id, "cell_count": len(notebook.cells)})
-                self._append_activity_event(
-                    path=relative_path,
-                    event_type="cell-removed",
-                    detail=f"Removed cell at index {index}",
-                    actor=actor,
-                    session_id=owner_session_id,
-                    runtime_id=runtime_id,
-                    cell_id=stable_cell_id,
-                    cell_index=index,
-                    data={"cell_id": stable_cell_id},
-                )
-                changed = True
-            elif command == "move":
-                index = self._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
-                to_index = int(op.get("to_index", index))
-                if to_index == -1:
-                    to_index = len(notebook.cells) - 1
-                to_index = max(0, min(to_index, len(notebook.cells) - 1))
-                cell = notebook.cells[index]
-                stable_cell_id = self._cell_id(cell, index)
-                self._assert_structure_not_leased(
-                    relative_path=relative_path,
-                    owner_session_id=owner_session_id,
-                    operation="move",
-                )
-                self._assert_cell_not_leased(
-                    relative_path=relative_path,
-                    cell_id=stable_cell_id,
-                    owner_session_id=owner_session_id,
-                    operation="move",
-                )
-                cell = notebook.cells.pop(index)
-                notebook.cells.insert(to_index, cell)
-                for position, current in enumerate(notebook.cells):
-                    self._ensure_cell_identity(current, position)
-                results.append({"op": "move", "changed": True, "cell_id": self._cell_id(cell, to_index), "cell_count": len(notebook.cells)})
-                self._append_activity_event(
-                    path=relative_path,
-                    event_type="notebook-reset-needed",
-                    detail=f"Moved cell from index {index} to {to_index}",
-                    actor=actor,
-                    session_id=owner_session_id,
-                    runtime_id=runtime_id,
-                    cell_id=self._cell_id(cell, to_index),
-                    cell_index=to_index,
-                )
-                changed = True
-            elif command == "clear-outputs":
-                if op.get("all"):
-                    for index, cell in enumerate(notebook.cells):
-                        if cell.cell_type == "code":
-                            self._assert_cell_not_leased(
-                                relative_path=relative_path,
-                                cell_id=self._cell_id(cell, index),
-                                owner_session_id=owner_session_id,
-                                operation="clear-outputs",
-                            )
-                            cell.outputs = []
-                            cell.execution_count = None
-                            self._clear_cell_runtime_provenance(cell)
-                            self._append_activity_event(
-                                path=relative_path,
-                                event_type="cell-outputs-updated",
-                                detail=f"Cleared outputs for cell {index + 1}",
-                                actor=actor,
-                                session_id=owner_session_id,
-                                runtime_id=runtime_id,
-                                cell_id=self._cell_id(cell, index),
-                                cell_index=index,
-                                data={"cell": self._cell_payload(cell, index)},
-                            )
-                    results.append({"op": "clear-outputs", "changed": True, "cell_count": len(notebook.cells)})
-                    changed = True
-                else:
-                    index = self._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
-                    cell = notebook.cells[index]
-                    if cell.cell_type == "code":
-                        self._assert_cell_not_leased(
-                            relative_path=relative_path,
-                            cell_id=self._cell_id(cell, index),
-                            owner_session_id=owner_session_id,
-                            operation="clear-outputs",
-                        )
-                        cell.outputs = []
-                        cell.execution_count = None
-                        self._clear_cell_runtime_provenance(cell)
-                    stable_cell_id = self._cell_id(cell, index)
-                    self._append_activity_event(
-                        path=relative_path,
-                        event_type="cell-outputs-updated",
-                        detail=f"Cleared outputs for cell {index + 1}",
-                        actor=actor,
-                        session_id=owner_session_id,
-                        runtime_id=runtime_id,
-                        cell_id=stable_cell_id,
-                        cell_index=index,
-                        data={"cell": self._cell_payload(cell, index)},
-                    )
-                    results.append({"op": "clear-outputs", "changed": True, "cell_id": stable_cell_id, "cell_count": len(notebook.cells)})
-                    changed = True
-            else:
-                raise RuntimeError(f"Unsupported headless edit operation: {command}")
-        if changed:
-            self._save_notebook(real_path, notebook)
-        return {"path": relative_path, "results": results}
 
     def _execute_source(
         self,
@@ -2295,194 +1558,18 @@ class CoreState:
         cell_id: str,
         cell_index: int,
         owner_session_id: str | None = None,
+        execution_id: str | None = None,
+        operation: str = "execute-cell",
     ) -> tuple[list[Any], int | None, str | None]:
-        with runtime.lock:
-            relative_path = os.path.relpath(runtime.path, self.workspace_root)
-            actor = self._session_actor(owner_session_id, "agent")
-            runtime.busy = True
-            runtime.current_execution = {
-                "cell_id": cell_id,
-                "cell_index": cell_index,
-                "source_preview": source.splitlines()[0][:80] if source else "",
-                "owner": actor,
-            }
-            runtime.last_used_at = time.time()
-            self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime, status="busy")
-            self._append_activity_event(
-                path=relative_path,
-                event_type="execution-started",
-                detail=f"Executing cell {cell_index + 1}",
-                actor=actor,
-                session_id=owner_session_id,
-                runtime_id=runtime.runtime_id,
-                cell_id=cell_id,
-                cell_index=cell_index,
-            )
-            self.persist()
-            try:
-                msg_id = runtime.client.execute(source, store_history=True, allow_stdin=False, stop_on_error=True)
-                outputs: list[Any] = []
-                execution_count: int | None = None
-                error_text: str | None = None
-                idle_seen = False
-                while not idle_seen:
-                    message = runtime.client.get_iopub_msg(timeout=60)
-                    if message.get("parent_header", {}).get("msg_id") != msg_id:
-                        continue
-                    msg_type = message.get("msg_type") or message.get("header", {}).get("msg_type")
-                    content = message.get("content", {})
-                    if msg_type == "status" and content.get("execution_state") == "idle":
-                        idle_seen = True
-                        continue
-                    if msg_type == "execute_input":
-                        execution_count = content.get("execution_count")
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-execution-updated",
-                            detail=f"Execution count advanced for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={"execution_count": execution_count},
-                        )
-                        continue
-                    if msg_type == "stream":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="stream",
-                            name=content.get("name", "stdout"),
-                            text=content.get("text", ""),
-                        )
-                        outputs.append(output_payload)
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-output-appended",
-                            detail=f"Stream output for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={
-                                "output": json.loads(json.dumps(output_payload)),
-                                "cell": {
-                                    "index": cell_index,
-                                    "display_number": cell_index + 1,
-                                    "cell_id": cell_id,
-                                    "cell_type": "code",
-                                    "source": source,
-                                    "outputs": self._canonical_outputs(outputs),
-                                    "execution_count": execution_count,
-                                    "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
-                                },
-                            },
-                        )
-                        continue
-                    if msg_type == "execute_result":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="execute_result",
-                            data=content.get("data", {}),
-                            metadata=content.get("metadata", {}),
-                            execution_count=content.get("execution_count"),
-                        )
-                        outputs.append(output_payload)
-                        execution_count = content.get("execution_count", execution_count)
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-output-appended",
-                            detail=f"Execution result for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={
-                                "output": json.loads(json.dumps(output_payload)),
-                                "cell": {
-                                    "index": cell_index,
-                                    "display_number": cell_index + 1,
-                                    "cell_id": cell_id,
-                                    "cell_type": "code",
-                                    "source": source,
-                                    "outputs": self._canonical_outputs(outputs),
-                                    "execution_count": execution_count,
-                                    "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
-                                },
-                            },
-                        )
-                        continue
-                    if msg_type == "display_data":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="display_data",
-                            data=content.get("data", {}),
-                            metadata=content.get("metadata", {}),
-                        )
-                        outputs.append(output_payload)
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-output-appended",
-                            detail=f"Display output for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={
-                                "output": json.loads(json.dumps(output_payload)),
-                                "cell": {
-                                    "index": cell_index,
-                                    "display_number": cell_index + 1,
-                                    "cell_id": cell_id,
-                                    "cell_type": "code",
-                                    "source": source,
-                                    "outputs": self._canonical_outputs(outputs),
-                                    "execution_count": execution_count,
-                                    "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
-                                },
-                            },
-                        )
-                        continue
-                    if msg_type == "error":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="error",
-                            ename=content.get("ename"),
-                            evalue=content.get("evalue"),
-                            traceback=content.get("traceback", []),
-                        )
-                        outputs.append(output_payload)
-                        error_text = content.get("evalue") or content.get("ename") or "Execution failed"
-                        self._append_activity_event(
-                            path=relative_path,
-                            event_type="cell-output-appended",
-                            detail=f"Error output for cell {cell_index + 1}",
-                            actor=actor,
-                            session_id=owner_session_id,
-                            runtime_id=runtime.runtime_id,
-                            cell_id=cell_id,
-                            cell_index=cell_index,
-                            data={
-                                "output": json.loads(json.dumps(output_payload)),
-                                "cell": {
-                                    "index": cell_index,
-                                    "display_number": cell_index + 1,
-                                    "cell_id": cell_id,
-                                    "cell_type": "code",
-                                    "source": source,
-                                    "outputs": self._canonical_outputs(outputs),
-                                    "execution_count": execution_count,
-                                    "metadata": {"custom": {"agent-repl": {"cell_id": cell_id}}},
-                                },
-                            },
-                        )
-                runtime.client.get_shell_msg(timeout=60)
-                return outputs, execution_count, error_text
-            finally:
-                runtime.busy = False
-                runtime.current_execution = None
-                runtime.last_used_at = time.time()
-                self._sync_headless_runtime_record(relative_path=relative_path, runtime=runtime, status="idle")
-                self.persist()
+        return self._notebook_execution_service.execute_source(
+            runtime,
+            source,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            owner_session_id=owner_session_id,
+            execution_id=execution_id,
+            operation=operation,
+        )
 
     def _headless_notebook_execute_cell(
         self,
@@ -2493,78 +1580,13 @@ class CoreState:
         cell_index: int | None,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, changed = self._load_notebook(real_path)
-        index = self._find_cell_index(notebook, cell_id=cell_id, cell_index=cell_index)
-        cell = notebook.cells[index]
-        if cell.cell_type != "code":
-            raise RuntimeError("Only code cells can be executed")
-        runtime = self._ensure_headless_runtime(real_path)
-        stable_cell_id = self._cell_id(cell, index)
-        self._assert_cell_not_leased(
-            relative_path=relative_path,
-            cell_id=stable_cell_id,
-            owner_session_id=owner_session_id,
-            operation="execute-cell",
-        )
-        if owner_session_id is not None:
-            self.acquire_cell_lease(
-                session_id=owner_session_id,
-                path=relative_path,
-                cell_id=stable_cell_id,
-                kind="edit",
-        )
-        outputs, execution_count, error_text = self._execute_source(
-            runtime,
-            cell.source,
-            cell_id=stable_cell_id,
-            cell_index=index,
+        return self._notebook_execution_service.execute_cell(
+            real_path,
+            relative_path,
+            cell_id=cell_id,
+            cell_index=cell_index,
             owner_session_id=owner_session_id,
         )
-        actor = self._session_actor(owner_session_id, "agent")
-        try:
-            cell.outputs = outputs
-            cell.execution_count = execution_count
-            self._set_cell_runtime_provenance(
-                cell,
-                runtime_id=runtime.runtime_id,
-                kernel_generation=runtime.kernel_generation,
-                status="error" if error_text else "ok",
-            )
-            self._save_notebook(real_path, notebook)
-            self._append_activity_event(
-                path=relative_path,
-                event_type="cell-outputs-updated",
-                detail=f"Updated outputs for cell {index + 1}",
-                actor=actor,
-                session_id=owner_session_id,
-                runtime_id=runtime.runtime_id,
-                cell_id=stable_cell_id,
-                cell_index=index,
-                data={"cell": self._cell_payload(cell, index)},
-            )
-        finally:
-            self._append_activity_event(
-                path=relative_path,
-                event_type="execution-finished",
-                detail=f"Finished cell {index + 1}",
-                actor=actor,
-                session_id=owner_session_id,
-                runtime_id=runtime.runtime_id,
-                cell_id=stable_cell_id,
-                cell_index=index,
-            )
-            self.persist()
-        return {
-            "status": "error" if error_text else "ok",
-            "path": relative_path,
-            "cell_id": stable_cell_id,
-            "cell_index": index,
-            "outputs": outputs,
-            "execution_count": execution_count,
-            "execution_mode": "headless-runtime",
-            "execution_preference": "headless",
-            **({"error": error_text} if error_text else {}),
-        }
 
     def _headless_notebook_insert_execute(
         self,
@@ -2576,73 +1598,14 @@ class CoreState:
         at_index: int,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        # For code cells, resolve the runtime BEFORE inserting the cell.
-        # This ensures failed kernel resolution doesn't leave orphan cells.
-        self._assert_structure_not_leased(
-            relative_path=relative_path,
+        return self._notebook_execution_service.insert_execute(
+            real_path,
+            relative_path,
+            source=source,
+            cell_type=cell_type,
+            at_index=at_index,
             owner_session_id=owner_session_id,
-            operation="insert-execute",
         )
-        if cell_type == "code":
-            self._ensure_headless_runtime(real_path)
-
-        notebook, _ = self._load_notebook(real_path)
-        index = self._normalize_insert_index(notebook, at_index)
-        cell = nbformat.v4.new_code_cell(source=source) if cell_type == "code" else nbformat.v4.new_markdown_cell(source=source)
-        notebook.cells.insert(index, cell)
-        for position, current in enumerate(notebook.cells):
-            self._ensure_cell_identity(current, position)
-        self._save_notebook(real_path, notebook)
-        self._append_activity_event(
-            path=relative_path,
-            event_type="cell-inserted",
-            detail=f"Inserted {cell_type} cell at index {index}",
-            actor=self._session_actor(owner_session_id, "agent"),
-            session_id=owner_session_id,
-            runtime_id=self._selected_runtime_record_for_notebook(relative_path).runtime_id
-            if self._selected_runtime_record_for_notebook(relative_path) is not None else None,
-            cell_id=self._cell_id(cell, index),
-            cell_index=index,
-            data={"cell": self._cell_payload(cell, index)},
-        )
-        if cell_type != "code":
-            return {
-                "status": "ok",
-                "path": relative_path,
-                "cell_id": self._cell_id(cell, index),
-                "cell_index": index,
-                "operation": "insert-execute",
-                "outputs": [],
-                "execution_mode": "headless-runtime",
-                "execution_preference": "headless",
-            }
-        cell_id = self._cell_id(cell, index)
-        if owner_session_id is not None:
-            self.acquire_cell_lease(
-                session_id=owner_session_id,
-                path=relative_path,
-                cell_id=cell_id,
-                kind="edit",
-            )
-        try:
-            result = self._headless_notebook_execute_cell(
-                real_path,
-                relative_path,
-                cell_id=cell_id,
-                cell_index=None,
-                owner_session_id=owner_session_id,
-            )
-        except Exception as exc:
-            # Agent-repl infrastructure error (kernel crash, timeout, connection
-            # lost) — roll back the inserted cell so ix doesn't leave orphans.
-            # Python exceptions in user code don't reach here; they're captured
-            # as error outputs by _execute_source and returned normally.
-            self._rollback_inserted_cell(real_path, cell_id)
-            raise RuntimeError(
-                f"ix failed and the inserted cell was rolled back (notebook unchanged). "
-                f"Cause: {exc}"
-            ) from exc
-        return {**result, "operation": "insert-execute"}
 
     def _headless_notebook_execute_all(
         self,
@@ -2651,36 +1614,11 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, _ = self._load_notebook(real_path)
-        executions = []
-        stopped_on_error = False
-        failed_cell_id: str | None = None
-        for index, cell in enumerate(notebook.cells):
-            if cell.cell_type != "code":
-                continue
-            result = self._headless_notebook_execute_cell(
-                real_path,
-                relative_path,
-                cell_id=self._cell_id(cell, index),
-                cell_index=None,
-                owner_session_id=owner_session_id,
-            )
-            executions.append(result)
-            if result.get("status") == "error":
-                stopped_on_error = True
-                failed_cell_id = result.get("cell_id")
-                break
-        payload = {
-            "status": "error" if stopped_on_error else "ok",
-            "path": relative_path,
-            "executions": executions,
-            "mode": "headless",
-        }
-        if stopped_on_error:
-            payload["stopped_on_error"] = True
-            if failed_cell_id is not None:
-                payload["failed_cell_id"] = failed_cell_id
-        return payload
+        return self._notebook_execution_service.execute_all(
+            real_path,
+            relative_path,
+            owner_session_id=owner_session_id,
+        )
 
     def _headless_notebook_execute_visible_cell(
         self,
@@ -2691,77 +1629,16 @@ class CoreState:
         source: str,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        notebook, changed = self._load_notebook(real_path)
-        index = self._find_cell_index(notebook, cell_id=None, cell_index=cell_index)
-        cell = notebook.cells[index]
-        if cell.cell_type != "code":
-            raise RuntimeError("Only code cells can be executed")
-        stable_cell_id = self._cell_id(cell, index)
-        self._assert_cell_not_leased(
-            relative_path=relative_path,
-            cell_id=stable_cell_id,
-            owner_session_id=owner_session_id,
-            operation="execute-visible-cell",
-        )
-        if owner_session_id is not None:
-            self.acquire_cell_lease(
-                session_id=owner_session_id,
-                path=relative_path,
-                cell_id=stable_cell_id,
-                kind="edit",
-            )
-        if cell.source != source:
-            cell.source = source
-            cell.outputs = []
-            cell.execution_count = None
-            self._clear_cell_runtime_provenance(cell)
-            changed = True
-        if changed:
-            self._save_notebook(real_path, notebook)
-            self._append_activity_event(
-                path=relative_path,
-                event_type="cell-source-updated",
-                detail=f"Updated source for cell {index + 1}",
-                actor=self._session_actor(owner_session_id, "human"),
-                session_id=owner_session_id,
-                runtime_id=self._selected_runtime_record_for_notebook(relative_path).runtime_id
-                if self._selected_runtime_record_for_notebook(relative_path) is not None else None,
-                cell_id=stable_cell_id,
-                cell_index=index,
-                data={"cell": self._cell_payload(cell, index)},
-            )
-        return self._headless_notebook_execute_cell(
+        return self._notebook_execution_service.execute_visible_cell(
             real_path,
             relative_path,
-            cell_id=self._cell_id(cell, index),
-            cell_index=None,
+            cell_index=cell_index,
+            source=source,
             owner_session_id=owner_session_id,
         )
 
     def _headless_notebook_restart(self, real_path: str, relative_path: str) -> dict[str, Any]:
-        runtime = self.headless_runtimes.get(real_path)
-        kernel_id = runtime.python_path if runtime is not None else None
-        next_generation = (runtime.kernel_generation + 1) if runtime is not None else 1
-        if runtime is not None:
-            self._shutdown_headless_runtime(real_path)
-        restarted = self._ensure_headless_runtime(real_path, kernel_id=kernel_id)
-        restarted.kernel_generation = max(restarted.kernel_generation, next_generation)
-        self._sync_headless_runtime_record(relative_path=relative_path, runtime=restarted, status="idle")
-        self._append_activity_event(
-            path=relative_path,
-            event_type="kernel-restarted",
-            detail=f"Restarted kernel generation {restarted.kernel_generation}",
-            runtime_id=restarted.runtime_id,
-        )
-        self.persist()
-        return {
-            "status": "ok",
-            "path": relative_path,
-            "kernel_state": "idle",
-            "busy": False,
-            "mode": "headless",
-            "kernel_generation": restarted.kernel_generation,
-        }
+        return self._notebook_execution_service.restart(real_path, relative_path)
 
     def _headless_notebook_restart_and_run_all(
         self,
@@ -2770,16 +1647,11 @@ class CoreState:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        restarted = self._headless_notebook_restart(real_path, relative_path)
-        executed = self._headless_notebook_execute_all(
+        return self._notebook_execution_service.restart_and_run_all(
             real_path,
             relative_path,
             owner_session_id=owner_session_id,
         )
-        return {
-            **executed,
-            "restart": restarted,
-        }
 
     def _sync_document_record(self, real_path: str, relative_path: str) -> None:
         now = time.time()
@@ -2848,48 +1720,17 @@ class CoreState:
         title: str | None,
         purpose: str | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        if branch_id in self.branch_records:
-            return {"error": f"Duplicate branch_id: {branch_id}"}, HTTPStatus.BAD_REQUEST
-        if document_id not in self.document_records:
-            return {"error": f"Unknown document_id: {document_id}"}, HTTPStatus.BAD_REQUEST
-        if owner_session_id is not None and owner_session_id not in self.session_records:
-            return {"error": f"Unknown owner_session_id: {owner_session_id}"}, HTTPStatus.BAD_REQUEST
-        if parent_branch_id is not None and parent_branch_id not in self.branch_records:
-            return {"error": f"Unknown parent_branch_id: {parent_branch_id}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        record = BranchRecord(
+        return self._collaboration_service.start_branch(
             branch_id=branch_id,
             document_id=document_id,
             owner_session_id=owner_session_id,
             parent_branch_id=parent_branch_id,
             title=title,
             purpose=purpose,
-            status="active",
-            created_at=now,
-            updated_at=now,
         )
-        self.branch_records[branch_id] = record
-        self.persist()
-        return {
-            "status": "ok",
-            "branch": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
 
     def finish_branch(self, branch_id: str, status: str) -> tuple[dict[str, Any], HTTPStatus]:
-        if status not in {"merged", "rejected", "abandoned"}:
-            return {"error": f"Invalid branch status: {status}"}, HTTPStatus.BAD_REQUEST
-        record = self.branch_records.get(branch_id)
-        if record is None:
-            return {"error": f"Unknown branch_id: {branch_id}"}, HTTPStatus.NOT_FOUND
-        record.status = status
-        record.updated_at = time.time()
-        self.persist()
-        return {
-            "status": "ok",
-            "branch": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.finish_branch(branch_id, status)
 
     def request_branch_review(
         self,
@@ -2898,38 +1739,11 @@ class CoreState:
         requested_by_session_id: str,
         note: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        branch = self.branch_records.get(branch_id)
-        if branch is None:
-            return {"error": f"Unknown branch_id: {branch_id}"}, HTTPStatus.NOT_FOUND
-        if branch.status != "active":
-            return {"error": f"Branch is not reviewable in status '{branch.status}'"}, HTTPStatus.BAD_REQUEST
-        session = self.session_records.get(requested_by_session_id)
-        if session is None:
-            return {"error": f"Unknown requested_by_session_id: {requested_by_session_id}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        branch.review_status = "requested"
-        branch.review_requested_by_session_id = requested_by_session_id
-        branch.review_requested_at = now
-        branch.review_resolved_by_session_id = None
-        branch.review_resolved_at = None
-        branch.review_resolution = None
-        branch.review_note = note
-        branch.updated_at = now
-        document = self.document_records.get(branch.document_id)
-        if document is not None:
-            self._append_activity_event(
-                path=document.relative_path,
-                event_type="review-requested",
-                detail=f"{session.actor} requested review for branch {branch_id}",
-                actor=session.actor,
-                session_id=requested_by_session_id,
-            )
-        self.persist()
-        return {
-            "status": "ok",
-            "branch": branch.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.request_branch_review(
+            branch_id=branch_id,
+            requested_by_session_id=requested_by_session_id,
+            note=note,
+        )
 
     def resolve_branch_review(
         self,
@@ -2939,38 +1753,12 @@ class CoreState:
         resolution: str,
         note: str | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        if resolution not in {"approved", "changes-requested", "rejected"}:
-            return {"error": f"Invalid review resolution: {resolution}"}, HTTPStatus.BAD_REQUEST
-        branch = self.branch_records.get(branch_id)
-        if branch is None:
-            return {"error": f"Unknown branch_id: {branch_id}"}, HTTPStatus.NOT_FOUND
-        if branch.review_status != "requested":
-            return {"error": f"Branch review is not pending for {branch_id}"}, HTTPStatus.BAD_REQUEST
-        session = self.session_records.get(resolved_by_session_id)
-        if session is None:
-            return {"error": f"Unknown resolved_by_session_id: {resolved_by_session_id}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        branch.review_status = "resolved"
-        branch.review_resolved_by_session_id = resolved_by_session_id
-        branch.review_resolved_at = now
-        branch.review_resolution = resolution
-        branch.review_note = note or branch.review_note
-        branch.updated_at = now
-        document = self.document_records.get(branch.document_id)
-        if document is not None:
-            self._append_activity_event(
-                path=document.relative_path,
-                event_type="review-resolved",
-                detail=f"{session.actor} resolved branch {branch_id} review as {resolution}",
-                actor=session.actor,
-                session_id=resolved_by_session_id,
-            )
-        self.persist()
-        return {
-            "status": "ok",
-            "branch": branch.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._collaboration_service.resolve_branch_review(
+            branch_id=branch_id,
+            resolved_by_session_id=resolved_by_session_id,
+            resolution=resolution,
+            note=note,
+        )
 
     def list_runtimes_payload(self) -> dict[str, Any]:
         self._reap_expired_runtimes()
@@ -3081,7 +1869,10 @@ class CoreState:
                 "error": f"Runtime identity mismatch for document-bound runtime: {runtime_id}",
             }, HTTPStatus.CONFLICT
         if live_runtime is not None and live_runtime.busy:
-            return {"error": f"Runtime is busy: {runtime_id}"}, HTTPStatus.CONFLICT
+            return {
+                "error": f"Runtime is busy: {runtime_id}",
+                "recovery": runtime_busy_recovery(),
+            }, HTTPStatus.CONFLICT
 
         previous_status = record.status
         previous_generation = record.kernel_generation
@@ -3123,7 +1914,10 @@ class CoreState:
         if record.status in {"reaped", "stopped"}:
             return {"error": f"Ephemeral runtime is no longer promotable: {runtime_id}"}, HTTPStatus.BAD_REQUEST
         if record.status == "busy":
-            return {"error": f"Runtime is busy and cannot be promoted yet: {runtime_id}"}, HTTPStatus.CONFLICT
+            return {
+                "error": f"Runtime is busy and cannot be promoted yet: {runtime_id}",
+                "recovery": runtime_busy_recovery(),
+            }, HTTPStatus.CONFLICT
         previous_mode = record.mode
         record.mode = mode
         record.expires_at = None
@@ -3184,14 +1978,7 @@ class CoreState:
         }, HTTPStatus.OK
 
     def list_runs_payload(self) -> dict[str, Any]:
-        self._recompute_counts()
-        return {
-            "status": "ok",
-            "runs": [record.payload() for record in self.run_records.values()],
-            "count": len(self.run_records),
-            "active_count": self.runs,
-            "workspace_root": self.workspace_root,
-        }
+        return self._execution_ledger_service.list_runs_payload()
 
     def start_run(
         self,
@@ -3202,67 +1989,16 @@ class CoreState:
         target_ref: str,
         kind: str,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        self._reap_expired_runtimes()
-        runtime = self.runtime_records.get(runtime_id)
-        if runtime is None:
-            return {"error": f"Unknown runtime_id: {runtime_id}"}, HTTPStatus.BAD_REQUEST
-        if runtime.status in {"stopped", "reaped", "failed"}:
-            return {"error": f"Runtime is not runnable: {runtime_id}"}, HTTPStatus.BAD_REQUEST
-        if runtime.status == "recovery-needed":
-            return {"error": f"Runtime requires recovery: {runtime_id}"}, HTTPStatus.BAD_REQUEST
-        if runtime.status == "degraded":
-            return {"error": f"Runtime is degraded and must be recovered before new runs: {runtime_id}"}, HTTPStatus.BAD_REQUEST
-        if target_type == "document" and target_ref not in self.document_records:
-            return {"error": f"Unknown document target_ref: {target_ref}"}, HTTPStatus.BAD_REQUEST
-        if target_type == "branch" and target_ref not in self.branch_records:
-            return {"error": f"Unknown branch target_ref: {target_ref}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        record = RunRecord(
+        return self._execution_ledger_service.start_run(
             run_id=run_id,
             runtime_id=runtime_id,
             target_type=target_type,
             target_ref=target_ref,
             kind=kind,
-            status="running",
-            created_at=now,
-            updated_at=now,
         )
-        self.run_records[run_id] = record
-        self._transition_runtime_record(runtime, "busy", health="healthy", reason=f"run-start:{run_id}")
-        self._recompute_counts()
-        self.persist()
-        return {
-            "status": "ok",
-            "run": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
 
     def finish_run(self, run_id: str, status: str) -> tuple[dict[str, Any], HTTPStatus]:
-        record = self.run_records.get(run_id)
-        if record is None:
-            return {"error": f"Unknown run_id: {run_id}"}, HTTPStatus.NOT_FOUND
-        if status not in {"completed", "failed", "interrupted"}:
-            return {"error": f"Invalid run status: {status}"}, HTTPStatus.BAD_REQUEST
-        now = time.time()
-        record.status = status
-        record.updated_at = now
-        runtime = self.runtime_records.get(record.runtime_id)
-        if runtime is not None:
-            active_runtime_runs = sum(
-                1
-                for item in self.run_records.values()
-                if item.runtime_id == record.runtime_id and item.status in {"queued", "running"}
-            )
-            target_status = "busy" if active_runtime_runs else "idle"
-            target_health = "degraded" if status == "failed" else runtime.health
-            self._transition_runtime_record(runtime, target_status, health=target_health, reason=f"run-finish:{run_id}")
-        self._recompute_counts()
-        self.persist()
-        return {
-            "status": "ok",
-            "run": record.payload(),
-            "workspace_root": self.workspace_root,
-        }, HTTPStatus.OK
+        return self._execution_ledger_service.finish_run(run_id, status)
 
 
 def serve_forever(
@@ -3272,6 +2008,12 @@ def serve_forever(
     token: str | None = None,
     port: int = 0,
 ) -> None:
+    import socket
+
+    import uvicorn
+
+    from agent_repl.core.asgi import create_app
+
     workspace_root = os.path.realpath(workspace_root)
     runtime_dir = os.path.realpath(runtime_dir)
     token = token or secrets.token_hex(24)
@@ -3284,41 +2026,37 @@ def serve_forever(
     )
     Path(runtime_dir).mkdir(parents=True, exist_ok=True)
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), _handler_factory(state))
-    actual_port = server.server_address[1]
+    # Resolve an ephemeral port before uvicorn starts so we can write
+    # the runtime metadata file with the real port.
+    if port == 0:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
     runtime_file = os.path.join(runtime_dir, f"agent-repl-core-{state.pid}.json")
     state.runtime_file = runtime_file
     Path(runtime_file).write_text(json.dumps({
         "pid": state.pid,
-        "port": actual_port,
+        "port": port,
         "token": token,
         "version": state.version,
-        "code_hash": _current_package_hash(),
         "workspace_root": workspace_root,
         "started_at": state.started_at,
     }))
 
-    startup_hash = _current_package_hash()
-
-    def _staleness_watchdog() -> None:
-        while True:
-            time.sleep(60)
-            try:
-                if _current_package_hash() != startup_hash:
-                    server.shutdown()
-                    return
-            except Exception:
-                continue
-
-    watchdog = threading.Thread(target=_staleness_watchdog, daemon=True)
-    watchdog.start()
+    config = uvicorn.Config(
+        create_app(state, shutdown_callback=lambda: setattr(server, "should_exit", True)),
+        host="127.0.0.1",
+        port=port,
+        log_level="error",
+    )
+    server = uvicorn.Server(config)
 
     try:
-        server.serve_forever(poll_interval=0.2)
+        server.run()
     finally:
         try:
             state.shutdown_headless_runtimes()
-            server.server_close()
         finally:
             if state.runtime_file:
                 try:
@@ -3327,646 +2065,12 @@ def serve_forever(
                     pass
 
 
-def _handler_factory(state: CoreState):
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            try:
-                if not _authorized(self.headers.get("Authorization"), state.token):
-                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
-                    return
-
-                if self.path == "/api/health":
-                    self._json(HTTPStatus.OK, state.health_payload())
-                    return
-                if self.path == "/api/status":
-                    self._json(HTTPStatus.OK, state.status_payload())
-                    return
-                if self.path == "/api/sessions":
-                    self._json(HTTPStatus.OK, state.list_sessions_payload())
-                    return
-                if self.path == "/api/documents":
-                    self._json(HTTPStatus.OK, state.list_documents_payload())
-                    return
-                if self.path == "/api/branches":
-                    self._json(HTTPStatus.OK, state.list_branches_payload())
-                    return
-                if self.path == "/api/runtimes":
-                    self._json(HTTPStatus.OK, state.list_runtimes_payload())
-                    return
-                if self.path == "/api/runs":
-                    self._json(HTTPStatus.OK, state.list_runs_payload())
-                    return
-
-                self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
-            except Exception as err:  # pragma: no cover - exercised via integration test
-                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
-
-        def do_POST(self) -> None:  # noqa: N802
-            try:
-                if not _authorized(self.headers.get("Authorization"), state.token):
-                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
-                    return
-
-                payload = self._body()
-
-                if self.path == "/api/shutdown":
-                    self._json(HTTPStatus.OK, {"status": "ok", "stopping": True, "pid": state.pid})
-                    threading.Thread(target=self.server.shutdown, daemon=True).start()
-                    return
-                if self.path == "/api/sessions/start":
-                    actor = payload.get("actor")
-                    client = payload.get("client")
-                    session_id = payload.get("session_id")
-                    label = payload.get("label")
-                    capabilities = payload.get("capabilities")
-                    if not isinstance(actor, str) or not actor:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing actor"})
-                        return
-                    if not isinstance(client, str) or not client:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing client"})
-                        return
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    resolved_capabilities = (
-                        [item for item in capabilities if isinstance(item, str) and item]
-                        if isinstance(capabilities, list)
-                        else None
-                    )
-                    self._json(HTTPStatus.OK, state.start_session(actor, client, label, session_id, resolved_capabilities))
-                    return
-                if self.path == "/api/sessions/touch":
-                    session_id = payload.get("session_id")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.touch_session(session_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/sessions/detach":
-                    session_id = payload.get("session_id")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.detach_session(session_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/sessions/presence/upsert":
-                    session_id = payload.get("session_id")
-                    path = payload.get("path")
-                    activity = payload.get("activity")
-                    cell_id = payload.get("cell_id")
-                    cell_index = payload.get("cell_index")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    if not isinstance(activity, str) or not activity:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing activity"})
-                        return
-                    body, status = state.upsert_notebook_presence(
-                        session_id=session_id,
-                        path=path,
-                        activity=activity,
-                        cell_id=cell_id if isinstance(cell_id, str) else None,
-                        cell_index=cell_index if isinstance(cell_index, int) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/sessions/presence/clear":
-                    session_id = payload.get("session_id")
-                    path = payload.get("path")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.clear_notebook_presence(
-                        session_id=session_id,
-                        path=path if isinstance(path, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/sessions/end":
-                    session_id = payload.get("session_id")
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.end_session(session_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/documents/open":
-                    path = payload.get("path")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.open_document(path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/documents/refresh":
-                    document_id = payload.get("document_id")
-                    if not isinstance(document_id, str) or not document_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
-                        return
-                    body, status = state.refresh_document(document_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/documents/rebind":
-                    document_id = payload.get("document_id")
-                    if not isinstance(document_id, str) or not document_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
-                        return
-                    body, status = state.rebind_document(document_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/contents":
-                    path = payload.get("path")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_contents(path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/status":
-                    path = payload.get("path")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_status(path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/create":
-                    path = payload.get("path")
-                    cells = payload.get("cells")
-                    kernel_id = payload.get("kernel_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    resolved_cells = [item for item in cells if isinstance(item, dict)] if isinstance(cells, list) else None
-                    body, status = state.notebook_create(
-                        path,
-                        cells=resolved_cells,
-                        kernel_id=kernel_id if isinstance(kernel_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/edit":
-                    path = payload.get("path")
-                    operations = payload.get("operations")
-                    owner_session_id = payload.get("owner_session_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    if not isinstance(operations, list):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing operations"})
-                        return
-                    body, status = state.notebook_edit(
-                        path,
-                        [item for item in operations if isinstance(item, dict)],
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/select-kernel":
-                    path = payload.get("path")
-                    kernel_id = payload.get("kernel_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_select_kernel(
-                        path,
-                        kernel_id=kernel_id if isinstance(kernel_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/execute-cell":
-                    path = payload.get("path")
-                    cell_id = payload.get("cell_id")
-                    cell_index = payload.get("cell_index")
-                    owner_session_id = payload.get("owner_session_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_execute_cell(
-                        path,
-                        cell_id=cell_id if isinstance(cell_id, str) else None,
-                        cell_index=cell_index if isinstance(cell_index, int) else None,
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/insert-and-execute":
-                    path = payload.get("path")
-                    source = payload.get("source")
-                    cell_type = payload.get("cell_type")
-                    at_index = payload.get("at_index")
-                    owner_session_id = payload.get("owner_session_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    if not isinstance(source, str):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing source"})
-                        return
-                    body, status = state.notebook_insert_execute(
-                        path,
-                        source=source,
-                        cell_type=cell_type if isinstance(cell_type, str) else "code",
-                        at_index=at_index if isinstance(at_index, int) else -1,
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/execution":
-                    execution_id = payload.get("execution_id")
-                    if not isinstance(execution_id, str) or not execution_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing execution_id"})
-                        return
-                    body, status = state.notebook_execution(execution_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/interrupt":
-                    path = payload.get("path")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_interrupt(path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/runtime":
-                    path = payload.get("path")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_runtime(path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/projection":
-                    path = payload.get("path")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_projection(path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/activity":
-                    path = payload.get("path")
-                    since = payload.get("since")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_activity(path, since=since if isinstance(since, (int, float)) else None)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/project-visible":
-                    path = payload.get("path")
-                    cells = payload.get("cells")
-                    owner_session_id = payload.get("owner_session_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    if not isinstance(cells, list):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing cells"})
-                        return
-                    body, status = state.notebook_project_visible(
-                        path,
-                        cells=[item for item in cells if isinstance(item, dict)],
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/execute-visible-cell":
-                    path = payload.get("path")
-                    cell_index = payload.get("cell_index")
-                    source = payload.get("source")
-                    owner_session_id = payload.get("owner_session_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    if not isinstance(cell_index, int):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing cell_index"})
-                        return
-                    if not isinstance(source, str):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing source"})
-                        return
-                    body, status = state.notebook_execute_visible_cell(
-                        path,
-                        cell_index=cell_index,
-                        source=source,
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/lease/acquire":
-                    path = payload.get("path")
-                    session_id = payload.get("session_id")
-                    cell_id = payload.get("cell_id")
-                    cell_index = payload.get("cell_index")
-                    kind = payload.get("kind")
-                    ttl_seconds = payload.get("ttl_seconds")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.acquire_cell_lease(
-                        session_id=session_id,
-                        path=path,
-                        cell_id=cell_id if isinstance(cell_id, str) else None,
-                        cell_index=cell_index if isinstance(cell_index, int) else None,
-                        kind=kind if isinstance(kind, str) else "edit",
-                        ttl_seconds=float(ttl_seconds) if isinstance(ttl_seconds, (int, float)) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/lease/release":
-                    path = payload.get("path")
-                    session_id = payload.get("session_id")
-                    cell_id = payload.get("cell_id")
-                    cell_index = payload.get("cell_index")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    if not isinstance(session_id, str) or not session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing session_id"})
-                        return
-                    body, status = state.release_cell_lease(
-                        session_id=session_id,
-                        path=path,
-                        cell_id=cell_id if isinstance(cell_id, str) else None,
-                        cell_index=cell_index if isinstance(cell_index, int) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/restart":
-                    path = payload.get("path")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_restart(path)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/execute-all":
-                    path = payload.get("path")
-                    owner_session_id = payload.get("owner_session_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_execute_all(
-                        path,
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/notebooks/restart-and-run-all":
-                    path = payload.get("path")
-                    owner_session_id = payload.get("owner_session_id")
-                    if not isinstance(path, str) or not path:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing path"})
-                        return
-                    body, status = state.notebook_restart_and_run_all(
-                        path,
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/branches/start":
-                    branch_id = payload.get("branch_id")
-                    document_id = payload.get("document_id")
-                    owner_session_id = payload.get("owner_session_id")
-                    parent_branch_id = payload.get("parent_branch_id")
-                    title = payload.get("title")
-                    purpose = payload.get("purpose")
-                    if not isinstance(branch_id, str) or not branch_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
-                        return
-                    if not isinstance(document_id, str) or not document_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing document_id"})
-                        return
-                    body, status = state.start_branch(
-                        branch_id=branch_id,
-                        document_id=document_id,
-                        owner_session_id=owner_session_id if isinstance(owner_session_id, str) else None,
-                        parent_branch_id=parent_branch_id if isinstance(parent_branch_id, str) else None,
-                        title=title if isinstance(title, str) else None,
-                        purpose=purpose if isinstance(purpose, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/branches/finish":
-                    branch_id = payload.get("branch_id")
-                    branch_status = payload.get("status")
-                    if not isinstance(branch_id, str) or not branch_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
-                        return
-                    if not isinstance(branch_status, str) or not branch_status:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing status"})
-                        return
-                    body, status = state.finish_branch(branch_id, branch_status)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/branches/review-request":
-                    branch_id = payload.get("branch_id")
-                    requested_by_session_id = payload.get("requested_by_session_id")
-                    note = payload.get("note")
-                    if not isinstance(branch_id, str) or not branch_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
-                        return
-                    if not isinstance(requested_by_session_id, str) or not requested_by_session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing requested_by_session_id"})
-                        return
-                    body, status = state.request_branch_review(
-                        branch_id=branch_id,
-                        requested_by_session_id=requested_by_session_id,
-                        note=note if isinstance(note, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/branches/review-resolve":
-                    branch_id = payload.get("branch_id")
-                    resolved_by_session_id = payload.get("resolved_by_session_id")
-                    resolution = payload.get("resolution")
-                    note = payload.get("note")
-                    if not isinstance(branch_id, str) or not branch_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing branch_id"})
-                        return
-                    if not isinstance(resolved_by_session_id, str) or not resolved_by_session_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing resolved_by_session_id"})
-                        return
-                    if not isinstance(resolution, str) or not resolution:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing resolution"})
-                        return
-                    body, status = state.resolve_branch_review(
-                        branch_id=branch_id,
-                        resolved_by_session_id=resolved_by_session_id,
-                        resolution=resolution,
-                        note=note if isinstance(note, str) else None,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runtimes/start":
-                    runtime_id = payload.get("runtime_id")
-                    mode = payload.get("mode")
-                    label = payload.get("label")
-                    environment = payload.get("environment")
-                    document_path = payload.get("document_path")
-                    ttl_seconds = payload.get("ttl_seconds")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    if not isinstance(mode, str) or mode not in {"interactive", "shared", "headless", "pinned", "ephemeral"}:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid mode"})
-                        return
-                    if document_path is not None and not isinstance(document_path, str):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid document_path"})
-                        return
-                    if ttl_seconds is not None and not isinstance(ttl_seconds, int):
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid ttl_seconds"})
-                        return
-                    self._json(HTTPStatus.OK, state.start_runtime(
-                        runtime_id=runtime_id,
-                        mode=mode,
-                        label=label if isinstance(label, str) else None,
-                        environment=environment if isinstance(environment, str) else None,
-                        document_path=document_path if isinstance(document_path, str) else None,
-                        ttl_seconds=ttl_seconds if isinstance(ttl_seconds, int) else None,
-                    ))
-                    return
-                if self.path == "/api/runtimes/stop":
-                    runtime_id = payload.get("runtime_id")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    body, status = state.stop_runtime(runtime_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runtimes/recover":
-                    runtime_id = payload.get("runtime_id")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    body, status = state.recover_runtime(runtime_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runtimes/promote":
-                    runtime_id = payload.get("runtime_id")
-                    mode = payload.get("mode", "shared")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    if not isinstance(mode, str) or mode not in {"shared", "pinned"}:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid mode"})
-                        return
-                    body, status = state.promote_runtime(runtime_id, mode=mode)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runtimes/discard":
-                    runtime_id = payload.get("runtime_id")
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    body, status = state.discard_runtime(runtime_id)
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runs/start":
-                    run_id = payload.get("run_id")
-                    runtime_id = payload.get("runtime_id")
-                    target_type = payload.get("target_type")
-                    target_ref = payload.get("target_ref")
-                    kind = payload.get("kind")
-                    if not isinstance(run_id, str) or not run_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing run_id"})
-                        return
-                    if not isinstance(runtime_id, str) or not runtime_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing runtime_id"})
-                        return
-                    if not isinstance(target_type, str) or target_type not in {"document", "node", "branch"}:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid target_type"})
-                        return
-                    if not isinstance(target_ref, str) or not target_ref:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing target_ref"})
-                        return
-                    if not isinstance(kind, str) or not kind:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing kind"})
-                        return
-                    body, status = state.start_run(
-                        run_id=run_id,
-                        runtime_id=runtime_id,
-                        target_type=target_type,
-                        target_ref=target_ref,
-                        kind=kind,
-                    )
-                    self._json(status, body)
-                    return
-                if self.path == "/api/runs/finish":
-                    run_id = payload.get("run_id")
-                    run_status = payload.get("status")
-                    if not isinstance(run_id, str) or not run_id:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing run_id"})
-                        return
-                    if not isinstance(run_status, str) or not run_status:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing status"})
-                        return
-                    body, status = state.finish_run(run_id, run_status)
-                    self._json(status, body)
-                    return
-
-                self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
-            except Exception as err:  # pragma: no cover - exercised via integration test
-                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
-
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
-            # Keep the daemon quiet unless we decide to surface structured logs later.
-            return
-
-        def _json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(status.value)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def _body(self) -> dict[str, Any]:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0:
-                return {}
-            raw = self.rfile.read(length)
-            if not raw:
-                return {}
-            try:
-                data = json.loads(raw.decode("utf-8"))
-            except ValueError:
-                return {}
-            return data if isinstance(data, dict) else {}
-
-    return Handler
-
-
-def _authorized(header: str | None, token: str) -> bool:
-    return header == f"token {token}"
-
-
 def _path_within(candidate: str, root: str) -> bool:
     try:
         common = os.path.commonpath([os.path.realpath(candidate), os.path.realpath(root)])
         return common == os.path.realpath(root)
     except ValueError:
         return False
-
-
-def _current_package_hash() -> str:
-    package_root = Path(__file__).resolve().parents[1]
-    digest = hashlib.sha256()
-    for source in sorted(package_root.rglob("*.py")):
-        try:
-            digest.update(str(source.relative_to(package_root)).encode("utf-8"))
-            digest.update(source.read_bytes())
-        except OSError:
-            continue
-    return digest.hexdigest()
-
-
 def _file_format(path: str) -> str:
     suffix = Path(path).suffix.lower()
     if suffix == ".ipynb":
@@ -4078,10 +2182,6 @@ def _default_session_capabilities(client: str) -> list[str]:
     return ["projection"]
 
 
-def _state_file_path(workspace_root: str) -> str:
-    return os.path.realpath(os.path.join(workspace_root, STATE_DIRNAME, STATE_FILENAME))
-
-
 def _load_or_create_state(
     *,
     workspace_root: str,
@@ -4090,40 +2190,30 @@ def _load_or_create_state(
     pid: int,
     started_at: float,
 ) -> CoreState:
-    state_file = _state_file_path(workspace_root)
-    if not os.path.exists(state_file):
-        return CoreState(
+    from agent_repl.core.db import load_all, open_db
+    db = open_db(workspace_root)
+
+    data = load_all(db)
+
+    def _new_state(**extra: Any) -> CoreState:
+        s = CoreState(
             workspace_root=workspace_root,
             runtime_dir=runtime_dir,
             token=token,
             pid=pid,
             started_at=started_at,
-            state_file=state_file,
+            **extra,
         )
+        s._db = db
+        return s
 
-    try:
-        payload = json.loads(Path(state_file).read_text())
-    except Exception:
-        return CoreState(
-            workspace_root=workspace_root,
-            runtime_dir=runtime_dir,
-            token=token,
-            pid=pid,
-            started_at=started_at,
-            state_file=state_file,
-        )
+    if not any(data.values()):
+        return _new_state()
 
-    state = CoreState(
-        workspace_root=workspace_root,
-        runtime_dir=runtime_dir,
-        token=token,
-        pid=pid,
-        started_at=started_at,
-        state_file=state_file,
-        version=str(payload.get("version") or CORE_VERSION),
+    state = _new_state(
         session_records={
             record["session_id"]: SessionRecord(**record)
-            for record in payload.get("sessions", [])
+            for record in data.get("sessions", [])
             if isinstance(record, dict) and isinstance(record.get("session_id"), str)
         },
         document_records={
@@ -4138,29 +2228,34 @@ def _load_or_create_state(
                 created_at=record["created_at"],
                 updated_at=record["updated_at"],
             )
-            for record in payload.get("documents", [])
+            for record in data.get("documents", [])
             if isinstance(record, dict) and isinstance(record.get("document_id"), str)
         },
         branch_records={
             record["branch_id"]: BranchRecord(**record)
-            for record in payload.get("branches", [])
+            for record in data.get("branches", [])
             if isinstance(record, dict) and isinstance(record.get("branch_id"), str)
         },
         runtime_records={
             record["runtime_id"]: RuntimeRecord(**record)
-            for record in payload.get("runtimes", [])
+            for record in data.get("runtimes", [])
             if isinstance(record, dict) and isinstance(record.get("runtime_id"), str)
         },
         run_records={
             record["run_id"]: RunRecord(**record)
-            for record in payload.get("runs", [])
+            for record in data.get("runs", [])
             if isinstance(record, dict) and isinstance(record.get("run_id"), str)
         },
         activity_records=[
             ActivityEventRecord(**record)
-            for record in payload.get("activity", [])
+            for record in data.get("activity", [])
             if isinstance(record, dict) and isinstance(record.get("event_id"), str)
         ],
+        execution_records={
+            record["execution_id"]: record
+            for record in data.get("executions", [])
+            if isinstance(record, dict) and isinstance(record.get("execution_id"), str)
+        },
     )
     _normalize_restored_state(state)
     state.persist()
@@ -4184,4 +2279,8 @@ def _normalize_restored_state(state: CoreState) -> None:
         if run.status in {"queued", "running"}:
             run.status = "interrupted"
             run.updated_at = now
+    for execution in state.execution_records.values():
+        if execution.get("status") == "running":
+            execution["status"] = "interrupted"
+            execution["updated_at"] = now
     state._recompute_counts()

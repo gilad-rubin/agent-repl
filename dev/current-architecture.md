@@ -96,7 +96,7 @@ Key modules:
 |--------|---------|
 | `extension.ts` | Activation, command registration, provider wiring |
 | `server.ts` | HTTP server, route dispatch, bearer-token auth |
-| `routes.ts` | Bridge API handlers and compatibility endpoints |
+| `routes.ts` | Bridge API handlers and editor integration endpoints |
 | `session.ts` | Shared-runtime auto-attach, heartbeats, projection sync |
 | `editor/provider.ts` | Custom `.ipynb` canvas provider and open-canvas tracking |
 | `editor/proxy.ts` | Webview/runtime message bridge and presence updates |
@@ -126,7 +126,7 @@ The installed extension can optionally prefer preview-served assets through the 
 The CLI now has two surfaces:
 
 1. Public commands, which usually target the shared runtime
-2. Editor-backed commands and compatibility paths, which still use the extension bridge when needed
+2. Editor-backed commands, which still use the extension bridge when needed
 
 Key files:
 
@@ -141,6 +141,8 @@ Key files:
 The shipped public command set is:
 
 - `reload`
+- `setup`
+- `doctor`
 - `cat`
 - `status`
 - `edit`
@@ -153,13 +155,19 @@ The shipped public command set is:
 - `open`
 - `kernels`
 - `select-kernel`
+- `editor`
 - `prompts`
 - `respond`
+- `mcp`
 
 Notable behavior:
 
+- `setup` can configure workspace editor defaults, run public MCP onboarding, and execute a notebook smoke test
+- `doctor` reports install method, workspace kernel readiness, editor default status, and optional MCP endpoint health
 - `new` and `open` can target either `vscode` or `browser`
 - `new` and `open` can prefer either the custom `canvas` editor or native `jupyter`
+- `editor configure --default-canvas` writes workspace `.vscode/settings.json` to prefer `agent-repl.canvasEditor` for `*.ipynb`
+- `mcp` is the public MCP onboarding surface with `setup`, `status`, `config`, and `smoke-test`
 - `reload` hot-reloads extension routes/modules in place and reports the active `extension_root` and `routes_module`
 
 ## Discovery and Connection Files
@@ -241,7 +249,7 @@ This is the preferred path for public notebook commands:
 
 ### VS Code execution path
 
-This path is still used for editor-backed execution and compatibility routes:
+This path is still used for editor-backed execution and bridge routes:
 
 - execution is serialized per notebook in `execution/queue.ts`
 - live kernel state is reconciled against notebook events before reporting idle/busy

@@ -12,6 +12,9 @@ function loadExtensionModule() {
     const infoMessages = [];
     const errors = [];
     const connectionWrites = [];
+    const executeCommandCalls = [];
+    const refreshOpenEditorsCalls = [];
+    const reloadRouteCalls = [];
 
     const config = {
         get(name, fallback) {
@@ -34,7 +37,13 @@ function loadExtensionModule() {
 
         addRoute() {}
 
-        getRoute() {
+        getRoute(key) {
+            if (key === 'POST /api/reload') {
+                return async () => {
+                    reloadRouteCalls.push(true);
+                    return { status: 'ok', message: 'Routes hot-reloaded' };
+                };
+            }
             return () => ({ status: 'ok' });
         }
 
@@ -75,6 +84,16 @@ function loadExtensionModule() {
         dispose() {}
     }
 
+    class FakeCanvasEditorProvider {
+        constructor(context) {
+            this.context = context;
+        }
+
+        async refreshOpenEditors() {
+            refreshOpenEditorsCalls.push(true);
+        }
+    }
+
     const vscode = {
         StatusBarAlignment: { Left: 1 },
         workspace: {
@@ -105,6 +124,9 @@ function loadExtensionModule() {
             },
         },
         commands: {
+            executeCommand: async (...args) => {
+                executeCommandCalls.push(args);
+            },
             registerCommand: (name, callback) => {
                 registeredCommands.set(name, callback);
                 return { dispose() {} };
@@ -151,6 +173,11 @@ function loadExtensionModule() {
         if (request === './session') {
             return { SessionAutoAttach: FakeSessionAutoAttach, HeadlessNotebookProjection: FakeHeadlessNotebookProjection };
         }
+        if (request === './editor/provider') {
+            return {
+                CanvasEditorProvider: FakeCanvasEditorProvider,
+            };
+        }
         return originalLoad.call(this, request, parent, isMain);
     };
 
@@ -164,6 +191,9 @@ function loadExtensionModule() {
             infoMessages,
             errors,
             connectionWrites,
+            executeCommandCalls,
+            refreshOpenEditorsCalls,
+            reloadRouteCalls,
         };
     } finally {
         Module._load = originalLoad;
@@ -203,4 +233,31 @@ test('extension lifecycle auto-attaches to the shared core on start and detaches
 
     await registeredCommands.get('agent-repl.stop')();
     assert.equal(detachCalls.length, 1);
+});
+
+test('agent-repl.reload refreshes Agent REPL only without reloading the VS Code window', async () => {
+    const {
+        extension,
+        registeredCommands,
+        executeCommandCalls,
+        refreshOpenEditorsCalls,
+        reloadRouteCalls,
+        errors,
+    } = loadExtensionModule();
+    const context = {
+        extension: { id: 'agent-repl.agent-repl' },
+        subscriptions: [],
+        workspaceState: {
+            get: () => undefined,
+            update: async () => {},
+        },
+    };
+
+    await extension.activate(context);
+    await registeredCommands.get('agent-repl.reload')();
+
+    assert.equal(errors.length, 0);
+    assert.equal(reloadRouteCalls.length, 1);
+    assert.equal(refreshOpenEditorsCalls.length, 1);
+    assert.equal(executeCommandCalls.some(([name]) => name === 'workbench.action.reloadWindow'), false);
 });

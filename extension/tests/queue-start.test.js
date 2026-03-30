@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const path = require('node:path');
 
-function loadQueueModule(vscode, resolverOverrides = {}) {
+function loadQueueModule(vscode, resolverOverrides = {}, identityOverrides = {}) {
     const modulePath = path.resolve(__dirname, '../out/execution/queue.js');
     const originalLoad = Module._load;
     Module._load = function patchedLoad(request, parent, isMain) {
@@ -14,6 +14,7 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
             return {
                 resolveCell: () => 0,
                 getCellId: () => 'cell-1',
+                ...identityOverrides,
             };
         }
         if (request === '../notebook/outputs') {
@@ -91,4 +92,52 @@ test('startExecution returns a started execution id immediately for poll-based c
     assert.equal(result.status, 'started');
     assert.equal(result.cell_id, 'cell-1');
     assert.equal(typeof result.execution_id, 'string');
+});
+
+test('startExecution rejects cells without an agent-repl cell id', async () => {
+    const cell = {
+        document: { getText: () => 'print(1)' },
+        executionSummary: null,
+    };
+    const doc = {
+        uri: { fsPath: '/tmp/demo.ipynb' },
+        cellAt: () => cell,
+    };
+
+    const queue = loadQueueModule(
+        {
+            NotebookRange: class NotebookRange {
+                constructor(start, end) {
+                    this.start = start;
+                    this.end = end;
+                }
+            },
+            workspace: {
+                getConfiguration: () => ({
+                    get: (_name, fallback) => fallback,
+                }),
+            },
+            window: {
+                showNotebookDocument: async () => {},
+            },
+            commands: {
+                executeCommand: async () => {},
+            },
+            extensions: {
+                getExtension: () => undefined,
+            },
+        },
+        {
+            doc,
+            resolveNotebook: () => doc,
+        },
+        {
+            getCellId: () => undefined,
+        },
+    );
+
+    await assert.rejects(
+        () => queue.startExecution('/tmp/demo.ipynb', { cell_index: 0 }, 20),
+        /missing an agent-repl cell ID/,
+    );
 });

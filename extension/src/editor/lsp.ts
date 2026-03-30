@@ -1,24 +1,25 @@
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import * as vscode from 'vscode';
+import {
+    computeLineStarts,
+    offsetToPosition,
+    positionToOffset,
+    buildVirtualDocument,
+} from '../shared/notebookVirtualDocument';
+export { offsetToPosition, positionToOffset };
+import type {
+    CellSnapshot,
+    CellDiagnostic,
+    DiagnosticsByCell,
+    VirtualCellSegment,
+    VirtualDocument,
+} from '../shared/notebookVirtualDocument';
 
-export type NotebookCellSnapshot = {
-    index: number;
-    cell_id: string;
-    cell_type: 'code' | 'markdown' | 'raw';
-    source: string;
-};
-
-export type CellDiagnostic = {
-    from: number;
-    to: number;
-    severity: 'error' | 'warning' | 'info' | 'hint';
-    message: string;
-    source?: string;
-};
-
-export type DiagnosticsByCell = Record<string, CellDiagnostic[]>;
+export type NotebookCellSnapshot = CellSnapshot;
+export type { CellDiagnostic, DiagnosticsByCell };
 
 export type CellCompletionItem = {
     label: string;
@@ -42,6 +43,17 @@ type LspDiagnostic = {
     severity?: number;
     message: string;
     source?: string;
+};
+
+type LspLocation = {
+    uri: string;
+    range: LspRange;
+};
+
+type LspDefinitionLink = {
+    targetUri: string;
+    targetRange: LspRange;
+    targetSelectionRange?: LspRange;
 };
 
 type PublishDiagnosticsParams = {
@@ -94,24 +106,25 @@ type JsonRpcResponse = {
     error?: { code: number; message: string };
 };
 
-type VirtualCellSegment = {
-    cell_id: string;
-    index: number;
-    contentFrom: number;
-    contentTo: number;
-    source: string;
-    lineStarts: number[];
-};
-
-export type VirtualNotebookDocument = {
+export type VirtualNotebookDocument = VirtualDocument & {
     filePath: string;
     shadowFilePath: string;
     uri: string;
-    text: string;
-    lineStarts: number[];
-    codeCells: VirtualCellSegment[];
-    version: number;
 };
+
+export type DefinitionTarget =
+    | {
+        kind: 'cell';
+        cellId: string;
+        from: number;
+        to: number;
+    }
+    | {
+        kind: 'file';
+        uri: string;
+        filePath: string;
+        range: LspRange;
+    };
 
 const JSON_RPC_HEADER = '\r\n\r\n';
 const SHADOW_STATE_DIRNAME = '.agent-repl';
@@ -150,26 +163,35 @@ const COMPLETION_KIND: Record<number, string> = {
     25: 'operator',
 };
 
-function pythonAnalysisSettings(): Record<string, unknown> {
+export function buildWorkspaceSearchPaths(
+    workspaceRoot: string,
+    notebookPath: string,
+): string[] {
+    const candidates = [path.dirname(notebookPath), workspaceRoot];
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const candidate of candidates) {
+        const normalized = path.resolve(candidate);
+        if (seen.has(normalized)) {
+            continue;
+        }
+        seen.add(normalized);
+        result.push(normalized);
+    }
+    return result;
+}
+
+function pythonAnalysisSettings(extraPaths: readonly string[]): Record<string, unknown> {
     return {
         autoImportCompletions: true,
         autoSearchPaths: true,
+        extraPaths: [...extraPaths],
         useLibraryCodeForTypes: true,
         diagnosticSeverityOverrides: {
             // Notebook cells commonly end with a value expression for display.
             reportUnusedExpression: 'none',
         },
     };
-}
-
-function computeLineStarts(text: string): number[] {
-    const starts = [0];
-    for (let i = 0; i < text.length; i += 1) {
-        if (text.charCodeAt(i) === 10) {
-            starts.push(i + 1);
-        }
-    }
-    return starts;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -196,28 +218,6 @@ function virtualDocumentShadowPath(workspaceRoot: string, notebookPath: string):
     );
 }
 
-export function positionToOffset(lineStarts: number[], textLength: number, position: LspPosition): number {
-    if (lineStarts.length === 0) {
-        return 0;
-    }
-    const lineIndex = clamp(position.line, 0, lineStarts.length - 1);
-    const lineStart = lineStarts[lineIndex];
-    const nextLineStart = lineIndex + 1 < lineStarts.length ? lineStarts[lineIndex + 1] : textLength;
-    return clamp(lineStart + position.character, lineStart, nextLineStart);
-}
-
-export function offsetToPosition(lineStarts: number[], textLength: number, offset: number): LspPosition {
-    const clampedOffset = clamp(offset, 0, textLength);
-    let lineIndex = 0;
-    while (lineIndex + 1 < lineStarts.length && lineStarts[lineIndex + 1] <= clampedOffset) {
-        lineIndex += 1;
-    }
-    return {
-        line: lineIndex,
-        character: clampedOffset - lineStarts[lineIndex],
-    };
-}
-
 function documentationToString(documentation: LspCompletionItem['documentation']): string | undefined {
     if (typeof documentation === 'string') {
         return documentation;
@@ -242,25 +242,34 @@ function mapCompletionItems(items: readonly LspCompletionItem[]): CellCompletion
         }));
 }
 
-export function buildWorkspaceConfiguration(params: WorkspaceConfigurationParams): unknown[] {
+export function buildWorkspaceConfiguration(
+    params: WorkspaceConfigurationParams,
+    settings: Record<string, unknown>,
+): unknown[] {
+    const python = (settings.python ?? {}) as Record<string, unknown>;
+    const pythonAnalysis = (python.analysis ?? {}) as Record<string, unknown>;
     return (params.items ?? []).map((item) => {
         switch (item.section) {
             case 'python':
-                return {};
+                return python;
             case 'python.analysis':
-                return pythonAnalysisSettings();
+                return pythonAnalysis;
             case 'pyright':
-                return {};
+                return settings.pyright ?? {};
             default:
                 return {};
         }
     });
 }
 
-export function defaultWorkspaceSettings(): Record<string, unknown> {
+export function defaultWorkspaceSettings(
+    workspaceRoot: string,
+    notebookPath: string,
+): Record<string, unknown> {
+    const extraPaths = buildWorkspaceSearchPaths(workspaceRoot, notebookPath);
     return {
         python: {
-            analysis: pythonAnalysisSettings(),
+            analysis: pythonAnalysisSettings(extraPaths),
         },
         pyright: {},
     };
@@ -274,40 +283,12 @@ export function buildVirtualNotebookDocument(
 ): VirtualNotebookDocument {
     const filePath = virtualDocumentPath(notebookPath);
     const shadowFilePath = virtualDocumentShadowPath(workspaceRoot, notebookPath);
-    const parts: string[] = [];
-    const codeCells: VirtualCellSegment[] = [];
-
-    for (const cell of cells) {
-        if (cell.cell_type !== 'code') {
-            continue;
-        }
-
-        const header = `# %% [agent-repl cell ${cell.cell_id}]\n`;
-        parts.push(header);
-        const contentFrom = parts.join('').length;
-        parts.push(cell.source);
-        const contentTo = contentFrom + cell.source.length;
-        parts.push('\n\n');
-
-        codeCells.push({
-            cell_id: cell.cell_id,
-            index: cell.index,
-            contentFrom,
-            contentTo,
-            source: cell.source,
-            lineStarts: computeLineStarts(cell.source),
-        });
-    }
-
-    const text = parts.join('');
+    const base = buildVirtualDocument(cells, version);
     return {
+        ...base,
         filePath,
         shadowFilePath,
-        uri: vscode.Uri.file(filePath).toString(),
-        text,
-        lineStarts: computeLineStarts(text),
-        codeCells,
-        version,
+        uri: vscode.Uri.file(shadowFilePath).toString(),
     };
 }
 
@@ -371,6 +352,7 @@ export class PyrightNotebookLspClient {
     }>();
     private stderrTail = '';
     private virtualDocument: VirtualNotebookDocument | null = null;
+    private readonly workspaceSettings: Record<string, unknown>;
     private ready = false;
     private disposed = false;
 
@@ -381,7 +363,9 @@ export class PyrightNotebookLspClient {
         private readonly onStatus: (status: LspStatus) => void,
         private readonly serverCommand: string,
         private readonly serverArgs: string[] = ['--stdio'],
-    ) {}
+    ) {
+        this.workspaceSettings = defaultWorkspaceSettings(workspaceRoot, notebookPath);
+    }
 
     async start(cells: readonly NotebookCellSnapshot[]): Promise<void> {
         if (this.disposed || this.process) {
@@ -460,7 +444,7 @@ export class PyrightNotebookLspClient {
             });
             this.notify('initialized', {});
             this.notify('workspace/didChangeConfiguration', {
-                settings: defaultWorkspaceSettings(),
+                settings: this.workspaceSettings,
             });
             this.ready = true;
             this.onStatus({ state: 'ready', message: 'Python IDE features powered by Pyright.' });
@@ -536,6 +520,55 @@ export class PyrightNotebookLspClient {
             ? result as LspCompletionItem[]
             : ((result as CompletionList | null | undefined)?.items ?? []);
         return mapCompletionItems(items);
+    }
+
+    async resolveDefinitionAt(cellId: string, offset: number): Promise<DefinitionTarget | null> {
+        if (!this.ready || this.disposed || !this.virtualDocument) {
+            return null;
+        }
+
+        const segment = this.virtualDocument.codeCells.find((candidate) => candidate.cell_id === cellId);
+        if (!segment) {
+            return null;
+        }
+
+        const absoluteOffset = clamp(segment.contentFrom + offset, segment.contentFrom, segment.contentTo);
+        const position = offsetToPosition(
+            this.virtualDocument.lineStarts,
+            this.virtualDocument.text.length,
+            absoluteOffset,
+        );
+        const result = await this.request('textDocument/definition', {
+            textDocument: { uri: this.virtualDocument.uri },
+            position,
+        });
+        const target = this.normalizeDefinitionTarget(result);
+        if (!target) {
+            return null;
+        }
+        if (target.uri === this.virtualDocument.uri) {
+            const mapped = this.mapRangeToCell(target.range);
+            if (!mapped) {
+                return null;
+            }
+            return {
+                kind: 'cell',
+                cellId: mapped.cellId,
+                from: mapped.from,
+                to: mapped.to,
+            };
+        }
+
+        if (!target.uri.startsWith('file:')) {
+            return null;
+        }
+
+        return {
+            kind: 'file',
+            uri: target.uri,
+            filePath: fileURLToPath(target.uri),
+            range: target.range,
+        };
     }
 
     dispose(): void {
@@ -635,7 +668,10 @@ export class PyrightNotebookLspClient {
             if (message.method === 'workspace/configuration') {
                 this.respond(
                     message.id,
-                    buildWorkspaceConfiguration(message.params as WorkspaceConfigurationParams),
+                    buildWorkspaceConfiguration(
+                        message.params as WorkspaceConfigurationParams,
+                        this.workspaceSettings,
+                    ),
                 );
                 return;
             }
@@ -678,5 +714,61 @@ export class PyrightNotebookLspClient {
         } catch {
             // Keep the in-memory LSP session alive even if the shadow file can't be written.
         }
+    }
+
+    private normalizeDefinitionTarget(result: unknown): LspLocation | null {
+        if (!result) {
+            return null;
+        }
+        if (Array.isArray(result)) {
+            const [first] = result;
+            return this.normalizeDefinitionTarget(first);
+        }
+        if (typeof result !== 'object') {
+            return null;
+        }
+        if ('targetUri' in result && 'targetRange' in result) {
+            const link = result as LspDefinitionLink;
+            return {
+                uri: link.targetUri,
+                range: link.targetSelectionRange ?? link.targetRange,
+            };
+        }
+        if ('uri' in result && 'range' in result) {
+            return result as LspLocation;
+        }
+        return null;
+    }
+
+    private mapRangeToCell(range: LspRange): { cellId: string; from: number; to: number } | null {
+        if (!this.virtualDocument) {
+            return null;
+        }
+
+        const absoluteFrom = positionToOffset(
+            this.virtualDocument.lineStarts,
+            this.virtualDocument.text.length,
+            range.start,
+        );
+        const absoluteTo = positionToOffset(
+            this.virtualDocument.lineStarts,
+            this.virtualDocument.text.length,
+            range.end,
+        );
+        const segment = this.virtualDocument.codeCells.find((candidate) => (
+            absoluteFrom <= candidate.contentTo &&
+            absoluteTo >= candidate.contentFrom
+        ));
+        if (!segment) {
+            return null;
+        }
+
+        const from = clamp(absoluteFrom - segment.contentFrom, 0, segment.source.length);
+        const to = clamp(Math.max(absoluteTo - segment.contentFrom, from), from, segment.source.length);
+        return {
+            cellId: segment.cell_id,
+            from,
+            to,
+        };
     }
 }

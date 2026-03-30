@@ -33,6 +33,22 @@ interface QueueEntry {
     reject: (err: any) => void;
 }
 
+interface PreparedExecutionContext {
+    doc: vscode.NotebookDocument;
+    cellIndex: number;
+    cellId: string;
+    preview: string;
+    execId: string;
+    queue: QueueEntry[];
+    running: Array<{
+        cell_id: string;
+        cell_index: number;
+        source_preview: string;
+        owner: 'human' | 'agent';
+    }>;
+    busy: boolean;
+}
+
 // Per-notebook queues
 const queues = new Map<string, QueueEntry[]>();
 type CompletionReason = 'completed' | 'canceled' | 'timeout';
@@ -121,7 +137,14 @@ export function initExecutionMonitor(): vscode.Disposable {
                 }
             } else if (summary) {
                 // Execution started (summary set/cleared without endTime)
-                const cellId = getCellId(change.cell) ?? `index-${change.cell.index}`;
+                const cellId = getCellId(change.cell);
+                if (!cellId) {
+                    queueDebug(fsPath, 'monitor:missing-cell-id', {
+                        cellKey: key,
+                        cellIndex: change.cell.index,
+                    });
+                    continue;
+                }
                 const sourcePreview = change.cell.document.getText().split('\n')[0].slice(0, 80);
                 executingCells.set(key, {
                     fsPath,
@@ -337,63 +360,33 @@ export async function executeCell(
     selector: { cell_id?: string; cell_index?: number },
     maxQueue: number
 ): Promise<any> {
-    await reconcileKernelState(path);
-
-    const doc = resolveNotebook(path);
-    const idx = resolveCell(doc, selector);
-    const cell = doc.cellAt(idx);
-    const cellId = getCellId(cell) ?? `index-${idx}`;
-    const preview = cell.document.getText().split('\n')[0].slice(0, 80);
-    const execId = `exec-${++executionCounter}`;
-
-    const queue = queues.get(path) ?? [];
-    queues.set(path, queue);
-
-    const running = describeRunningExecutions(path, doc, queue);
-    const busy = isNotebookBusy(path);
+    const execution = await prepareExecutionContext(path, selector);
 
     queueDebug(path, 'executeCell:entry', {
-        execId,
-        cellId,
-        cellIndex: idx,
-        preview,
-        runningCount: running.length,
-        busy,
+        execId: execution.execId,
+        cellId: execution.cellId,
+        cellIndex: execution.cellIndex,
+        preview: execution.preview,
+        runningCount: execution.running.length,
+        busy: execution.busy,
         hasExecutingCell: hasExecutingCell(path),
     });
 
-    if (running.length === 0 && !busy) {
-        queueDebug(path, 'executeCell:immediate', { execId, cellId });
-        return runCell(path, doc, idx, cellId, execId, preview);
+    if (execution.running.length === 0 && !execution.busy) {
+        queueDebug(path, 'executeCell:immediate', { execId: execution.execId, cellId: execution.cellId });
+        return runCell(path, execution);
     }
 
-    // Something running — queue it
-    if (queue.filter(e => e.status === 'queued').length >= maxQueue) {
-        queueDebug(path, 'executeCell:queue-full', { execId, cellId, maxQueue });
+    if (queuedEntryCount(execution.queue) >= maxQueue) {
+        queueDebug(path, 'executeCell:queue-full', { execId: execution.execId, cellId: execution.cellId, maxQueue });
         throw Object.assign(new Error(`Queue full (max ${maxQueue})`), { statusCode: 429 });
     }
 
-    queueDebug(path, 'executeCell:queued', { execId, cellId, running });
+    queueDebug(path, 'executeCell:queued', { execId: execution.execId, cellId: execution.cellId, running: execution.running });
 
     return new Promise((resolve) => {
-        const entry: QueueEntry = {
-            id: execId, path, cellId, sourcePreview: preview,
-            queuedAt: new Date(), status: 'queued',
-            resolve, reject: () => {}
-        };
-        queue.push(entry);
-
-        resolve({
-            status: 'queued',
-            execution_id: execId,
-            cell_id: cellId,
-            position: queue.filter(e => e.status === 'queued').length,
-            kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
-            currently_running: running,
-            message: kernelState === 'busy'
-                ? `Kernel is busy (human or agent execution in progress). Queued.`
-                : `Queued after ${running.length} running cell(s)`
-        });
+        execution.queue.push(createQueueEntry(execution, { resolve }));
+        resolve(buildQueuedExecutionResult(path, execution));
     });
 }
 
@@ -429,26 +422,16 @@ export function getExecution(executionId: string): any {
 export async function getStatus(path: string): Promise<any> {
     await reconcileKernelState(path);
     const doc = resolveNotebook(path);
-    const fsPath = doc.uri.fsPath;
     const queue = queues.get(path) ?? [];
 
     const running = describeRunningExecutions(path, doc, queue);
-
-    const queued = queue
-        .filter(e => e.status === 'queued')
-        .map((e, i) => ({
-            execution_id: e.id,
-            cell_id: e.cellId,
-            source_preview: e.sourcePreview,
-            position: i + 1,
-        }));
 
     return {
         path,
         kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
         busy: isNotebookBusy(path),
         running,
-        queued
+        queued: buildQueuedStatus(queue),
     };
 }
 
@@ -509,23 +492,11 @@ export async function startNotebookExecutionAll(path: string, maxQueue: number):
 /** Run a cell using a new queue entry (called from executeCell for immediate execution). */
 async function runCell(
     path: string,
-    doc: vscode.NotebookDocument,
-    cellIndex: number,
-    cellId: string,
-    execId: string,
-    preview: string
+    execution: PreparedExecutionContext,
 ): Promise<any> {
-    const queue = queues.get(path) ?? [];
-    queues.set(path, queue);
-
-    const entry: QueueEntry = {
-        id: execId, path, cellId, sourcePreview: preview,
-        queuedAt: new Date(), startedAt: new Date(), status: 'running',
-        resolve: () => {}, reject: () => {}
-    };
-    queue.push(entry);
-
-    return runCellEntry(path, doc, cellIndex, entry);
+    const entry = createQueueEntry(execution, { status: 'running', startedAt: new Date() });
+    execution.queue.push(entry);
+    return runCellEntry(path, execution.doc, execution.cellIndex, entry);
 }
 
 async function enqueueExecution(
@@ -538,94 +509,127 @@ async function enqueueExecution(
         forceQueue?: boolean;
     },
 ): Promise<any> {
-    await reconcileKernelState(path);
-
-    const doc = resolveNotebook(path);
-    const idx = resolveCell(doc, selector);
-    const cell = doc.cellAt(idx);
-    const cellId = getCellId(cell) ?? `index-${idx}`;
-    const preview = cell.document.getText().split('\n')[0].slice(0, 80);
-    const execId = `exec-${++executionCounter}`;
-
-    const queue = queues.get(path) ?? [];
-    queues.set(path, queue);
-
-    const running = describeRunningExecutions(path, doc, queue);
-    const busy = isNotebookBusy(path);
+    const execution = await prepareExecutionContext(path, selector);
 
     queueDebug(path, 'enqueue:entry', {
-        execId,
-        cellId,
-        cellIndex: idx,
-        preview,
-        runningCount: running.length,
-        busy,
+        execId: execution.execId,
+        cellId: execution.cellId,
+        cellIndex: execution.cellIndex,
+        preview: execution.preview,
+        runningCount: execution.running.length,
+        busy: execution.busy,
         hasExecutingCell: hasExecutingCell(path),
         forceQueue: options?.forceQueue ?? false,
         batchId: options?.batchId,
     });
 
-    if (!options?.forceQueue && running.length === 0 && !busy) {
-        queueDebug(path, 'enqueue:immediate-start', { execId, cellId });
-        const entry: QueueEntry = {
-            id: execId,
-            path,
-            cellId,
-            sourcePreview: preview,
+    if (!options?.forceQueue && execution.running.length === 0 && !execution.busy) {
+        queueDebug(path, 'enqueue:immediate-start', { execId: execution.execId, cellId: execution.cellId });
+        const entry = createQueueEntry(execution, {
             batchId: options?.batchId,
             stopBatchOnError: options?.stopBatchOnError,
-            queuedAt: new Date(),
-            startedAt: new Date(),
             status: 'running',
-            resolve: () => {},
-            reject: () => {},
-        };
-        queue.push(entry);
-        runCellEntry(path, doc, idx, entry)
+            startedAt: new Date(),
+        });
+        execution.queue.push(entry);
+        runCellEntry(path, execution.doc, execution.cellIndex, entry)
             .then(() => {})
             .catch(() => {});
 
         return {
             status: 'started',
-            execution_id: execId,
-            cell_id: cellId,
-            cell_index: idx,
+            execution_id: execution.execId,
+            cell_id: execution.cellId,
+            cell_index: execution.cellIndex,
             kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
         };
     }
 
-    if (queue.filter(e => e.status === 'queued').length >= maxQueue) {
-        queueDebug(path, 'enqueue:queue-full', { execId, cellId, maxQueue });
+    if (queuedEntryCount(execution.queue) >= maxQueue) {
+        queueDebug(path, 'enqueue:queue-full', { execId: execution.execId, cellId: execution.cellId, maxQueue });
         throw Object.assign(new Error(`Queue full (max ${maxQueue})`), { statusCode: 429 });
     }
 
-    queueDebug(path, 'enqueue:queued', { execId, cellId, running });
+    queueDebug(path, 'enqueue:queued', { execId: execution.execId, cellId: execution.cellId, running: execution.running });
 
-    const entry: QueueEntry = {
-        id: execId,
-        path,
-        cellId,
-        sourcePreview: preview,
+    execution.queue.push(createQueueEntry(execution, {
         batchId: options?.batchId,
         stopBatchOnError: options?.stopBatchOnError,
+    }));
+
+    return buildQueuedExecutionResult(path, execution);
+}
+
+async function prepareExecutionContext(
+    path: string,
+    selector: { cell_id?: string; cell_index?: number },
+): Promise<PreparedExecutionContext> {
+    await reconcileKernelState(path);
+    const doc = resolveNotebook(path);
+    const cellIndex = resolveCell(doc, selector);
+    const cell = doc.cellAt(cellIndex);
+    const cellId = getCellId(cell);
+    if (!cellId) {
+        throw new Error(`Cell at index ${cellIndex} is missing an agent-repl cell ID`);
+    }
+    const preview = cell.document.getText().split('\n')[0].slice(0, 80);
+    const execId = `exec-${++executionCounter}`;
+    const queue = queues.get(path) ?? [];
+    queues.set(path, queue);
+    const running = describeRunningExecutions(path, doc, queue);
+    const busy = isNotebookBusy(path);
+    return { doc, cellIndex, cellId, preview, execId, queue, running, busy };
+}
+
+function createQueueEntry(
+    execution: PreparedExecutionContext,
+    overrides?: Partial<QueueEntry>,
+): QueueEntry {
+    return {
+        id: execution.execId,
+        path: execution.doc.uri.fsPath,
+        cellId: execution.cellId,
+        sourcePreview: execution.preview,
         queuedAt: new Date(),
         status: 'queued',
         resolve: () => {},
         reject: () => {},
+        ...overrides,
     };
-    queue.push(entry);
+}
 
-        return {
-            status: 'queued',
-            execution_id: execId,
-            cell_id: cellId,
-            cell_index: idx,
-            position: queue.filter(e => e.status === 'queued').length,
-            kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
-            currently_running: running,
-            message: kernelState === 'busy'
-                ? 'Kernel is busy (human or agent execution in progress). Queued.'
-                : `Queued after ${running.length} running cell(s)`,
+function queuedEntryCount(queue: QueueEntry[]): number {
+    return queue.filter((entry) => entry.status === 'queued').length;
+}
+
+function buildQueuedStatus(queue: QueueEntry[]): Array<{
+    execution_id: string;
+    cell_id: string;
+    source_preview: string;
+    position: number;
+}> {
+    return queue
+        .filter((entry) => entry.status === 'queued')
+        .map((entry, index) => ({
+            execution_id: entry.id,
+            cell_id: entry.cellId,
+            source_preview: entry.sourcePreview,
+            position: index + 1,
+        }));
+}
+
+function buildQueuedExecutionResult(path: string, execution: PreparedExecutionContext): any {
+    return {
+        status: 'queued',
+        execution_id: execution.execId,
+        cell_id: execution.cellId,
+        cell_index: execution.cellIndex,
+        position: queuedEntryCount(execution.queue),
+        kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
+        currently_running: execution.running,
+        message: kernelState === 'busy'
+            ? 'Kernel is busy (human or agent execution in progress). Queued.'
+            : `Queued after ${execution.running.length} running cell(s)`,
     };
 }
 

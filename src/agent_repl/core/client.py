@@ -1,9 +1,7 @@
 """Client and discovery helpers for the core daemon."""
 from __future__ import annotations
 
-import functools
 import glob
-import hashlib
 import json
 import os
 import subprocess
@@ -13,23 +11,30 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import requests
-
-from agent_repl.client import _bridge_error_message
+from agent_repl.core.notebook_requests import (
+    NotebookActivityRequest,
+    NotebookCreateRequest,
+    NotebookEditRequest,
+    NotebookExecuteCellRequest,
+    NotebookExecuteVisibleCellRequest,
+    NotebookExecutionLookupRequest,
+    NotebookInsertExecuteRequest,
+    NotebookLeaseAcquireRequest,
+    NotebookLeaseReleaseRequest,
+    NotebookPathRequest,
+    NotebookProjectVisibleRequest,
+    NotebookSelectKernelRequest,
+    NotebookSessionPathRequest,
+)
+from agent_repl.http_api import JsonApiClient, poll_execution_until_complete
 
 
 RUNTIME_FILE_PREFIX = "agent-repl-core-"
 DEFAULT_START_TIMEOUT = 5.0
 
 
-class CoreClient:
+class CoreClient(JsonApiClient):
     """HTTP client for the core daemon."""
-
-    def __init__(self, base_url: str, token: str):
-        self.base_url = base_url.rstrip("/")
-        self.token = token
-        self._session = requests.Session()
-        self._session.headers["Authorization"] = f"token {token}"
 
     @classmethod
     def start(
@@ -43,33 +48,14 @@ class CoreClient:
         runtime_dir = os.path.realpath(runtime_dir or _runtime_dir())
 
         try:
-            client = cls.discover(
-                workspace_root, runtime_dir=runtime_dir, allow_stale=True,
-            )
+            client = cls.discover(workspace_root, runtime_dir=runtime_dir)
         except RuntimeError:
             client = None
 
-        stale_pid: int | None = None
         if client is not None:
             result = client.status()
-            if result.get("code_hash") == _current_install_hash():
-                result["already_running"] = True
-                return result
-            # Stale daemon — shut it down and start a fresh one.
-            stale_pid = result.get("pid")
-            try:
-                client.shutdown()
-            except Exception:
-                pass
-            shutdown_deadline = time.monotonic() + timeout
-            while time.monotonic() < shutdown_deadline:
-                try:
-                    cls.discover(
-                        workspace_root, runtime_dir=runtime_dir, allow_stale=True,
-                    )
-                    time.sleep(0.1)
-                except RuntimeError:
-                    break
+            result["already_running"] = True
+            return result
 
         Path(runtime_dir).mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
@@ -98,19 +84,10 @@ class CoreClient:
                 client = cls.discover(workspace_root, runtime_dir=runtime_dir)
                 result = client.status()
                 result["already_running"] = False
-                if stale_pid is not None:
-                    result["stale_restart"] = True
-                    result["stale_pid"] = stale_pid
                 return result
             except RuntimeError:
                 time.sleep(0.1)
 
-        if stale_pid is not None:
-            raise RuntimeError(
-                f"Stale daemon (PID {stale_pid}, code changed) was stopped but "
-                f"replacement failed to start within {timeout}s. "
-                f"Try: kill {stale_pid} && agent-repl core start"
-            )
         raise RuntimeError("Timed out waiting for agent-repl core daemon to start")
 
     @classmethod
@@ -149,7 +126,6 @@ class CoreClient:
         workspace_hint: str | None = None,
         *,
         runtime_dir: str | None = None,
-        allow_stale: bool = False,
     ) -> "CoreClient":
         runtime = os.path.realpath(runtime_dir or _runtime_dir())
         pattern = os.path.join(runtime, f"{RUNTIME_FILE_PREFIX}*.json")
@@ -157,7 +133,6 @@ class CoreClient:
 
         cwd = os.path.realpath(os.getcwd())
         workspace_target = _resolve_workspace_hint(workspace_hint, cwd)
-        current_hash = _current_install_hash() if not allow_stale else None
         candidates: list[tuple[int, float, CoreClient]] = []
 
         for fpath in files:
@@ -169,10 +144,6 @@ class CoreClient:
                         os.unlink(fpath)
                     except OSError:
                         pass
-                    continue
-
-                # Skip stale daemons unless caller explicitly allows them.
-                if current_hash is not None and info.get("code_hash") != current_hash:
                     continue
 
                 workspace_root = os.path.realpath(info["workspace_root"])
@@ -227,6 +198,9 @@ class CoreClient:
             body["capabilities"] = capabilities
         return self._post("/api/sessions/start", body)
 
+    def resolve_preferred_session(self, *, actor: str = "human") -> dict[str, Any]:
+        return self._post("/api/sessions/resolve", {"actor": actor})
+
     def touch_session(self, session_id: str) -> dict[str, Any]:
         return self._post("/api/sessions/touch", {"session_id": session_id})
 
@@ -271,10 +245,10 @@ class CoreClient:
         return self._post("/api/documents/rebind", {"document_id": document_id})
 
     def notebook_contents(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/contents", {"path": path})
+        return self._post("/api/notebooks/contents", NotebookPathRequest(path=path).to_payload())
 
     def notebook_status(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/status", {"path": path})
+        return self._post("/api/notebooks/status", NotebookPathRequest(path=path).to_payload())
 
     def notebook_create(
         self,
@@ -283,11 +257,7 @@ class CoreClient:
         cells: list[dict[str, Any]] | None = None,
         kernel_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if cells is not None:
-            body["cells"] = cells
-        if kernel_id is not None:
-            body["kernel_id"] = kernel_id
+        body = NotebookCreateRequest(path=path, cells=cells, kernel_id=kernel_id).to_payload()
         return self._post("/api/notebooks/create", body, timeout=60)
 
     def notebook_select_kernel(
@@ -296,9 +266,7 @@ class CoreClient:
         *,
         kernel_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if kernel_id is not None:
-            body["kernel_id"] = kernel_id
+        body = NotebookSelectKernelRequest(path=path, kernel_id=kernel_id).to_payload()
         return self._post("/api/notebooks/select-kernel", body, timeout=60)
 
     def notebook_edit(
@@ -308,9 +276,7 @@ class CoreClient:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "operations": operations}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookEditRequest(path=path, operations=operations, owner_session_id=owner_session_id).to_payload()
         return self._post("/api/notebooks/edit", body)
 
     def notebook_execute_cell(
@@ -323,13 +289,13 @@ class CoreClient:
         timeout: float = 30,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if cell_id is not None:
-            body["cell_id"] = cell_id
-        if cell_index is not None:
-            body["cell_index"] = cell_index
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookExecuteCellRequest(
+            path=path,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            owner_session_id=owner_session_id,
+            wait=wait,
+        ).to_payload()
         result = self._post("/api/notebooks/execute-cell", body, timeout=30)
         if wait and result.get("execution_id"):
             return self._poll_execution(result, timeout)
@@ -346,14 +312,14 @@ class CoreClient:
         timeout: float = 30,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {
-            "path": path,
-            "source": source,
-            "cell_type": cell_type,
-            "at_index": at_index,
-        }
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookInsertExecuteRequest(
+            path=path,
+            source=source,
+            cell_type=cell_type,
+            at_index=at_index,
+            owner_session_id=owner_session_id,
+            wait=wait,
+        ).to_payload()
         result = self._post(
             "/api/notebooks/insert-and-execute",
             body,
@@ -364,7 +330,7 @@ class CoreClient:
         return result
 
     def notebook_execution(self, execution_id: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/execution", {"execution_id": execution_id})
+        return self._post("/api/notebooks/execution", NotebookExecutionLookupRequest(execution_id=execution_id).to_payload())
 
     def notebook_execute_all(
         self,
@@ -372,24 +338,20 @@ class CoreClient:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookSessionPathRequest(path=path, owner_session_id=owner_session_id).to_payload()
         return self._post("/api/notebooks/execute-all", body, timeout=120)
 
     def notebook_interrupt(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/interrupt", {"path": path}, timeout=30)
+        return self._post("/api/notebooks/interrupt", NotebookPathRequest(path=path).to_payload(), timeout=30)
 
     def notebook_runtime(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/runtime", {"path": path}, timeout=120)
+        return self._post("/api/notebooks/runtime", NotebookPathRequest(path=path).to_payload(), timeout=120)
 
     def notebook_projection(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/projection", {"path": path}, timeout=120)
+        return self._post("/api/notebooks/projection", NotebookPathRequest(path=path).to_payload(), timeout=120)
 
     def notebook_activity(self, path: str, *, since: float | None = None) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if since is not None:
-            body["since"] = since
+        body = NotebookActivityRequest(path=path, since=since).to_payload()
         return self._post("/api/notebooks/activity", body, timeout=120)
 
     def notebook_project_visible(
@@ -399,9 +361,7 @@ class CoreClient:
         cells: list[dict[str, Any]],
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "cells": cells}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookProjectVisibleRequest(path=path, cells=cells, owner_session_id=owner_session_id).to_payload()
         return self._post("/api/notebooks/project-visible", body, timeout=120)
 
     def notebook_execute_visible_cell(
@@ -412,9 +372,12 @@ class CoreClient:
         source: str,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "cell_index": cell_index, "source": source}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookExecuteVisibleCellRequest(
+            path=path,
+            cell_index=cell_index,
+            source=source,
+            owner_session_id=owner_session_id,
+        ).to_payload()
         return self._post("/api/notebooks/execute-visible-cell", body, timeout=120)
 
     def acquire_cell_lease(
@@ -427,13 +390,14 @@ class CoreClient:
         kind: str = "edit",
         ttl_seconds: float | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "session_id": session_id, "kind": kind}
-        if cell_id is not None:
-            body["cell_id"] = cell_id
-        if cell_index is not None:
-            body["cell_index"] = cell_index
-        if ttl_seconds is not None:
-            body["ttl_seconds"] = ttl_seconds
+        body = NotebookLeaseAcquireRequest(
+            path=path,
+            session_id=session_id,
+            cell_id=cell_id,
+            cell_index=cell_index,
+            kind=kind,
+            ttl_seconds=ttl_seconds,
+        ).to_payload()
         return self._post("/api/notebooks/lease/acquire", body, timeout=120)
 
     def release_cell_lease(
@@ -444,15 +408,16 @@ class CoreClient:
         cell_id: str | None = None,
         cell_index: int | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path, "session_id": session_id}
-        if cell_id is not None:
-            body["cell_id"] = cell_id
-        if cell_index is not None:
-            body["cell_index"] = cell_index
+        body = NotebookLeaseReleaseRequest(
+            path=path,
+            session_id=session_id,
+            cell_id=cell_id,
+            cell_index=cell_index,
+        ).to_payload()
         return self._post("/api/notebooks/lease/release", body, timeout=120)
 
     def notebook_restart(self, path: str) -> dict[str, Any]:
-        return self._post("/api/notebooks/restart", {"path": path}, timeout=120)
+        return self._post("/api/notebooks/restart", NotebookPathRequest(path=path).to_payload(), timeout=120)
 
     def notebook_restart_and_run_all(
         self,
@@ -460,9 +425,7 @@ class CoreClient:
         *,
         owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"path": path}
-        if owner_session_id is not None:
-            body["owner_session_id"] = owner_session_id
+        body = NotebookSessionPathRequest(path=path, owner_session_id=owner_session_id).to_payload()
         return self._post("/api/notebooks/restart-and-run-all", body, timeout=120)
 
     def list_branches(self) -> dict[str, Any]:
@@ -590,43 +553,18 @@ class CoreClient:
         return self._post("/api/runs/finish", {"run_id": run_id, "status": status})
 
     def _poll_execution(self, initial: dict[str, Any], timeout: float) -> dict[str, Any]:
-        execution_id = initial["execution_id"]
-        deadline = time.monotonic() + timeout
-        interval = 0.2
-        while time.monotonic() < deadline:
-            time.sleep(interval)
-            result = self.notebook_execution(execution_id)
-            status = result.get("status")
-            if status not in ("running", "queued", "started"):
-                for key in ("cell_id", "cell_index", "operation"):
-                    if key in initial and key not in result:
-                        result[key] = initial[key]
-                return result
-            interval = min(interval * 1.5, 1.0)
-        return {**initial, "status": "timeout", "timeout_seconds": timeout}
+        return poll_execution_until_complete(
+            initial,
+            timeout=timeout,
+            fetch_execution=self.notebook_execution,
+            in_progress_statuses={"running", "queued", "started"},
+        )
 
     def _get(self, endpoint: str, timeout: float = 10) -> dict[str, Any]:
-        response = self._session.get(f"{self.base_url}{endpoint}", timeout=timeout)
-        self._raise_for_status(response)
-        return response.json()
+        return super()._get(endpoint, timeout=timeout)
 
     def _post(self, endpoint: str, body: dict[str, Any], timeout: float = 10) -> dict[str, Any]:
-        response = self._session.post(f"{self.base_url}{endpoint}", json=body, timeout=timeout)
-        self._raise_for_status(response)
-        return response.json()
-
-    def _raise_for_status(self, response: requests.Response) -> None:
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            detail = _bridge_error_message(response)
-            if detail:
-                status = getattr(response, "status_code", "HTTP error")
-                reason = getattr(response, "reason", "") or "HTTP error"
-                url = getattr(response, "url", None)
-                location = f" for url: {url}" if url else ""
-                raise RuntimeError(f"{status} {reason}{location}: {detail}") from exc
-            raise
+        return super()._post(endpoint, body, timeout=timeout)
 
 
 def _runtime_dir() -> str:
@@ -636,19 +574,6 @@ def _runtime_dir() -> str:
     if sys.platform == "darwin":
         return os.path.realpath(os.path.join(os.path.expanduser("~"), "Library", "Jupyter", "runtime"))
     return os.path.realpath(os.path.join(os.path.expanduser("~"), ".local", "share", "jupyter", "runtime"))
-
-
-@functools.lru_cache(maxsize=1)
-def _current_install_hash() -> str:
-    package_root = Path(__file__).resolve().parents[1]
-    digest = hashlib.sha256()
-    for source in sorted(package_root.rglob("*.py")):
-        try:
-            digest.update(str(source.relative_to(package_root)).encode("utf-8"))
-            digest.update(source.read_bytes())
-        except OSError:
-            continue
-    return digest.hexdigest()
 
 
 def _pid_alive(pid: int) -> bool:

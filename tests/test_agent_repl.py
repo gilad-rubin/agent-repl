@@ -19,10 +19,16 @@ from unittest import mock
 
 import requests
 
+import agent_repl.cli as cli_module
 from agent_repl.cli import build_parser, main
 from agent_repl.client import BridgeClient
 from agent_repl.core.client import DEFAULT_START_TIMEOUT, CoreClient
-from agent_repl.core.server import CoreState, _handler_factory, _load_or_create_state
+from agent_repl.core.server import CoreState, _load_or_create_state
+from agent_repl.http_api import ApiError, poll_execution_until_complete
+from agent_repl.notebook_runtime_client import (
+    call_with_owner_session,
+    resolve_owner_session_id,
+)
 
 
 def _python_with_ipykernel() -> str:
@@ -35,6 +41,197 @@ def _python_with_ipykernel() -> str:
         if probe.returncode == 0:
             return candidate
     raise RuntimeError("No kernel-capable python executable was found for headless notebook tests")
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP helpers
+# ---------------------------------------------------------------------------
+
+class TestHttpApiHelpers(unittest.TestCase):
+    """Shared HTTP polling helpers preserve execution semantics across clients."""
+
+    def test_poll_execution_until_complete_carries_initial_metadata_forward(self):
+        fetch_execution = mock.Mock(side_effect=[
+            {"status": "running"},
+            {"status": "ok", "outputs": []},
+        ])
+
+        with (
+            mock.patch("agent_repl.http_api.time.sleep"),
+            mock.patch("agent_repl.http_api.time.monotonic", side_effect=[0.0, 0.1, 0.2]),
+        ):
+            result = poll_execution_until_complete(
+                {
+                    "execution_id": "exec-1",
+                    "status": "started",
+                    "cell_id": "cell-1",
+                    "cell_index": 3,
+                    "operation": "execute-cell",
+                },
+                timeout=5,
+                fetch_execution=fetch_execution,
+                in_progress_statuses={"running", "queued", "started"},
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["cell_id"], "cell-1")
+        self.assertEqual(result["cell_index"], 3)
+        self.assertEqual(result["operation"], "execute-cell")
+        self.assertEqual(fetch_execution.call_args_list, [mock.call("exec-1"), mock.call("exec-1")])
+
+    def test_poll_execution_until_complete_returns_timeout_payload(self):
+        fetch_execution = mock.Mock(return_value={"status": "running"})
+
+        with (
+            mock.patch("agent_repl.http_api.time.sleep"),
+            mock.patch("agent_repl.http_api.time.monotonic", side_effect=[0.0, 0.1, 0.2, 0.31]),
+        ):
+            result = poll_execution_until_complete(
+                {"execution_id": "exec-2", "status": "queued", "cell_id": "cell-2"},
+                timeout=0.3,
+                fetch_execution=fetch_execution,
+                in_progress_statuses={"running", "queued"},
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "execution_id": "exec-2",
+                "status": "timeout",
+                "cell_id": "cell-2",
+                "timeout_seconds": 0.3,
+            },
+        )
+        self.assertEqual(fetch_execution.call_count, 2)
+
+    def test_api_error_keeps_structured_recovery_payload(self):
+        error = ApiError(
+            "409 Conflict: Operation blocked",
+            status_code=409,
+            reason="Conflict",
+            url="http://example.test/api/notebooks/edit",
+            payload={
+                "error": "Operation blocked",
+                "recovery": {
+                    "reason": "lease-conflict",
+                    "summary": "Another session holds the lease.",
+                },
+            },
+        )
+
+        self.assertEqual(
+            error.to_payload(),
+            {
+                "error": "Operation blocked",
+                "recovery": {
+                    "reason": "lease-conflict",
+                    "summary": "Another session holds the lease.",
+                },
+                "status_code": 409,
+                "reason_phrase": "Conflict",
+                "url": "http://example.test/api/notebooks/edit",
+            },
+        )
+
+
+class TestPreviewServerCompatibilityHelpers(unittest.TestCase):
+    def test_preview_server_is_compatible_requires_workspace_protocol_and_routes(self):
+        self.assertTrue(
+            cli_module._preview_server_is_compatible(
+                {
+                    "protocol_version": cli_module.STANDALONE_PREVIEW_PROTOCOL_VERSION,
+                    "workspace_root": "/workspace",
+                    "api_routes": sorted(cli_module.STANDALONE_PREVIEW_REQUIRED_ROUTES),
+                },
+                workspace_root="/workspace",
+            )
+        )
+
+        self.assertFalse(
+            cli_module._preview_server_is_compatible(
+                {
+                    "protocol_version": "old-preview",
+                    "workspace_root": "/workspace",
+                    "api_routes": sorted(cli_module.STANDALONE_PREVIEW_REQUIRED_ROUTES),
+                },
+                workspace_root="/workspace",
+            )
+        )
+
+        self.assertFalse(
+            cli_module._preview_server_is_compatible(
+                {
+                    "protocol_version": cli_module.STANDALONE_PREVIEW_PROTOCOL_VERSION,
+                    "workspace_root": "/other-workspace",
+                    "api_routes": sorted(cli_module.STANDALONE_PREVIEW_REQUIRED_ROUTES),
+                },
+                workspace_root="/workspace",
+            )
+        )
+
+        self.assertFalse(
+            cli_module._preview_server_is_compatible(
+                {
+                    "protocol_version": cli_module.STANDALONE_PREVIEW_PROTOCOL_VERSION,
+                    "workspace_root": "/workspace",
+                    "api_routes": ["/api/standalone/health"],
+                },
+                workspace_root="/workspace",
+            )
+        )
+
+
+class TestNotebookRuntimeClientHelpers(unittest.TestCase):
+    """Shared notebook runtime helper behavior."""
+
+    def test_resolve_owner_session_id_prefers_explicit_session(self):
+        client = mock.Mock()
+
+        session_id = resolve_owner_session_id(client, explicit_session_id="sess-explicit")
+
+        self.assertEqual(session_id, "sess-explicit")
+        client.resolve_preferred_session.assert_not_called()
+        client.start_session.assert_not_called()
+
+    def test_call_with_owner_session_injects_reused_session_id(self):
+        client = mock.Mock()
+        client.resolve_preferred_session.return_value = {
+            "status": "ok",
+            "session": {"session_id": "sess-vscode"},
+        }
+        operation = mock.Mock(return_value={"status": "ok"})
+
+        result = call_with_owner_session(
+            client,
+            operation,
+            "nb.ipynb",
+            wait=True,
+        )
+
+        self.assertEqual(result, {"status": "ok"})
+        operation.assert_called_once_with("nb.ipynb", wait=True, owner_session_id="sess-vscode")
+        client.start_session.assert_not_called()
+
+    def test_resolve_owner_session_id_starts_session_when_no_preferred_session_exists(self):
+        client = mock.Mock()
+        client.resolve_preferred_session.return_value = {"status": "ok", "session": None}
+        client.start_session.return_value = {"status": "ok", "session": {"session_id": "sess-started"}}
+
+        session_id = resolve_owner_session_id(client, client_type="browser", label="Browser Preview")
+
+        self.assertEqual(session_id, "sess-started")
+        client.start_session.assert_called_once_with(actor="human", client="browser", label="Browser Preview")
+
+    def test_call_with_owner_session_omits_owner_when_resolution_fails(self):
+        client = mock.Mock()
+        client.resolve_preferred_session.side_effect = RuntimeError("boom")
+        client.start_session.side_effect = RuntimeError("still-boom")
+        operation = mock.Mock(return_value={"status": "ok"})
+
+        result = call_with_owner_session(client, operation, path="nb.ipynb")
+
+        self.assertEqual(result, {"status": "ok"})
+        operation.assert_called_once_with(path="nb.ipynb")
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +339,6 @@ class TestCoreDiscovery(unittest.TestCase):
             "port": 23456,
             "token": "tok",
             "workspace_root": "/workspace",
-            "code_hash": "current",
         })
         with (
             mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
@@ -150,50 +346,11 @@ class TestCoreDiscovery(unittest.TestCase):
             mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
             mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
             mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
             mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
         ):
             client = CoreClient.discover()
         self.assertEqual(client.base_url, "http://127.0.0.1:23456")
         self.assertEqual(client.token, "tok")
-
-    def test_discover_skips_stale_daemons(self):
-        info = json.dumps({
-            "pid": 123,
-            "port": 23456,
-            "token": "tok",
-            "workspace_root": "/workspace",
-            "code_hash": "old-hash",
-        })
-        with (
-            mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
-            mock.patch("agent_repl.core.client.os.path.getmtime", return_value=1.0),
-            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
-            mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
-            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="new-hash"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "No running agent-repl core daemon"):
-                CoreClient.discover()
-
-    def test_discover_allows_stale_when_requested(self):
-        info = json.dumps({
-            "pid": 123,
-            "port": 23456,
-            "token": "tok",
-            "workspace_root": "/workspace",
-            "code_hash": "old-hash",
-        })
-        with (
-            mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
-            mock.patch("agent_repl.core.client.os.path.getmtime", return_value=1.0),
-            mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
-            mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
-            mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
-        ):
-            client = CoreClient.discover(allow_stale=True)
-        self.assertEqual(client.base_url, "http://127.0.0.1:23456")
 
     def test_discover_raises_when_no_workspace_matches(self):
         info = json.dumps({
@@ -201,7 +358,6 @@ class TestCoreDiscovery(unittest.TestCase):
             "port": 23456,
             "token": "tok",
             "workspace_root": "/other",
-            "code_hash": "current",
         })
         with (
             mock.patch("agent_repl.core.client.glob.glob", return_value=["/tmp/agent-repl-core-1.json"]),
@@ -209,7 +365,6 @@ class TestCoreDiscovery(unittest.TestCase):
             mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace"),
             mock.patch("agent_repl.core.client.Path.read_text", return_value=info),
             mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
         ):
             with self.assertRaisesRegex(RuntimeError, "No running agent-repl core daemon matched '/workspace'"):
                 CoreClient.discover()
@@ -220,14 +375,12 @@ class TestCoreDiscovery(unittest.TestCase):
             "port": 23456,
             "token": "tok-parent",
             "workspace_root": "/workspace",
-            "code_hash": "current",
         })
         info_child = json.dumps({
             "pid": 456,
             "port": 34567,
             "token": "tok-child",
             "workspace_root": "/workspace/subproject",
-            "code_hash": "current",
         })
         read_map = {
             "/tmp/agent-repl-core-parent.json": info_parent,
@@ -246,7 +399,6 @@ class TestCoreDiscovery(unittest.TestCase):
             mock.patch("agent_repl.core.client.os.getcwd", return_value="/workspace/subproject"),
             mock.patch("agent_repl.core.client.Path.read_text", autospec=True, side_effect=lambda self: read_map[str(self)]),
             mock.patch("agent_repl.core.client._pid_alive", return_value=True),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="current"),
             mock.patch.object(CoreClient, "health", return_value={"status": "ok"}),
         ):
             client = CoreClient.discover()
@@ -282,29 +434,6 @@ class TestCoreDiscovery(unittest.TestCase):
             session_id="sess-1",
         )
 
-    def test_start_restarts_stale_daemon_when_installed_code_is_newer(self):
-        stale_client = mock.MagicMock(spec=CoreClient)
-        stale_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 1.0, "code_hash": "stale", "pid": 999}
-        fresh_client = mock.MagicMock(spec=CoreClient)
-        fresh_client.status.return_value = {"status": "ok", "workspace_root": "/workspace", "started_at": 20.0, "code_hash": "fresh"}
-
-        with (
-            mock.patch.object(CoreClient, "discover", side_effect=[stale_client, RuntimeError("gone"), fresh_client]),
-            mock.patch("agent_repl.core.client._current_install_hash", return_value="fresh"),
-            mock.patch("agent_repl.core.client.subprocess.Popen") as mock_popen,
-            mock.patch("agent_repl.core.client.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2]),
-            mock.patch("agent_repl.core.client.time.sleep"),
-        ):
-            result = CoreClient.start("/workspace", timeout=1.0, runtime_dir="/tmp/runtime")
-
-        stale_client.shutdown.assert_called_once()
-        mock_popen.assert_called_once()
-        self.assertFalse(result["already_running"])
-        self.assertTrue(result["stale_restart"])
-        self.assertEqual(result["stale_pid"], 999)
-        self.assertEqual(result["workspace_root"], "/workspace")
-
-
 class TestPackagingMetadata(unittest.TestCase):
     """Packaging metadata must include the headless runtime dependencies."""
 
@@ -333,9 +462,14 @@ class TestCoreState(unittest.TestCase):
             pid=1234,
             started_at=1.0,
         )
+        from agent_repl.core.db import open_db
+        self._test_db = open_db(str(self.workspace_root))
+        self.state._db = self._test_db
 
     def tearDown(self):
         self.state.shutdown_headless_runtimes()
+        self.state._ydoc_service.close_all()
+        self._test_db.close()
         self.tmpdir.cleanup()
 
     def test_open_document_captures_bound_file_snapshot(self):
@@ -347,6 +481,16 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(document["sync_state"], "in-sync")
         self.assertTrue(document["bound_snapshot"]["exists"])
         self.assertEqual(document["bound_snapshot"]["sha256"], document["observed_snapshot"]["sha256"])
+
+    def test_snapshot_file_hashes_existing_files(self):
+        from agent_repl.core.server import _snapshot_file
+
+        snapshot = _snapshot_file(str(self.doc_path))
+
+        self.assertTrue(snapshot["exists"])
+        self.assertEqual(snapshot["source_kind"], "file")
+        self.assertIsInstance(snapshot["sha256"], str)
+        self.assertEqual(len(snapshot["sha256"]), 64)
 
     def test_refresh_document_reports_external_change_until_rebound(self):
         body, status = self.state.open_document("notebooks/demo.ipynb")
@@ -425,28 +569,27 @@ class TestCoreState(unittest.TestCase):
         overlap_detected = threading.Event()
         active_writers = 0
         active_lock = threading.Lock()
-        original_write_text = Path.write_text
 
-        def guarded_write_text(path_obj, *args, **kwargs):
+        original_persist_all = __import__("agent_repl.core.db", fromlist=["persist_all"]).persist_all
+
+        def guarded_persist_all(conn, **kwargs):
             nonlocal active_writers
-            if str(path_obj).endswith(".tmp"):
+            with active_lock:
+                active_writers += 1
+                if active_writers > 1:
+                    overlap_detected.set()
+                started.set()
+            release.wait(timeout=2)
+            try:
+                return original_persist_all(conn, **kwargs)
+            finally:
                 with active_lock:
-                    active_writers += 1
-                    if active_writers > 1:
-                        overlap_detected.set()
-                    started.set()
-                release.wait(timeout=2)
-                try:
-                    return original_write_text(path_obj, *args, **kwargs)
-                finally:
-                    with active_lock:
-                        active_writers -= 1
-            return original_write_text(path_obj, *args, **kwargs)
+                    active_writers -= 1
 
         first = threading.Thread(target=self.state.persist)
         second = threading.Thread(target=self.state.persist)
 
-        with mock.patch("pathlib.Path.write_text", new=guarded_write_text):
+        with mock.patch("agent_repl.core.db.persist_all", new=guarded_persist_all):
             first.start()
             self.assertTrue(started.wait(timeout=1))
             second.start()
@@ -506,13 +649,14 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(body["results"][0]["op"], "replace-source")
         self.assertEqual(len(self.state.document_records), 1)
 
-    def test_notebook_edit_falls_back_to_cell_index_when_read_only_contents_generated_ephemeral_ids(self):
+    def test_notebook_edit_uses_generated_cell_id_for_read_only_contents(self):
         notebook_path = self.workspace_root / "notebooks" / "ephemeral-ids.ipynb"
         notebook_path.parent.mkdir(parents=True, exist_ok=True)
         notebook_path.write_text(json.dumps({
             "cells": [{
                 "cell_type": "code",
                 "execution_count": None,
+                "id": "legacy-nbformat-id",
                 "metadata": {},
                 "outputs": [],
                 "source": ["x = 1\n"],
@@ -562,6 +706,62 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(contents_status, 200)
         self.assertEqual(len(contents_body["cells"]), 1)
 
+    def test_ydoc_shadow_stays_in_sync_after_edit_operations(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            self.state.notebook_create(
+                "notebooks/ydoc-sync.ipynb",
+                cells=[
+                    {"type": "code", "source": "a = 1"},
+                    {"type": "code", "source": "b = 2"},
+                    {"type": "code", "source": "c = 3"},
+                ],
+                kernel_id=_python_with_ipykernel(),
+            )
+            relative_path = "notebooks/ydoc-sync.ipynb"
+
+            # Verify initial shadow load
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(len(ydoc_cells), 3)
+            self.assertEqual(ydoc_cells[0]["source"], "a = 1")
+
+            # Replace source
+            self.state.notebook_edit(
+                relative_path,
+                [{"op": "replace-source", "cell_index": 0, "source": "a = 10"}],
+            )
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(ydoc_cells[0]["source"], "a = 10")
+
+            # Insert cell
+            self.state.notebook_edit(
+                relative_path,
+                [{"op": "insert", "cell_type": "code", "source": "d = 4", "at_index": 1}],
+            )
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(len(ydoc_cells), 4)
+            self.assertEqual(ydoc_cells[1]["source"], "d = 4")
+
+            # Delete cell
+            self.state.notebook_edit(
+                relative_path,
+                [{"op": "delete", "cell_index": 1}],
+            )
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(len(ydoc_cells), 3)
+            self.assertEqual(ydoc_cells[0]["source"], "a = 10")
+            self.assertEqual(ydoc_cells[1]["source"], "b = 2")
+
+            # Move cell
+            self.state.notebook_edit(
+                relative_path,
+                [{"op": "move", "cell_index": 0, "to_index": 2}],
+            )
+            ydoc_cells = self.state._ydoc_service.get_cells(relative_path)
+            self.assertEqual(len(ydoc_cells), 3)
+            # After move(0,2): b, c, a
+            self.assertEqual(ydoc_cells[0]["source"], "b = 2")
+            self.assertEqual(ydoc_cells[2]["source"], "a = 10")
+
     def test_notebook_insert_execute_clamps_out_of_range_index_for_blank_headless_notebook(self):
         with mock.patch.object(self.state, "_projection_client", return_value=None):
             create_body, create_status = self.state.notebook_create(
@@ -599,6 +799,12 @@ class TestCoreState(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
+        self.assertIsInstance(body["execution_id"], str)
+        lookup_body, lookup_status = self.state.notebook_execution(body["execution_id"])
+        self.assertEqual(lookup_status, 200)
+        self.assertEqual(lookup_body["status"], "ok")
+        self.assertEqual(lookup_body["cell_id"], body["cell_id"])
+        self.assertEqual(lookup_body["outputs"][0]["data"]["text/plain"], "1")
 
     def test_headless_notebook_round_trip_without_projection_client(self):
         notebook_path = "notebooks/headless.ipynb"
@@ -701,6 +907,53 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(status_status, 200)
             self.assertFalse(status_body["open"])
             self.assertEqual(status_body["kernel_state"], "idle")
+
+    def test_headless_restart_and_run_all_assigns_missing_cell_ids_before_batch_execution(self):
+        notebook_path = "notebooks/headless-restart-missing-ids.ipynb"
+        kernel_python = _python_with_ipykernel()
+        raw_notebook = {
+            "cells": [{
+                "cell_type": "code",
+                "execution_count": None,
+                "id": "cell-1",
+                "metadata": {},
+                "outputs": [],
+                "source": [
+                    "import time\n",
+                    "for i in range(3):\n",
+                    "    print(i, flush=True)\n",
+                    "    time.sleep(0.1)\n",
+                ],
+            }],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            notebook_file = self.workspace_root / notebook_path
+            notebook_file.parent.mkdir(parents=True, exist_ok=True)
+            notebook_file.write_text(json.dumps(raw_notebook))
+
+            select_body, select_status = self.state.notebook_select_kernel(
+                notebook_path,
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(select_status, 200)
+            self.assertEqual(select_body["status"], "ok")
+
+            restart_body, restart_status = self.state.notebook_restart_and_run_all(notebook_path)
+            self.assertEqual(restart_status, 200)
+            self.assertEqual(restart_body["status"], "ok")
+            self.assertEqual(len(restart_body["executions"]), 1)
+            self.assertEqual(
+                [output["text"] for output in restart_body["executions"][0]["outputs"]],
+                ["0\n", "1\n", "2\n"],
+            )
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            self.assertTrue(contents_body["cells"][0]["cell_id"])
 
     def test_headless_restart_and_run_all_allows_owner_session_leases(self):
         notebook_path = "notebooks/headless-restart-lease.ipynb"
@@ -1267,6 +1520,12 @@ class TestCoreState(unittest.TestCase):
             self.assertIsNotNone(live_body)
             self.assertEqual({item["session_id"] for item in live_body["presence"]}, {"sess-agent", "sess-human"})
             self.assertEqual(live_body["current_execution"]["owner"], "agent")
+            execution_lookup, execution_lookup_status = self.state.notebook_execution(
+                live_body["current_execution"]["execution_id"]
+            )
+            self.assertEqual(execution_lookup_status, 200)
+            self.assertEqual(execution_lookup["status"], "running")
+            self.assertEqual(execution_lookup["cell_id"], live_body["current_execution"]["cell_id"])
             live_cursor = live_body["cursor"]
 
             thread.join(timeout=10)
@@ -1755,6 +2014,77 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(len(deleted_body["cells"]), 2)
             self.assertNotIn(code_cell_id, [cell["cell_id"] for cell in deleted_body["cells"]])
 
+    def test_headless_delete_can_remove_a_running_cell_without_resurrecting_it(self):
+        notebook_path = "notebooks/headless-delete-running.ipynb"
+        kernel_python = _python_with_ipykernel()
+        execution_started = threading.Event()
+        allow_finish = threading.Event()
+        execution_result: dict[str, Any] = {}
+        edit_result: dict[str, Any] = {}
+
+        def fake_execute_source(*args, **kwargs):
+            execution_started.set()
+            self.assertTrue(allow_finish.wait(timeout=5), "test did not release the mocked execution")
+            return [], 1, None
+
+        with (
+            mock.patch.object(self.state, "_projection_client", return_value=None),
+            mock.patch.object(self.state, "_execute_source", side_effect=fake_execute_source),
+        ):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "import time\ntime.sleep(5)"},
+                    {"type": "code", "source": "print('still here')"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            running_cell_id = contents_body["cells"][0]["cell_id"]
+
+            def run_execution():
+                execution_result["value"] = self.state.notebook_execute_cell(
+                    notebook_path,
+                    cell_id=running_cell_id,
+                    cell_index=None,
+                )
+
+            def delete_running_cell():
+                edit_result["value"] = self.state.notebook_edit(
+                    notebook_path,
+                    [{"op": "delete", "cell_id": running_cell_id}],
+                )
+
+            execution_thread = threading.Thread(target=run_execution, daemon=True)
+            execution_thread.start()
+            self.assertTrue(execution_started.wait(timeout=5), "mocked execution never started")
+
+            edit_thread = threading.Thread(target=delete_running_cell, daemon=True)
+            edit_thread.start()
+            edit_thread.join(timeout=2)
+            self.assertFalse(edit_thread.is_alive(), "delete should not wait for the running cell to finish")
+
+            allow_finish.set()
+            execution_thread.join(timeout=5)
+            self.assertFalse(execution_thread.is_alive(), "mocked execution should finish after release")
+
+            edit_body, edit_status = edit_result["value"]
+            self.assertEqual(edit_status, 200)
+            self.assertTrue(edit_body["results"][0]["changed"])
+
+            exec_body, exec_status = execution_result["value"]
+            self.assertEqual(exec_status, 200)
+            self.assertEqual(exec_body["status"], "ok")
+
+            final_body, final_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(final_status, 200)
+            self.assertEqual(len(final_body["cells"]), 1)
+            self.assertNotIn(running_cell_id, [cell["cell_id"] for cell in final_body["cells"]])
+
     def test_headless_clear_outputs_all_clears_every_code_cell(self):
         notebook_path = "notebooks/headless-clear-outputs.ipynb"
         kernel_python = _python_with_ipykernel()
@@ -1814,6 +2144,17 @@ class TestCoreState(unittest.TestCase):
         self.state.session_records["sess-1"].last_seen_at -= 120
         payload = self.state.list_sessions_payload()
         self.assertEqual(payload["sessions"][0]["status"], "stale")
+
+    def test_resolve_preferred_session_prefers_attached_editor_capable_human(self):
+        self.state.start_session("human", "browser", "browser", "sess-browser", ["projection", "presence"])
+        self.state.start_session("human", "vscode", "editor", "sess-vscode", ["projection", "editor", "presence"])
+        payload = self.state.resolve_preferred_session("human")
+        self.assertEqual(payload["session"]["session_id"], "sess-vscode")
+
+    def test_resolve_preferred_session_returns_none_when_no_matching_actor_exists(self):
+        self.state.start_session("agent", "cli", "worker", "sess-agent", ["projection", "ops"])
+        payload = self.state.resolve_preferred_session("human")
+        self.assertIsNone(payload["session"])
 
     def test_branch_can_be_owned_and_finished(self):
         session = self.state.start_session("agent", "cli", "worker", "sess-1")
@@ -1917,6 +2258,8 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(suggested_branch["action"], "branch-start")
             self.assertEqual(suggested_branch["document_id"], opened["document"]["document_id"])
             self.assertEqual(suggested_branch["owner_session_id"], "sess-agent")
+            self.assertEqual(conflict_body["recovery"]["reason"], "lease-conflict")
+            self.assertIn("Refresh the notebook surface", conflict_body["recovery"]["suggestions"][0])
 
     def test_finish_run_keeps_runtime_busy_while_another_run_is_active(self):
         opened, status = self.state.open_document("notebooks/demo.ipynb")
@@ -1941,14 +2284,157 @@ class TestCoreState(unittest.TestCase):
             kind="execute",
         )
         self.assertEqual(second_status, 200)
+        self.assertEqual(first_body["run"]["status"], "running")
+        self.assertIsNone(first_body["run"]["queue_position"])
+        self.assertEqual(second_body["run"]["status"], "queued")
+        self.assertEqual(second_body["run"]["queue_position"], 1)
 
         finish_body, finish_status = self.state.finish_run(first_body["run"]["run_id"], "completed")
         self.assertEqual(finish_status, 200)
         self.assertEqual(self.state.runtime_records["rt-1"].status, "busy")
+        self.assertEqual(self.state.run_records["run-2"].status, "running")
+        self.assertIsNone(self.state.run_records["run-2"].queue_position)
 
         final_body, final_status = self.state.finish_run(second_body["run"]["run_id"], "completed")
         self.assertEqual(final_status, 200)
         self.assertEqual(self.state.runtime_records["rt-1"].status, "idle")
+
+    def test_queue_promotion_emits_activity_event(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
+
+        self.state.start_run(
+            run_id="run-1",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.state.start_run(
+            run_id="run-2",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        events_before = len(self.state.activity_records)
+        self.state.finish_run("run-1", "completed")
+
+        promotion_events = [
+            event for event in self.state.activity_records[events_before:]
+            if event.type == "queue-promotion"
+        ]
+        self.assertEqual(len(promotion_events), 1)
+        self.assertIn("run-2", promotion_events[0].detail)
+
+    def test_start_run_recomputes_queue_positions_for_multiple_waiting_runs(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
+
+        self.state.start_run(
+            run_id="run-1",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        second_body, second_status = self.state.start_run(
+            run_id="run-2",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.assertEqual(second_status, 200)
+        third_body, third_status = self.state.start_run(
+            run_id="run-3",
+            runtime_id="rt-1",
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.assertEqual(third_status, 200)
+        self.assertEqual(second_body["run"]["queue_position"], 1)
+        self.assertEqual(third_body["run"]["queue_position"], 2)
+
+        finish_body, finish_status = self.state.finish_run("run-1", "completed")
+        self.assertEqual(finish_status, 200)
+        self.assertEqual(finish_body["run"]["status"], "completed")
+        self.assertEqual(self.state.run_records["run-2"].status, "running")
+        self.assertEqual(self.state.run_records["run-3"].status, "queued")
+        self.assertEqual(self.state.run_records["run-3"].queue_position, 1)
+
+    def test_notebook_status_reports_server_owned_running_and_queued_runs(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        runtime = self.state.start_runtime(
+            runtime_id="rt-headless",
+            mode="shared",
+            label=None,
+            environment=_python_with_ipykernel(),
+            document_path="notebooks/demo.ipynb",
+        )
+        runtime_id = runtime["runtime"]["runtime_id"]
+        self.state.start_run(
+            run_id="run-1",
+            runtime_id=runtime_id,
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.state.start_run(
+            run_id="run-2",
+            runtime_id=runtime_id,
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+
+        body, status = self.state.notebook_status("notebooks/demo.ipynb")
+
+        self.assertEqual(status, 200)
+        self.assertEqual([item["run_id"] for item in body["running"]], ["run-1"])
+        self.assertEqual([item["run_id"] for item in body["queued"]], ["run-2"])
+        self.assertEqual(body["queued"][0]["queue_position"], 1)
+
+    def test_notebook_activity_reports_server_owned_running_and_queued_runs(self):
+        opened, status = self.state.open_document("notebooks/demo.ipynb")
+        self.assertEqual(status, 200)
+        document_id = opened["document"]["document_id"]
+        runtime = self.state.start_runtime(
+            runtime_id="rt-headless",
+            mode="shared",
+            label=None,
+            environment=_python_with_ipykernel(),
+            document_path="notebooks/demo.ipynb",
+        )
+        runtime_id = runtime["runtime"]["runtime_id"]
+        self.state.start_run(
+            run_id="run-1",
+            runtime_id=runtime_id,
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+        self.state.start_run(
+            run_id="run-2",
+            runtime_id=runtime_id,
+            target_type="document",
+            target_ref=document_id,
+            kind="execute",
+        )
+
+        body, status = self.state.notebook_activity("notebooks/demo.ipynb")
+
+        self.assertEqual(status, 200)
+        self.assertEqual([item["run_id"] for item in body["running"]], ["run-1"])
+        self.assertEqual([item["run_id"] for item in body["queued"]], ["run-2"])
+        self.assertEqual(body["queued"][0]["queue_position"], 1)
 
     def test_start_run_rejects_unknown_document_and_branch_targets(self):
         self.state.start_runtime(runtime_id="rt-1", mode="shared", label=None, environment=None)
@@ -2056,7 +2542,8 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(restored.runtime_records["rt-1"].status, "recovery-needed")
         self.assertEqual(restored.run_records[run_body["run"]["run_id"]].status, "interrupted")
         self.assertTrue(any(event.type == "runtime-state-changed" for event in restored.activity_records))
-        self.assertTrue(Path(restored.state_file).exists())
+        db_path = Path(str(self.workspace_root)) / ".agent-repl" / "core-state.db"
+        self.assertTrue(db_path.exists())
 
     def test_runtime_state_changes_are_visible_in_notebook_activity(self):
         notebook_path = "notebooks/runtime-transitions.ipynb"
@@ -2481,6 +2968,12 @@ class TestCoreEndpoints(unittest.TestCase):
         self.assertEqual(payload["capabilities"], ["projection"])
         self.assertIn("session_id", payload)
 
+    def test_resolve_preferred_session_calls_post(self):
+        self.client.resolve_preferred_session(actor="human")
+        url = self.mock_post.call_args[0][0]
+        self.assertIn("/api/sessions/resolve", url)
+        self.assertEqual(self.mock_post.call_args.kwargs["json"], {"actor": "human"})
+
     def test_touch_session_calls_post(self):
         self.client.touch_session("sess-1")
         url = self.mock_post.call_args[0][0]
@@ -2617,7 +3110,7 @@ class TestCoreEndpoints(unittest.TestCase):
         self.client.notebook_execute_cell("nb.ipynb", cell_id="cell-1", owner_session_id="sess-1", wait=False)
         self.assertEqual(
             self.mock_post.call_args.kwargs["json"],
-            {"path": "nb.ipynb", "cell_id": "cell-1", "owner_session_id": "sess-1"},
+            {"path": "nb.ipynb", "cell_id": "cell-1", "owner_session_id": "sess-1", "wait": False},
         )
 
     def test_notebook_insert_execute_calls_post_with_owner_session(self):
@@ -2630,6 +3123,7 @@ class TestCoreEndpoints(unittest.TestCase):
                 "cell_type": "code",
                 "at_index": -1,
                 "owner_session_id": "sess-1",
+                "wait": False,
             },
         )
 
@@ -2943,6 +3437,41 @@ class TestParser(unittest.TestCase):
         args = build_parser().parse_args(["open", "nb.ipynb", "--target", "browser"])
         self.assertEqual(args.target, "browser")
 
+    def test_mcp_setup(self):
+        args = build_parser().parse_args(["mcp", "setup"])
+        self.assertEqual(args.command, "mcp")
+        self.assertEqual(args.mcp_command, "setup")
+
+    def test_mcp_config(self):
+        args = build_parser().parse_args(["mcp", "config", "--server-name", "analysis-repl"])
+        self.assertEqual(args.command, "mcp")
+        self.assertEqual(args.mcp_command, "config")
+        self.assertEqual(args.server_name, "analysis-repl")
+
+    def test_mcp_smoke_test(self):
+        args = build_parser().parse_args(["mcp", "smoke-test"])
+        self.assertEqual(args.command, "mcp")
+        self.assertEqual(args.mcp_command, "smoke-test")
+
+    def test_setup(self):
+        args = build_parser().parse_args(["setup", "--with-mcp", "--configure-editor-default", "--smoke-test"])
+        self.assertEqual(args.command, "setup")
+        self.assertTrue(args.with_mcp)
+        self.assertTrue(args.configure_editor_default)
+        self.assertTrue(args.smoke_test)
+
+    def test_doctor(self):
+        args = build_parser().parse_args(["doctor", "--probe-mcp", "--smoke-test"])
+        self.assertEqual(args.command, "doctor")
+        self.assertTrue(args.probe_mcp)
+        self.assertTrue(args.smoke_test)
+
+    def test_editor_configure(self):
+        args = build_parser().parse_args(["editor", "configure", "--default-canvas"])
+        self.assertEqual(args.command, "editor")
+        self.assertEqual(args.editor_command, "configure")
+        self.assertTrue(args.default_canvas)
+
     def test_reload(self):
         args = build_parser().parse_args(["reload"])
         self.assertEqual(args.command, "reload")
@@ -2976,6 +3505,11 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.core_command, "session-start")
         self.assertEqual(args.actor, "agent")
         self.assertEqual(args.client_type, "cli")
+
+    def test_core_session_resolve(self):
+        args = build_parser().parse_args(["core", "session-resolve", "--actor", "human"])
+        self.assertEqual(args.core_command, "session-resolve")
+        self.assertEqual(args.actor, "human")
 
     def test_core_session_touch(self):
         args = build_parser().parse_args(["core", "session-touch", "--session-id", "sess-1"])
@@ -3093,12 +3627,26 @@ class TestCommands(unittest.TestCase):
         try:
             with (
                 mock.patch("agent_repl.cli._client", return_value=mock_client),
-                mock.patch("agent_repl.cli._notebook_client", return_value=mock_client),
+                mock.patch("agent_repl.cli._notebook_client", return_value=self._mock_notebook_runtime_client(mock_client)),
             ):
                 code = main(argv)
         finally:
             sys.stdout = old
         return code, buf.getvalue()
+
+    def _mock_notebook_runtime_client(self, bridge_client: BridgeClient):
+        runtime = mock.Mock()
+        runtime.notebook_contents = bridge_client.contents
+        runtime.notebook_status = bridge_client.status
+        runtime.notebook_insert_execute = bridge_client.insert_and_execute
+        runtime.notebook_execute_cell = bridge_client.execute_cell
+        runtime.notebook_execute_all = bridge_client.execute_all
+        runtime.notebook_restart = bridge_client.restart_kernel
+        runtime.notebook_restart_and_run_all = bridge_client.restart_and_run_all
+        runtime.notebook_create = bridge_client.create
+        runtime.notebook_edit = bridge_client.edit
+        runtime.notebook_select_kernel = bridge_client.select_kernel
+        return runtime
 
     def _mock_client(self, **overrides):
         client = mock.MagicMock(spec=BridgeClient)
@@ -3134,6 +3682,7 @@ class TestCommands(unittest.TestCase):
         client.shutdown.return_value = {"status": "ok", "stopping": True}
         client.list_sessions.return_value = {"status": "ok", "sessions": []}
         client.start_session.return_value = {"status": "ok", "session": {"session_id": "sess-1"}}
+        client.resolve_preferred_session.return_value = {"status": "ok", "session": None}
         client.touch_session.return_value = {"status": "ok", "session": {"session_id": "sess-1", "status": "attached"}}
         client.detach_session.return_value = {"status": "ok", "session": {"session_id": "sess-1", "status": "detached"}}
         client.session_presence_upsert.return_value = {"status": "ok", "presence": {"session_id": "sess-1", "activity": "observing"}}
@@ -3253,7 +3802,14 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1"], client)
         self.assertEqual(code, 0)
-        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30)
+        client.insert_and_execute.assert_called_once_with(
+            "nb.ipynb",
+            "x=1",
+            at_index=-1,
+            cell_type="code",
+            wait=True,
+            timeout=30,
+        )
 
     def test_ix_prefers_core_execution_surface(self):
         bridge = self._mock_client()
@@ -3274,6 +3830,7 @@ class TestCommands(unittest.TestCase):
             "nb.ipynb",
             "x=1",
             at_index=-1,
+            cell_type="code",
             wait=True,
             timeout=30,
             owner_session_id="sess-1",
@@ -3300,6 +3857,7 @@ class TestCommands(unittest.TestCase):
             "nb.ipynb",
             "x=1",
             at_index=-1,
+            cell_type="code",
             wait=True,
             timeout=30,
             owner_session_id="sess-1",
@@ -3310,7 +3868,14 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["ix", "nb.ipynb", "-s", "x=1", "--no-wait"], client)
         self.assertEqual(code, 0)
-        client.insert_and_execute.assert_called_once_with("nb.ipynb", "x=1", at_index=-1, wait=False, timeout=30)
+        client.insert_and_execute.assert_called_once_with(
+            "nb.ipynb",
+            "x=1",
+            at_index=-1,
+            cell_type="code",
+            wait=False,
+            timeout=30,
+        )
 
     def test_ix_batch_uses_bridge_surface_sequentially(self):
         client = self._mock_client()
@@ -3333,8 +3898,8 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(
             client.insert_and_execute.call_args_list,
             [
-                mock.call("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30),
-                mock.call("nb.ipynb", "x+1", at_index=-1, wait=True, timeout=30),
+                mock.call("nb.ipynb", "x=1", at_index=-1, cell_type="code", wait=True, timeout=30),
+                mock.call("nb.ipynb", "x+1", at_index=-1, cell_type="code", wait=True, timeout=30),
             ],
         )
         payload = json.loads(out)
@@ -3376,8 +3941,8 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(
             core.notebook_insert_execute.call_args_list,
             [
-                mock.call("nb.ipynb", "x=1", at_index=-1, wait=True, timeout=30, owner_session_id="sess-1"),
-                mock.call("nb.ipynb", "x+1", at_index=-1, wait=True, timeout=30, owner_session_id="sess-1"),
+                mock.call("nb.ipynb", "x=1", at_index=-1, cell_type="code", wait=True, timeout=30, owner_session_id="sess-1"),
+                mock.call("nb.ipynb", "x+1", at_index=-1, cell_type="code", wait=True, timeout=30, owner_session_id="sess-1"),
             ],
         )
         bridge.insert_and_execute.assert_not_called()
@@ -3407,7 +3972,12 @@ class TestCommands(unittest.TestCase):
         client = self._mock_client()
         code, _ = self._run(["exec", "nb.ipynb", "--cell-id", "abc"], client)
         self.assertEqual(code, 0)
-        client.execute_cell.assert_called_once_with("nb.ipynb", cell_id="abc", wait=True, timeout=30)
+        client.execute_cell.assert_called_once_with(
+            "nb.ipynb",
+            cell_id="abc",
+            wait=True,
+            timeout=30,
+        )
 
     def test_exec_prefers_core_execution_surface(self):
         bridge = self._mock_client()
@@ -3431,6 +4001,7 @@ class TestCommands(unittest.TestCase):
             timeout=30,
             owner_session_id="sess-1",
         )
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.execute_cell.assert_not_called()
 
@@ -3460,28 +4031,17 @@ class TestCommands(unittest.TestCase):
 
     def test_exec_reuses_preferred_human_session_when_session_id_is_omitted(self):
         bridge = self._mock_client()
-        core = self._mock_core_client(list_sessions={
+        core = self._mock_core_client(resolve_preferred_session={
             "status": "ok",
-            "sessions": [
-                {
-                    "session_id": "sess-browser",
-                    "actor": "human",
-                    "client": "browser",
-                    "status": "attached",
-                    "capabilities": ["projection", "presence"],
-                    "last_seen_at": 10,
-                    "created_at": 1,
-                },
-                {
-                    "session_id": "sess-vscode",
-                    "actor": "human",
-                    "client": "vscode",
-                    "status": "attached",
-                    "capabilities": ["projection", "editor", "presence"],
-                    "last_seen_at": 9,
-                    "created_at": 2,
-                },
-            ],
+            "session": {
+                "session_id": "sess-vscode",
+                "actor": "human",
+                "client": "vscode",
+                "status": "attached",
+                "capabilities": ["projection", "editor", "presence"],
+                "last_seen_at": 9,
+                "created_at": 2,
+            },
         })
         buf = StringIO()
         old = sys.stdout
@@ -3508,7 +4068,7 @@ class TestCommands(unittest.TestCase):
     def test_exec_starts_human_cli_session_when_no_reusable_session_exists(self):
         bridge = self._mock_client()
         core = self._mock_core_client(
-            list_sessions={"status": "ok", "sessions": []},
+            resolve_preferred_session={"status": "ok", "session": None},
             start_session={"status": "ok", "session": {"session_id": "sess-cli"}},
         )
         buf = StringIO()
@@ -3524,6 +4084,7 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.notebook_execute_cell.assert_called_once_with(
             "nb.ipynb",
             cell_id="abc",
@@ -3680,6 +4241,7 @@ class TestCommands(unittest.TestCase):
             [{"op": "replace-source", "source": "x=2", "cell_id": "abc"}],
             owner_session_id="sess-1",
         )
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.edit.assert_not_called()
 
@@ -3714,6 +4276,7 @@ class TestCommands(unittest.TestCase):
             ],
             owner_session_id="sess-1",
         )
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.edit.assert_not_called()
 
@@ -3733,24 +4296,23 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         core.notebook_execute_all.assert_called_once_with("nb.ipynb", owner_session_id="sess-1")
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.execute_all.assert_not_called()
 
     def test_run_all_reuses_preferred_human_session(self):
         bridge = self._mock_client()
-        core = self._mock_core_client(list_sessions={
+        core = self._mock_core_client(resolve_preferred_session={
             "status": "ok",
-            "sessions": [
-                {
-                    "session_id": "sess-vscode",
-                    "actor": "human",
-                    "client": "vscode",
-                    "status": "attached",
-                    "capabilities": ["projection", "editor", "presence"],
-                    "last_seen_at": 42,
-                    "created_at": 24,
-                },
-            ],
+            "session": {
+                "session_id": "sess-vscode",
+                "actor": "human",
+                "client": "vscode",
+                "status": "attached",
+                "capabilities": ["projection", "editor", "presence"],
+                "last_seen_at": 42,
+                "created_at": 24,
+            },
         })
         buf = StringIO()
         old = sys.stdout
@@ -3802,24 +4364,23 @@ class TestCommands(unittest.TestCase):
             sys.stdout = old
         self.assertEqual(code, 0)
         core.notebook_restart_and_run_all.assert_called_once_with("nb.ipynb", owner_session_id="sess-1")
+        core.resolve_preferred_session.assert_called_once_with(actor="human")
         core.start_session.assert_called_once_with(actor="human", client="cli", label="CLI")
         bridge.restart_and_run_all.assert_not_called()
 
     def test_restart_run_all_reuses_preferred_human_session(self):
         bridge = self._mock_client()
-        core = self._mock_core_client(list_sessions={
+        core = self._mock_core_client(resolve_preferred_session={
             "status": "ok",
-            "sessions": [
-                {
-                    "session_id": "sess-browser",
-                    "actor": "human",
-                    "client": "browser",
-                    "status": "stale",
-                    "capabilities": ["projection", "presence"],
-                    "last_seen_at": 42,
-                    "created_at": 24,
-                },
-            ],
+            "session": {
+                "session_id": "sess-browser",
+                "actor": "human",
+                "client": "browser",
+                "status": "stale",
+                "capabilities": ["projection", "presence"],
+                "last_seen_at": 42,
+                "created_at": 24,
+            },
         })
         buf = StringIO()
         old = sys.stdout
@@ -3866,18 +4427,6 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         core.notebook_select_kernel.assert_called_once_with("nb.ipynb", kernel_id="python3")
         bridge.select_kernel.assert_not_called()
-
-    def test_select_kernel_falls_back_to_bridge_when_no_core(self):
-        client = self._mock_client()
-        code, _ = self._run(["select-kernel", "nb.ipynb"], client)
-        self.assertEqual(code, 0)
-        # BridgeClient doesn't have notebook_select_kernel, so falls through to bridge
-        client.select_kernel.assert_called_once_with(
-            "nb.ipynb",
-            kernel_id=None,
-            extension="ms-toolsai.jupyter",
-            interactive=False,
-        )
 
     def test_select_kernel_interactive_flag(self):
         client = self._mock_client()
@@ -3993,6 +4542,22 @@ class TestCommands(unittest.TestCase):
             capabilities=None,
             session_id=None,
         )
+
+    def test_core_session_resolve(self):
+        client = self._mock_core_client(resolve_preferred_session={
+            "status": "ok",
+            "session": {"session_id": "sess-vscode"},
+        })
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli._core_client", return_value=client):
+                code = main(["core", "session-resolve", "--actor", "human"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        client.resolve_preferred_session.assert_called_once_with(actor="human")
 
     def test_core_session_touch(self):
         client = self._mock_core_client()
@@ -4533,6 +5098,152 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(code, 0)
         client.finish_run.assert_called_once_with("run-1", status="completed")
 
+    def test_mcp_setup_returns_canonical_connection_details(self):
+        discovered = self._mock_core_client()
+        discovered.base_url = "http://127.0.0.1:4312"
+        discovered.token = "secret-token"
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch(
+                    "agent_repl.cli.CoreClient.start",
+                    return_value={"status": "ok", "workspace_root": "/workspace", "already_running": False},
+                ) as mock_start,
+                mock.patch("agent_repl.cli.CoreClient.discover", return_value=discovered),
+            ):
+                code = main(["mcp", "setup", "--workspace-root", "/workspace"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        mock_start.assert_called_once_with("/workspace", runtime_dir=None)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["mcp"]["url"], "http://127.0.0.1:4312/mcp")
+        self.assertEqual(payload["mcp"]["legacy_url"], "http://127.0.0.1:4312/mcp/mcp")
+        self.assertEqual(
+            payload["config"]["mcpServers"]["agent-repl"]["headers"]["Authorization"],
+            "token secret-token",
+        )
+
+    def test_mcp_config_prints_standard_mcp_servers_block(self):
+        discovered = self._mock_core_client()
+        discovered.base_url = "http://127.0.0.1:4312"
+        discovered.token = "secret-token"
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch(
+                    "agent_repl.cli.CoreClient.start",
+                    return_value={"status": "ok", "workspace_root": os.getcwd(), "already_running": True},
+                ),
+                mock.patch("agent_repl.cli.CoreClient.discover", return_value=discovered),
+            ):
+                code = main(["mcp", "config", "--server-name", "analysis-repl"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(list(payload["mcpServers"].keys()), ["analysis-repl"])
+        self.assertEqual(payload["mcpServers"]["analysis-repl"]["url"], "http://127.0.0.1:4312/mcp")
+
+    def test_mcp_smoke_test_runs_reported_checks(self):
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch(
+                "agent_repl.cli._mcp_smoke_test_payload",
+                return_value={
+                    "status": "ok",
+                    "mcp": {"url": "http://127.0.0.1:4312/mcp"},
+                    "checks": [
+                        {"name": "core-status", "status": "ok"},
+                        {"name": "list-tools", "status": "ok", "tool_count": 42},
+                    ],
+                },
+            ) as mock_smoke:
+                code = main(["mcp", "smoke-test"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        mock_smoke.assert_called_once()
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["checks"][1]["tool_count"], 42)
+
+    def test_doctor_reports_workspace_canvas_status_and_recommendations(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with mock.patch("agent_repl.cli.shutil.which", side_effect=lambda name: "/usr/bin/code" if name == "code" else None):
+                code = main(["doctor", "--workspace-root", str(workspace_root)])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["workspace_root"], os.path.realpath(str(workspace_root)))
+        self.assertFalse(payload["editor"]["workspace"]["default_canvas_configured"])
+        self.assertTrue(
+            any("agent-repl editor configure --default-canvas" in item for item in payload["recommendations"])
+        )
+
+    def test_editor_configure_sets_workspace_default_canvas(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        settings_path = workspace_root / ".vscode" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({"python.defaultInterpreterPath": ".venv/bin/python"}), encoding="utf-8")
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            code = main(["editor", "configure", "--workspace-root", str(workspace_root), "--default-canvas"])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["association"], "agent-repl.canvasEditor")
+        updated = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertEqual(updated["workbench.editorAssociations"]["*.ipynb"], "agent-repl.canvasEditor")
+        self.assertEqual(updated["python.defaultInterpreterPath"], ".venv/bin/python")
+
+    def test_setup_can_configure_editor_and_include_public_mcp_surface(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        workspace_root = Path(tmpdir.name)
+        buf = StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with (
+                mock.patch("agent_repl.cli._mcp_connection_payload", return_value={"status": "ok", "mcp": {"url": "http://127.0.0.1:4312/mcp"}}),
+                mock.patch("agent_repl.cli._mcp_smoke_test_payload", return_value={"status": "ok", "checks": [{"name": "list-tools", "status": "ok"}]}),
+            ):
+                code = main([
+                    "setup",
+                    "--workspace-root",
+                    str(workspace_root),
+                    "--configure-editor-default",
+                    "--with-mcp",
+                ])
+        finally:
+            sys.stdout = old
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["actions"][0]["name"], "editor-configure")
+        self.assertEqual(payload["actions"][1]["name"], "mcp-setup")
+        self.assertEqual(payload["actions"][2]["name"], "mcp-smoke-test")
+        self.assertTrue(payload["doctor"]["editor"]["workspace"]["default_canvas_configured"])
+        updated = json.loads((workspace_root / ".vscode" / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(updated["workbench.editorAssociations"]["*.ipynb"], "agent-repl.canvasEditor")
+
 
 class TestVersionSurface(unittest.TestCase):
     def test_cli_exposes_version_flag(self):
@@ -4598,19 +5309,35 @@ class TestDocsSurface(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         install = (root / "docs" / "installation.md").read_text()
         self.assertIn("uv tool install . --reinstall", install)
+        self.assertIn("agent-repl setup --smoke-test", install)
+        self.assertIn("agent-repl mcp setup", install)
+        self.assertIn("agent-repl editor configure --default-canvas", install)
         self.assertIn("npx --yes @vscode/vsce package", install)
         self.assertNotIn("make install-dev", install)
         self.assertNotIn("make install-ext", install)
         self.assertNotIn("make verify-install", install)
 
-    def test_command_reference_warns_about_closed_notebook_fallback_ids(self):
+    def test_command_reference_describes_live_cell_ids_and_session_reuse(self):
         root = Path(__file__).resolve().parents[1]
         commands = (root / "docs" / "commands.md").read_text()
-        self.assertIn("index-1", commands)
-        self.assertIn("fire-and-forget behavior", commands)
+        self.assertIn("live `cell_id` values", commands)
+        self.assertIn("agent-repl setup", commands)
+        self.assertIn("agent-repl doctor", commands)
+        self.assertIn("agent-repl editor configure --default-canvas", commands)
+        self.assertIn("`agent-repl mcp setup`", commands)
+        self.assertIn("`--session-id` overrides the default session reuse", commands)
         self.assertIn("agent-repl reload --pretty", commands)
+        self.assertNotIn("index-1", commands)
+        self.assertNotIn("fire-and-forget behavior", commands)
         self.assertNotIn("## v2", commands)
         self.assertNotIn("agent-repl v2", commands)
+
+    def test_readme_and_docs_summary_link_to_mcp_guide(self):
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / "README.md").read_text()
+        summary = (root / "docs" / "SUMMARY.md").read_text()
+        self.assertIn("[MCP](", readme)
+        self.assertIn("[MCP](", summary)
 
     def test_public_docs_lock_in_workspace_venv_as_default_kernel(self):
         root = Path(__file__).resolve().parents[1]
@@ -4623,6 +5350,93 @@ class TestDocsSurface(unittest.TestCase):
 
 
 class TestServerRobustness(unittest.TestCase):
+    def test_asgi_execute_cell_keeps_activity_polling_live_while_running(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        workspace_root = Path(tmpdir.name)
+        runtime_dir = workspace_root / "runtime"
+        runtime_dir.mkdir()
+        state = CoreState(
+            workspace_root=str(workspace_root),
+            runtime_dir=str(runtime_dir),
+            token="tok",
+            pid=1234,
+            started_at=1.0,
+        )
+
+        notebook_path = "notebooks/live-http-stream.ipynb"
+        source = "import time\nprint('start', flush=True)\ntime.sleep(0.4)\nprint('done', flush=True)"
+
+        with mock.patch.object(state, "_projection_client", return_value=None):
+            create_body, create_status = state.notebook_create(
+                notebook_path,
+                cells=[{"type": "code", "source": source}],
+                kernel_id=_python_with_ipykernel(),
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+        state.start_session("agent", "cli", "worker", "sess-agent", ["projection", "ops", "automation"])
+
+        import uvicorn
+        from agent_repl.core.asgi import create_app
+
+        app = create_app(state)
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            log_level="error",
+            ws="none",
+        )
+        uv_server = uvicorn.Server(config)
+        thread = threading.Thread(target=uv_server.run, daemon=True)
+        thread.start()
+        for _ in range(50):
+            if uv_server.started:
+                break
+            time.sleep(0.05)
+
+        def _stop_server() -> None:
+            uv_server.should_exit = True
+            thread.join(timeout=5)
+
+        self.addCleanup(_stop_server)
+
+        port = uv_server.servers[0].sockets[0].getsockname()[1]
+        client = CoreClient(f"http://127.0.0.1:{port}", "tok")
+        activity_before = client.notebook_activity(notebook_path)
+
+        result_holder: dict[str, Any] = {}
+
+        def run_execution() -> None:
+            result_holder["body"] = client.notebook_execute_cell(
+                notebook_path,
+                cell_index=0,
+                wait=False,
+                owner_session_id="sess-agent",
+            )
+
+        execution_thread = threading.Thread(target=run_execution, daemon=True)
+        execution_thread.start()
+
+        stream_event: dict[str, Any] | None = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            body = client.notebook_activity(notebook_path, since=activity_before["cursor"])
+            stream_event = next((event for event in body["recent_events"] if event["type"] == "cell-output-appended"), None)
+            if stream_event is not None:
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(stream_event)
+        execution_thread.join(timeout=2)
+        self.assertFalse(execution_thread.is_alive(), "wait=False should return once the execution is queued")
+        self.assertEqual(result_holder["body"]["status"], "started")
+        self.assertEqual(stream_event["data"]["output"]["output_type"], "stream")
+        self.assertIn("start", stream_event["data"]["output"]["text"])
+
     def test_server_returns_json_error_when_run_finish_handler_raises(self):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -4643,17 +5457,33 @@ class TestServerRobustness(unittest.TestCase):
 
         state.finish_run = boom  # type: ignore[method-assign]
 
-        from http.server import ThreadingHTTPServer
         import threading
+        import uvicorn
+        from agent_repl.core.asgi import create_app
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_factory(state))
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        app = create_app(state)
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            log_level="error",
+            ws="none",
+        )
+        uv_server = uvicorn.Server(config)
+        thread = threading.Thread(target=uv_server.run, daemon=True)
         thread.start()
-        self.addCleanup(thread.join, 2)
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
+        # Wait for the server to start
+        import time
+        for _ in range(50):
+            if uv_server.started:
+                break
+            time.sleep(0.05)
+        def _stop_server() -> None:
+            uv_server.should_exit = True
+            thread.join(timeout=5)
+        self.addCleanup(_stop_server)
 
-        port = server.server_address[1]
+        port = uv_server.servers[0].sockets[0].getsockname()[1]
         client = CoreClient(f"http://127.0.0.1:{port}", "tok")
 
         with self.assertRaisesRegex(RuntimeError, "boom for run-1:completed"):

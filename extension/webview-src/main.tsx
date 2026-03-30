@@ -11,6 +11,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import {
   Theme,
@@ -37,8 +38,17 @@ import { PageFeedbackToolbarCSS } from 'agentation';
 import { CodeMirrorCell, CodeMirrorCellHandle } from './codemirror-cell';
 import { createStandaloneHost, readStandaloneConfig } from './standalone-host';
 import { deriveCellStatusKind, type CellStatusKind } from '../src/shared/cellStatus';
-import { resolveIdleExecutionTransition } from '../src/shared/executionState';
+import {
+  primeBulkExecutionBuckets,
+  queueExecutionBuckets,
+  reduceCommandExecution,
+  reduceActivityAndRuntimeExecution,
+  reduceRuntimeExecution,
+  startExecutionBuckets,
+} from '../src/shared/executionState';
+import { normalizeMarkdownSource } from '../src/shared/markdown';
 import { decideNotebookCommandKeyAction } from '../src/shared/notebookCommandController';
+import type { RecoveryAdvice } from '../src/shared/recovery';
 import '@carbon/styles/css/styles.css';
 import './styles.css';
 
@@ -70,6 +80,48 @@ type NotebookCell = {
   execution_count?: number | null;
   index?: number;
   metadata?: Record<string, any>;
+};
+
+type NotebookStructureEditOperation =
+  | {
+    op: 'insert';
+    at_index: number;
+    cell_type: 'code' | 'markdown';
+    source: string;
+    cell_id?: string;
+    metadata?: Record<string, any>;
+    outputs?: NotebookOutput[];
+    execution_count?: number | null;
+  }
+  | {
+    op: 'delete';
+    cell_id: string;
+  }
+  | {
+    op: 'move';
+    cell_id: string;
+    to_index: number;
+  }
+  | {
+    op: 'change-cell-type';
+    cell_id: string;
+    cell_type: 'code' | 'markdown';
+    source?: string;
+  };
+
+type NotebookUndoEntry = {
+  inverseOperations: NotebookStructureEditOperation[];
+  restoreFocusedCellId: string | null;
+  restoreSelectedCellIds: string[];
+};
+
+type PendingNotebookUndo = {
+  kind: 'record' | 'undo';
+  finalize?: (nextCells: NotebookCell[]) => NotebookUndoEntry | null;
+  restore?: {
+    focusedCellId: string | null;
+    selectedCellIds: string[];
+  };
 };
 
 type DraftChange = {
@@ -106,6 +158,8 @@ type RuntimeInfo = {
   runtime_id?: string;
   kernel_generation?: number | null;
   current_execution?: Record<string, unknown> | null;
+  running_cell_ids?: string[];
+  queued_cell_ids?: string[];
 };
 
 type CellDiagnostic = {
@@ -136,6 +190,12 @@ type LspCompletionItem = {
 type CompletionRequestOptions = {
   explicit?: boolean;
   triggerCharacter?: string;
+};
+
+type DefinitionNavigationTarget = {
+  cell_id: string;
+  from: number;
+  to: number;
 };
 
 type HostMessage = {
@@ -171,6 +231,7 @@ const CODE_TOP_PADDING = 10;
 const CONTROLS_TOP_PADDING = 8;
 const MARKDOWN_LEFT_PADDING = 8;
 const CELL_GUTTER_WIDTH = 40;
+const NOTEBOOK_UNDO_STACK_LIMIT = 100;
 const THEME_MODE_STORAGE_KEY = 'agent-repl.theme-mode';
 const EXPLORER_COLLAPSED_STORAGE_KEY = 'agent-repl.explorer-collapsed';
 
@@ -327,6 +388,24 @@ function cellMatchesCurrentRuntime(cell: NotebookCell | null | undefined, runtim
 function currentExecutionCellId(runtime: RuntimeInfo): string | null {
   const cellId = runtime.current_execution?.cell_id;
   return typeof cellId === 'string' && cellId ? cellId : null;
+}
+
+function activeElementIsNotebookEditor(target: Element | null): boolean {
+  return Boolean(target?.closest('.cm-editor, .cm-content, .cm-line, textarea'));
+}
+
+function runtimeCellIds(runtime: RuntimeInfo, kind: 'running' | 'queued'): string[] {
+  const raw = kind === 'running' ? runtime.running_cell_ids : runtime.queued_cell_ids;
+  const cellIds = Array.isArray(raw)
+    ? raw.filter((cellId): cellId is string => typeof cellId === 'string' && cellId.length > 0)
+    : [];
+  if (kind === 'running') {
+    const currentCellId = currentExecutionCellId(runtime);
+    if (currentCellId && !cellIds.includes(currentCellId)) {
+      return [currentCellId, ...cellIds];
+    }
+  }
+  return cellIds;
 }
 
 function withCellRuntimeProvenance(
@@ -975,13 +1054,20 @@ function createPreviewHost(): HostApi {
             if (op.op === 'insert') {
               const atIndex = typeof op.at_index === 'number' ? op.at_index : cells.length;
               const cellType = op.cell_type === 'markdown' ? 'markdown' : 'code';
-              const cellId = `preview-${cellType}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              const cellId = typeof op.cell_id === 'string' && op.cell_id
+                ? op.cell_id
+                : `preview-${cellType}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
               cells.splice(Math.max(0, Math.min(atIndex, cells.length)), 0, {
                 cell_id: cellId,
                 cell_type: cellType,
                 source: typeof op.source === 'string' ? op.source : '',
-                outputs: [],
-                execution_count: null,
+                outputs: Array.isArray(op.outputs) ? op.outputs as NotebookOutput[] : [],
+                execution_count: typeof op.execution_count === 'number' || op.execution_count === null
+                  ? op.execution_count as number | null
+                  : null,
+                metadata: typeof op.metadata === 'object' && op.metadata
+                  ? op.metadata as Record<string, any>
+                  : undefined,
               });
             } else if (op.op === 'delete') {
               const index = findCellIndex(typeof op.cell_id === 'string' ? op.cell_id : undefined);
@@ -1022,7 +1108,7 @@ function createPreviewHost(): HostApi {
             }
           }
           dispatch({ type: 'ok', requestId });
-          sendContents();
+          sendContents(requestId);
           break;
         }
         case 'execute-cell': {
@@ -1240,8 +1326,8 @@ function joinOutputCopyText(parts: string[]): string | null {
   return combined || null;
 }
 
-function renderMarkdown(source: string) {
-  return DOMPurify.sanitize(marked.parse(source) as string);
+function renderMarkdown(source: unknown) {
+  return DOMPurify.sanitize(marked.parse(normalizeMarkdownSource(source)) as string);
 }
 
 function renderRichHtml(html: string) {
@@ -1481,6 +1567,8 @@ type CellCardProps = {
   index: number;
   source: string;
   isSelected: boolean;
+  notebookMode: 'command' | 'edit';
+  submittedExecutionStatus: 'queued' | 'running' | null;
   isQueued: boolean;
   isExecuting: boolean;
   hasFailedExecution: boolean;
@@ -1502,6 +1590,7 @@ type CellCardProps = {
     offset: number,
     options?: CompletionRequestOptions,
   ) => Promise<LspCompletionItem[]>;
+  requestDefinition: (source: string, offset: number) => void;
   onEditorKeyDown: (event: React.KeyboardEvent<HTMLTextAreaElement>, cell: NotebookCell, index: number) => void;
   onRunCell: (index: number) => void;
   onRunCellAndAdvance: (index: number | string) => void;
@@ -1527,6 +1616,8 @@ function CellCard({
   index,
   source,
   isSelected,
+  notebookMode,
+  submittedExecutionStatus,
   isQueued,
   isExecuting,
   hasFailedExecution,
@@ -1538,6 +1629,7 @@ function CellCard({
   onBlurCell,
   onSourceChange,
   requestCompletions,
+  requestDefinition,
   onEditorKeyDown,
   onRunCell,
   onRunCellAndAdvance,
@@ -1580,24 +1672,31 @@ function CellCard({
     cell.execution_count != null && (cell.outputs?.length ?? 0) > 0;
   const matchesCurrentRuntime = cellMatchesCurrentRuntime(cell, runtimeStatus);
   const runtimeProvenance = getCellRuntimeProvenance(cell);
+  const hasSubmittedExecution = submittedExecutionStatus != null;
+  const optimisticQueued = isQueued || submittedExecutionStatus === 'queued';
+  const optimisticExecuting = isExecuting || submittedExecutionStatus === 'running';
   const statusKind: CellStatusKind = deriveCellStatusKind({
-    isQueued,
-    isExecuting,
+    isQueued: optimisticQueued,
+    isExecuting: optimisticExecuting,
     isPaused: hasPausedExecution,
-    hasLocalFailure: hasFailedExecution,
-    hasCompletedThisSession: completedTime != null,
+    hasLocalFailure: !hasSubmittedExecution && hasFailedExecution,
+    hasCompletedThisSession: !hasSubmittedExecution && completedTime != null,
     hasLiveRuntimeContext: showRuntimeStatus,
-    hasRuntimeMatchedFailure: matchesCurrentRuntime && runtimeProvenance?.status === 'error',
-    hasRuntimeMatchedCompletion: matchesCurrentRuntime && hasPersistedExecutionResult && runtimeProvenance?.status === 'ok',
+    hasRuntimeMatchedFailure: !hasSubmittedExecution && matchesCurrentRuntime && runtimeProvenance?.status === 'error',
+    hasRuntimeMatchedCompletion: !hasSubmittedExecution && matchesCurrentRuntime && hasPersistedExecutionResult && runtimeProvenance?.status === 'ok',
   });
   const shouldKeepEditorFocus = useCallback((target: EventTarget | null) => {
     if (!(target instanceof HTMLElement)) {
       return false;
     }
+    const insideEditor = activeElementIsNotebookEditor(target);
+    if (insideEditor) {
+      return !isExecuting && !isQueued && isSelected && notebookMode === 'edit';
+    }
     return Boolean(target.closest(
-      '.cm-editor, .cm-content, .cm-line, textarea, button, select, input, a[href], [contenteditable="true"]',
+      'button, select, input, a[href], [contenteditable="true"]',
     ));
-  }, []);
+  }, [isExecuting, isQueued, isSelected, notebookMode]);
 
   useEffect(() => {
     if (!isExecuting) return;
@@ -1805,7 +1904,12 @@ function CellCard({
           diagnostics={diagnostics}
           onSourceChange={(value) => onSourceChange(cell.cell_id, value)}
           requestCompletions={requestCompletions}
-          onFocus={() => onFocusCell(index, 'edit')}
+          requestDefinition={requestDefinition}
+          onFocus={() => {
+            if (!isExecuting && !isQueued) {
+              onFocusCell(index, 'edit');
+            }
+          }}
           onBlur={(value) => onBlurCell(cell, value, index)}
           onRunCell={() => onRunCellAndAdvance(cell.cell_id)}
           onEscape={() => onBlurCell(cell, source, index, false, true)}
@@ -2076,6 +2180,8 @@ const MemoCellCard = memo(CellCard, (prev, next) => (
   prev.index === next.index &&
   prev.source === next.source &&
   prev.isSelected === next.isSelected &&
+  prev.submittedExecutionStatus === next.submittedExecutionStatus &&
+  prev.notebookMode === next.notebookMode &&
   prev.isQueued === next.isQueued &&
   prev.isExecuting === next.isExecuting &&
   prev.hasFailedExecution === next.hasFailedExecution &&
@@ -2106,6 +2212,7 @@ function App() {
   const [executingIds, setExecutingIds] = useState<string[]>([]);
   const [failedCellIds, setFailedCellIds] = useState<string[]>([]);
   const [pausedCellIds, setPausedCellIds] = useState<string[]>([]);
+  const [submittedExecutionStatuses, setSubmittedExecutionStatuses] = useState<Record<string, 'queued' | 'running'>>({});
   const executionStartRef = useRef(new Map<string, number>());
   const [completedTimes, setCompletedTimes] = useState<Record<string, number>>({});
   const [kernels, setKernels] = useState<Kernel[]>([]);
@@ -2116,6 +2223,7 @@ function App() {
   const [showLoadingPlaceholder, setShowLoadingPlaceholder] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorIsConflict, setErrorIsConflict] = useState(false);
+  const [errorRecovery, setErrorRecovery] = useState<RecoveryAdvice | null>(null);
   const [diagnosticsByCell, setDiagnosticsByCell] = useState<Record<string, CellDiagnostic[]>>({});
   const [lspStatus, setLspStatus] = useState<LspStatus | null>(null);
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceTreeNode | null>(null);
@@ -2200,6 +2308,12 @@ function App() {
   const lastDPressRef = useRef(0);
   const pendingCellActivationRef = useRef<{ index: number; mode: 'command' | 'edit' } | null>(null);
   const pendingAdvanceRef = useRef<{ cellId: string; awaitingInsert: boolean } | null>(null);
+  const notebookUndoStackRef = useRef<NotebookUndoEntry[]>([]);
+  const pendingNotebookUndoRef = useRef(new Map<string, PendingNotebookUndo>());
+  const pendingSelectionRestoreRef = useRef<{
+    focusedCellId: string | null;
+    selectedCellIds: string[];
+  } | null>(null);
   const completionRequestsRef = useRef(new Map<string, {
     resolve: (items: LspCompletionItem[]) => void;
     reject: (reason?: unknown) => void;
@@ -2246,6 +2360,58 @@ function App() {
     };
   }, []);
 
+  const markExecutionSubmitted = useCallback((cellId: string, status: 'queued' | 'running') => {
+    if (!cellId) {
+      return;
+    }
+    setSubmittedExecutionStatuses((current) => {
+      if (current[cellId] === status) {
+        return current;
+      }
+      return {
+        ...current,
+        [cellId]: status,
+      };
+    });
+  }, []);
+
+  const markExecutionRunning = useCallback((cellIds: string[]) => {
+    if (cellIds.length === 0) {
+      return;
+    }
+    const nextCellIds = Array.from(new Set(cellIds));
+    setSubmittedExecutionStatuses((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const cellId of nextCellIds) {
+        if (!cellId || next[cellId] === 'running') {
+          continue;
+        }
+        next[cellId] = 'running';
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, []);
+
+  const clearSubmittedExecution = useCallback((cellIds: string[]) => {
+    if (cellIds.length === 0) {
+      return;
+    }
+    const submittedSet = new Set(cellIds);
+    setSubmittedExecutionStatuses((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const cellId of submittedSet) {
+        if (cellId in next) {
+          delete next[cellId];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, []);
+
   useEffect(() => {
     const element = toolbarContentRef.current;
     if (!element) {
@@ -2271,11 +2437,73 @@ function App() {
       const requestId = (message.requestId as string | undefined) ?? nextRequestId();
       setErrorMessage(null);
       setErrorIsConflict(false);
+      setErrorRecovery(null);
       send({ ...message, requestId });
       return requestId;
     },
     [send],
   );
+
+  const resetNotebookUndoHistory = useCallback(() => {
+    notebookUndoStackRef.current = [];
+    pendingNotebookUndoRef.current.clear();
+    pendingSelectionRestoreRef.current = null;
+  }, []);
+
+  const cloneCellForUndo = useCallback((cell: NotebookCell): NotebookCell => (
+    JSON.parse(JSON.stringify({
+      cell_id: cell.cell_id,
+      cell_type: cell.cell_type,
+      source: cell.source,
+      outputs: cell.outputs ?? [],
+      execution_count: cell.execution_count ?? null,
+      metadata: cell.metadata ?? {},
+    })) as NotebookCell
+  ), []);
+
+  const buildInsertUndoOperation = useCallback(
+    (cell: NotebookCell, atIndex: number): NotebookStructureEditOperation => ({
+      op: 'insert',
+      at_index: atIndex,
+      cell_type: cell.cell_type === 'markdown' ? 'markdown' : 'code',
+      cell_id: cell.cell_id,
+      source: cell.source,
+      metadata: JSON.parse(JSON.stringify(cell.metadata ?? {})),
+      outputs: JSON.parse(JSON.stringify(cell.outputs ?? [])),
+      execution_count: cell.execution_count ?? null,
+    }),
+    [],
+  );
+
+  const selectedCellIdsFromState = useCallback((state: {
+    cells: NotebookCell[];
+    focusedIndex: number;
+    selectedIndices: number[];
+  }): string[] => {
+    const indices = state.selectedIndices.length > 0
+      ? state.selectedIndices
+      : state.focusedIndex >= 0 && state.focusedIndex < state.cells.length
+        ? [state.focusedIndex]
+        : [];
+    return indices
+      .map((index) => state.cells[index]?.cell_id)
+      .filter((cellId): cellId is string => typeof cellId === 'string');
+  }, []);
+
+  const registerPendingNotebookUndo = useCallback((requestId: string, pending: PendingNotebookUndo) => {
+    pendingNotebookUndoRef.current.set(requestId, pending);
+  }, []);
+
+  const pushNotebookUndoEntry = useCallback((entry: NotebookUndoEntry | null) => {
+    if (!entry || entry.inverseOperations.length === 0) {
+      return;
+    }
+    const stack = notebookUndoStackRef.current;
+    stack.push(entry);
+    if (stack.length > NOTEBOOK_UNDO_STACK_LIMIT) {
+      stack.splice(0, stack.length - NOTEBOOK_UNDO_STACK_LIMIT);
+    }
+  }, []);
 
   const reconcileDrafts = useCallback((nextCells: NotebookCell[]) => {
     setDrafts((currentDrafts) => {
@@ -2304,6 +2532,18 @@ function App() {
 
   const trimExecutionStateToCells = useCallback((nextCells: NotebookCell[]) => {
     const nextIds = new Set(nextCells.map((cell) => cell.cell_id));
+    setSubmittedExecutionStatuses((current) => {
+      let changed = false;
+      const next: Record<string, 'queued' | 'running'> = {};
+      for (const [cellId, status] of Object.entries(current)) {
+        if (nextIds.has(cellId)) {
+          next[cellId] = status;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
     setQueuedIds((current) => current.filter((cellId) => nextIds.has(cellId)));
     setExecutingIds((current) => current.filter((cellId) => nextIds.has(cellId)));
     setFailedCellIds((current) => current.filter((cellId) => nextIds.has(cellId)));
@@ -2336,6 +2576,7 @@ function App() {
     setExecutingIds([]);
     setFailedCellIds([]);
     setPausedCellIds([]);
+    setSubmittedExecutionStatuses({});
     setCompletedTimes({});
   }, [updateExecutionStateRef]);
 
@@ -2345,20 +2586,12 @@ function App() {
     }
 
     const nextQueuedIds = Array.from(new Set(cellIds));
-    const queuedIds = Array.from(new Set([...stateRef.current.queuedIds, ...nextQueuedIds]));
-    const executingIds = stateRef.current.executingIds.filter((cellId) => !nextQueuedIds.includes(cellId));
-    const failedCellIds = stateRef.current.failedCellIds.filter((cellId) => !nextQueuedIds.includes(cellId));
-    const pausedCellIds = stateRef.current.pausedCellIds.filter((cellId) => !nextQueuedIds.includes(cellId));
-    updateExecutionStateRef({
-      queuedIds,
-      executingIds,
-      failedCellIds,
-      pausedCellIds,
-    });
-    setQueuedIds((current) => Array.from(new Set([...current, ...nextQueuedIds])));
-    setExecutingIds((current) => current.filter((cellId) => !nextQueuedIds.includes(cellId)));
-    setFailedCellIds((current) => current.filter((cellId) => !nextQueuedIds.includes(cellId)));
-    setPausedCellIds((current) => current.filter((cellId) => !nextQueuedIds.includes(cellId)));
+    const nextState = queueExecutionBuckets(stateRef.current, nextQueuedIds);
+    updateExecutionStateRef(nextState);
+    setQueuedIds(nextState.queuedIds);
+    setExecutingIds(nextState.executingIds);
+    setFailedCellIds(nextState.failedCellIds);
+    setPausedCellIds(nextState.pausedCellIds);
     setCompletedTimes((current) => {
       const nextTimes = { ...current };
       for (const cellId of nextQueuedIds) {
@@ -2369,6 +2602,38 @@ function App() {
     });
   }, [updateExecutionStateRef]);
 
+  const primeBulkExecution = useCallback((cellIds: string[]) => {
+    if (cellIds.length === 0) {
+      return;
+    }
+
+    const nextCellIds = Array.from(new Set(cellIds));
+    const startedAt = Date.now();
+    const nextState = primeBulkExecutionBuckets(stateRef.current, nextCellIds);
+    updateExecutionStateRef(nextState);
+    setQueuedIds(nextState.queuedIds);
+    setExecutingIds(nextState.executingIds);
+    setFailedCellIds(nextState.failedCellIds);
+    setPausedCellIds(nextState.pausedCellIds);
+    setCompletedTimes((current) => {
+      const nextTimes = { ...current };
+      for (const cellId of nextCellIds) {
+        delete nextTimes[cellId];
+      }
+      return nextTimes;
+    });
+    const [firstCellId] = nextCellIds;
+    if (firstCellId) {
+      executionStartRef.current.set(
+        firstCellId,
+        executionStartRef.current.get(firstCellId) ?? startedAt,
+      );
+    }
+    for (const cellId of nextCellIds.slice(1)) {
+      executionStartRef.current.delete(cellId);
+    }
+  }, [updateExecutionStateRef]);
+
   const startCellIds = useCallback((cellIds: string[]) => {
     if (cellIds.length === 0) {
       return;
@@ -2376,20 +2641,12 @@ function App() {
 
     const nextExecutingIds = Array.from(new Set(cellIds));
     const startedAt = Date.now();
-    const queuedIds = stateRef.current.queuedIds.filter((cellId) => !nextExecutingIds.includes(cellId));
-    const executingIds = Array.from(new Set([...stateRef.current.executingIds, ...nextExecutingIds]));
-    const failedCellIds = stateRef.current.failedCellIds.filter((cellId) => !nextExecutingIds.includes(cellId));
-    const pausedCellIds = stateRef.current.pausedCellIds.filter((cellId) => !nextExecutingIds.includes(cellId));
-    updateExecutionStateRef({
-      queuedIds,
-      executingIds,
-      failedCellIds,
-      pausedCellIds,
-    });
-    setQueuedIds((current) => current.filter((cellId) => !nextExecutingIds.includes(cellId)));
-    setExecutingIds((current) => Array.from(new Set([...current, ...nextExecutingIds])));
-    setFailedCellIds((current) => current.filter((cellId) => !nextExecutingIds.includes(cellId)));
-    setPausedCellIds((current) => current.filter((cellId) => !nextExecutingIds.includes(cellId)));
+    const nextState = startExecutionBuckets(stateRef.current, nextExecutingIds);
+    updateExecutionStateRef(nextState);
+    setQueuedIds(nextState.queuedIds);
+    setExecutingIds(nextState.executingIds);
+    setFailedCellIds(nextState.failedCellIds);
+    setPausedCellIds(nextState.pausedCellIds);
     setCompletedTimes((current) => {
       const nextTimes = { ...current };
       for (const cellId of nextExecutingIds) {
@@ -2411,6 +2668,34 @@ function App() {
       reconcileDrafts(nextCells);
       reconcileDiagnostics(nextCells);
       trimExecutionStateToCells(nextCells);
+      const pendingRestore = pendingSelectionRestoreRef.current;
+      if (pendingRestore) {
+        pendingSelectionRestoreRef.current = null;
+        const indexByCellId = new Map(nextCells.map((cell, index) => [cell.cell_id, index]));
+        const nextSelected = pendingRestore.selectedCellIds
+          .map((cellId) => indexByCellId.get(cellId))
+          .filter((index): index is number => typeof index === 'number');
+        const focusedFromRestore = pendingRestore.focusedCellId != null
+          ? indexByCellId.get(pendingRestore.focusedCellId)
+          : undefined;
+        setFocusedIndex(() => {
+          if (typeof focusedFromRestore === 'number') {
+            return focusedFromRestore;
+          }
+          if (nextSelected.length > 0) {
+            return nextSelected[0];
+          }
+          return nextCells.length === 0 ? 0 : 0;
+        });
+        setSelectedIndices(() => (
+          nextSelected.length > 0
+            ? nextSelected
+            : nextCells.length === 0
+              ? []
+              : [0]
+        ));
+        return;
+      }
       setFocusedIndex((current) =>
         nextCells.length === 0 ? 0 : Math.min(current, nextCells.length - 1),
       );
@@ -2540,6 +2825,19 @@ function App() {
     [send],
   );
 
+  const requestLspDefinition = useCallback(
+    (cellId: string, source: string, offset: number) => {
+      send({
+        type: 'lsp-definition',
+        requestId: nextRequestId(),
+        cell_id: cellId,
+        source,
+        offset,
+      });
+    },
+    [send],
+  );
+
   const flushActiveDraft = useCallback(() => {
     const current = stateRef.current;
     const focusedCell = current.cells[current.focusedIndex];
@@ -2596,9 +2894,12 @@ function App() {
 
   const focusCell = useCallback((index: number, nextMode: 'command' | 'edit' = 'command') => {
     const current = stateRef.current;
-    if (nextMode === 'command' && current.mode === 'edit') {
-      ignoreNextBlurForCell(current.cells[current.focusedIndex]?.cell_id);
-      blurActiveEditor(current.cells[current.focusedIndex]?.cell_id);
+    if (nextMode === 'command') {
+      const currentCellId = current.cells[current.focusedIndex]?.cell_id;
+      if (current.mode === 'edit' || activeElementIsNotebookEditor(document.activeElement)) {
+        ignoreNextBlurForCell(currentCellId);
+        blurActiveEditor(currentCellId);
+      }
     }
     setFocusedIndex(index);
     setSelectedIndices([index]);
@@ -2712,12 +3013,32 @@ function App() {
       setFocusedIndex(atIndex);
       setSelectedIndices([atIndex]);
       setMode(nextMode);
-      sendRequest({
+      const restoreFocusedCellId = current.cells[current.focusedIndex]?.cell_id ?? null;
+      const restoreSelectedCellIds = selectedCellIdsFromState(current);
+      const beforeCellIds = new Set(current.cells.map((cell) => cell.cell_id));
+      const requestId = nextRequestId();
+      const message = {
+        requestId,
         type: 'edit',
         operations: [{ op: 'insert', source: '', cell_type: cellType, at_index: atIndex }],
+      } as const;
+      registerPendingNotebookUndo(requestId, {
+        kind: 'record',
+        finalize: (nextCells) => {
+          const insertedCell = nextCells.find((cell) => !beforeCellIds.has(cell.cell_id));
+          if (!insertedCell) {
+            return null;
+          }
+          return {
+            inverseOperations: [{ op: 'delete', cell_id: insertedCell.cell_id }],
+            restoreFocusedCellId,
+            restoreSelectedCellIds,
+          };
+        },
       });
+      sendRequest(message);
     },
-    [blurActiveEditor, ignoreNextBlurForCell, sendRequest],
+    [blurActiveEditor, ignoreNextBlurForCell, registerPendingNotebookUndo, selectedCellIdsFromState, sendRequest],
   );
 
   const resolveAdvanceTarget = useCallback(
@@ -2777,6 +3098,12 @@ function App() {
       }))
       .filter((operation) => operation.cell_id);
     if (operations.length > 0) {
+      const deletedCells = deletedIndices
+        .map((index) => current.cells[index])
+        .filter((cell): cell is NotebookCell => Boolean(cell))
+        .map((cell) => cloneCellForUndo(cell));
+      const restoreFocusedCellId = current.cells[current.focusedIndex]?.cell_id ?? deletedCells[0]?.cell_id ?? null;
+      const restoreSelectedCellIds = deletedCells.map((cell) => cell.cell_id);
       const nextCellCount = current.cells.length - operations.length;
       if (nextCellCount > 0) {
         const targetIndex = Math.min(deletedIndices[0], nextCellCount - 1);
@@ -2794,9 +3121,18 @@ function App() {
         setSelectedIndices([]);
         setMode('command');
       }
-      sendRequest({ type: 'edit', operations });
+      const requestId = nextRequestId();
+      registerPendingNotebookUndo(requestId, {
+        kind: 'record',
+        finalize: () => ({
+          inverseOperations: deletedCells.map((cell, index) => buildInsertUndoOperation(cell, deletedIndices[index])),
+          restoreFocusedCellId,
+          restoreSelectedCellIds,
+        }),
+      });
+      sendRequest({ requestId, type: 'edit', operations });
     }
-  }, [blurActiveEditor, ignoreNextBlurForCell, sendRequest]);
+  }, [blurActiveEditor, buildInsertUndoOperation, cloneCellForUndo, ignoreNextBlurForCell, registerPendingNotebookUndo, sendRequest]);
 
   const changeSelectedCellType = useCallback(
     (cellType: 'code' | 'markdown') => {
@@ -2832,11 +3168,29 @@ function App() {
       if (operations.length === 0) {
         return;
       }
+      const originalCells = targetIndices
+        .map((index) => current.cells[index])
+        .filter((cell): cell is NotebookCell => Boolean(cell))
+        .map((cell) => cloneCellForUndo(cell));
+      const restoreFocusedCellId = current.cells[current.focusedIndex]?.cell_id ?? originalCells[0]?.cell_id ?? null;
+      const restoreSelectedCellIds = originalCells.map((cell) => cell.cell_id);
       setEditingMarkdownId(null);
       setMode('command');
-      sendRequest({ type: 'edit', operations });
+      const requestId = nextRequestId();
+      registerPendingNotebookUndo(requestId, {
+        kind: 'record',
+        finalize: () => ({
+          inverseOperations: originalCells.flatMap((cell, index) => ([
+            { op: 'delete', cell_id: cell.cell_id } as NotebookStructureEditOperation,
+            buildInsertUndoOperation(cell, targetIndices[index]),
+          ])),
+          restoreFocusedCellId,
+          restoreSelectedCellIds,
+        }),
+      });
+      sendRequest({ requestId, type: 'edit', operations });
     },
-    [sendRequest],
+    [buildInsertUndoOperation, cloneCellForUndo, registerPendingNotebookUndo, sendRequest],
   );
 
   const selectKernel = useCallback((kernelId: string) => {
@@ -2853,6 +3207,9 @@ function App() {
       const current = stateRef.current;
       const cellId = current.cells[index]?.cell_id;
       if (!cellId) return;
+      const deletedCell = cloneCellForUndo(current.cells[index]);
+      const restoreFocusedCellId = cellId;
+      const restoreSelectedCellIds = [cellId];
       const nextCellCount = current.cells.length - 1;
       if (nextCellCount > 0) {
         const targetIndex = Math.min(index, nextCellCount - 1);
@@ -2869,9 +3226,18 @@ function App() {
         setSelectedIndices([]);
       }
       setMode('command');
-      sendRequest({ type: 'edit', operations: [{ op: 'delete', cell_id: cellId, cell_index: index }] });
+      const requestId = nextRequestId();
+      registerPendingNotebookUndo(requestId, {
+        kind: 'record',
+        finalize: () => ({
+          inverseOperations: [buildInsertUndoOperation(deletedCell, index)],
+          restoreFocusedCellId,
+          restoreSelectedCellIds,
+        }),
+      });
+      sendRequest({ requestId, type: 'edit', operations: [{ op: 'delete', cell_id: cellId, cell_index: index }] });
     },
-    [blurActiveEditor, ignoreNextBlurForCell, sendRequest],
+    [blurActiveEditor, buildInsertUndoOperation, cloneCellForUndo, ignoreNextBlurForCell, registerPendingNotebookUndo, sendRequest],
   );
 
   const moveCell = useCallback(
@@ -2884,13 +3250,46 @@ function App() {
       flushActiveDraft();
       setFocusedIndex(toIndex);
       setSelectedIndices([toIndex]);
+      const restoreFocusedCellId = cell.cell_id;
+      const restoreSelectedCellIds = [cell.cell_id];
+      const requestId = nextRequestId();
+      registerPendingNotebookUndo(requestId, {
+        kind: 'record',
+        finalize: () => ({
+          inverseOperations: [{ op: 'move', cell_id: cell.cell_id, to_index: index }],
+          restoreFocusedCellId,
+          restoreSelectedCellIds,
+        }),
+      });
       sendRequest({
+        requestId,
         type: 'edit',
         operations: [{ op: 'move', cell_id: cell.cell_id, cell_index: index, to_index: toIndex }],
       });
     },
-    [flushActiveDraft, sendRequest],
+    [flushActiveDraft, registerPendingNotebookUndo, sendRequest],
   );
+
+  const undoNotebookStructure = useCallback(() => {
+    const entry = notebookUndoStackRef.current.pop();
+    if (!entry || entry.inverseOperations.length === 0) {
+      return;
+    }
+    setMode('command');
+    const requestId = nextRequestId();
+    registerPendingNotebookUndo(requestId, {
+      kind: 'undo',
+      restore: {
+        focusedCellId: entry.restoreFocusedCellId,
+        selectedCellIds: entry.restoreSelectedCellIds,
+      },
+    });
+    sendRequest({
+      requestId,
+      type: 'edit',
+      operations: entry.inverseOperations,
+    });
+  }, [registerPendingNotebookUndo, sendRequest]);
 
   const runCell = useCallback(
     (index: number, options: { advance: boolean }) => {
@@ -2933,11 +3332,14 @@ function App() {
         currentExecution: kernelStatus.current_execution,
         decision: executionAlreadyActive ? 'queue' : 'start',
       });
-      if (executionAlreadyActive) {
-        queueCellIds([cell.cell_id]);
-      } else {
-        startCellIds([cell.cell_id]);
-      }
+      flushSync(() => {
+        markExecutionSubmitted(cell.cell_id, executionAlreadyActive ? 'queued' : 'running');
+        if (executionAlreadyActive) {
+          queueCellIds([cell.cell_id]);
+        } else {
+          startCellIds([cell.cell_id]);
+        }
+      });
       sendRequest({
         type: 'execute-cell',
         cell_id: cell.cell_id,
@@ -2950,7 +3352,7 @@ function App() {
       pendingAdvanceRef.current = { cellId: cell.cell_id, awaitingInsert: false };
       resolveAdvanceTarget(cell.cell_id);
     },
-    [kernelStatus.busy, kernelStatus.current_execution, queueCellIds, resolveAdvanceTarget, sendRequest, startCellIds],
+    [kernelStatus.busy, kernelStatus.current_execution, markExecutionSubmitted, queueCellIds, resolveAdvanceTarget, sendRequest, startCellIds],
   );
 
   const runCellAndAdvance = useCallback(
@@ -2977,58 +3379,53 @@ function App() {
 
   const handleRuntimeUpdate = useCallback((runtime: RuntimeInfo) => {
     setKernelStatus(runtime);
-    const activeCellId = currentExecutionCellId(runtime);
-    if (activeCellId) {
+    const reduction = reduceRuntimeExecution(stateRef.current, {
+      busy: runtime.busy,
+      current_execution: runtime.current_execution,
+      running_cell_ids: runtimeCellIds(runtime, 'running'),
+      queued_cell_ids: runtimeCellIds(runtime, 'queued'),
+    });
+    if (
+      reduction.startedIds.length === 0 &&
+      reduction.completedIds.length === 0 &&
+      reduction.pausedIds.length === 0 &&
+      reduction.buckets === stateRef.current
+    ) {
+      return;
+    }
+    const now = Date.now();
+    for (const cellId of reduction.startedIds) {
       executionStartRef.current.set(
-        activeCellId,
-        executionStartRef.current.get(activeCellId) ?? Date.now(),
+        cellId,
+        executionStartRef.current.get(cellId) ?? now,
       );
-      setQueuedIds((current) => current.filter((cellId) => cellId !== activeCellId));
-      setExecutingIds((current) =>
-        current.includes(activeCellId) ? current : [...current, activeCellId],
-      );
-      setFailedCellIds((current) => current.filter((cellId) => cellId !== activeCellId));
-      setPausedCellIds((current) => current.filter((cellId) => cellId !== activeCellId));
     }
-    if (!runtime.busy && !runtime.current_execution) {
-      const current = stateRef.current;
-      if (current.executingIds.length > 0 || current.queuedIds.length > 0) {
-        const { completedIds, pausedIds } = resolveIdleExecutionTransition({
-          queuedIds: current.queuedIds,
-          executingIds: current.executingIds,
-          failedCellIds: current.failedCellIds,
-        });
-        const finishedAt = Date.now();
-        setQueuedIds([]);
-        setExecutingIds([]);
-        setPausedCellIds((existing) => Array.from(new Set([
-          ...existing.filter((cellId) => !current.executingIds.includes(cellId)),
-          ...pausedIds,
-        ])));
-        setCompletedTimes((prev) => {
-          const next = { ...prev };
-          for (const cellId of pausedIds) {
-            delete next[cellId];
-          }
-          for (const cellId of completedIds) {
-            const startTime = executionStartRef.current.get(cellId);
-            executionStartRef.current.delete(cellId);
-            next[cellId] = startTime != null ? finishedAt - startTime : next[cellId] ?? 0;
-          }
-          return next;
-        });
-        updateExecutionStateRef({
-          queuedIds: [],
-          executingIds: [],
-          failedCellIds: current.failedCellIds,
-          pausedCellIds: Array.from(new Set([
-            ...current.pausedCellIds.filter((cellId) => !current.executingIds.includes(cellId)),
-            ...pausedIds,
-          ])),
-        });
-      }
+    markExecutionRunning(reduction.startedIds);
+    const completedStartTimes = new Map<string, number | undefined>();
+    for (const cellId of reduction.completedIds) {
+      completedStartTimes.set(cellId, executionStartRef.current.get(cellId));
+      executionStartRef.current.delete(cellId);
     }
-  }, [updateExecutionStateRef]);
+    clearSubmittedExecution([...reduction.completedIds, ...reduction.pausedIds]);
+    updateExecutionStateRef(reduction.buckets);
+    setQueuedIds(reduction.buckets.queuedIds);
+    setExecutingIds(reduction.buckets.executingIds);
+    setFailedCellIds(reduction.buckets.failedCellIds);
+    setPausedCellIds(reduction.buckets.pausedCellIds);
+    if (reduction.completedIds.length > 0 || reduction.pausedIds.length > 0) {
+      setCompletedTimes((prev) => {
+        const next = { ...prev };
+        for (const cellId of reduction.pausedIds) {
+          delete next[cellId];
+        }
+        for (const cellId of reduction.completedIds) {
+          const startTime = completedStartTimes.get(cellId);
+          next[cellId] = startTime != null ? now - startTime : next[cellId] ?? 0;
+        }
+        return next;
+      });
+    }
+  }, [clearSubmittedExecution, markExecutionRunning, updateExecutionStateRef]);
 
   const bindTextarea = useCallback((cellId: string, element: HTMLTextAreaElement | null) => {
     textareasRef.current.set(cellId, element);
@@ -3155,7 +3552,7 @@ function App() {
         setMode('command');
         return;
       }
-      if (event.key === 'Enter' && event.shiftKey) {
+      if (event.key === 'Enter' && (event.shiftKey || event.metaKey || event.ctrlKey)) {
         event.preventDefault();
         event.currentTarget.blur();
         runCellAndAdvance(index);
@@ -3230,11 +3627,13 @@ function App() {
     if (!nextPath || nextPath === activeNotebookPath) {
       return;
     }
+    resetNotebookUndoHistory();
     flushActiveDraft();
     blurActiveEditor();
     setKernelMenuOpen(false);
     setErrorMessage(null);
     setErrorIsConflict(false);
+    setErrorRecovery(null);
     setLoading(true);
     setActiveNotebookPath(nextPath);
     setExplorerExpandedPaths((current) => new Set([
@@ -3242,7 +3641,7 @@ function App() {
       ...collectExplorerAncestorPaths(nextPath),
     ]));
     sendRequest({ type: 'switch-notebook', path: nextPath });
-  }, [activeNotebookPath, blurActiveEditor, flushActiveDraft, sendRequest]);
+  }, [activeNotebookPath, blurActiveEditor, flushActiveDraft, resetNotebookUndoHistory, sendRequest]);
 
   useEffect(() => {
     if (!standaloneHost || !activeNotebookPath) {
@@ -3264,8 +3663,20 @@ function App() {
       if (message.type === 'contents') {
         setErrorMessage(null);
         setErrorIsConflict(false);
+        setErrorRecovery(null);
         if (typeof message.path === 'string') {
           setActiveNotebookPath(message.path);
+        }
+        if (typeof message.requestId === 'string') {
+          const pendingUndo = pendingNotebookUndoRef.current.get(message.requestId);
+          if (pendingUndo) {
+            pendingNotebookUndoRef.current.delete(message.requestId);
+            if (pendingUndo.kind === 'record' && pendingUndo.finalize) {
+              pushNotebookUndoEntry(pendingUndo.finalize(message.cells ?? []));
+            } else if (pendingUndo.kind === 'undo' && pendingUndo.restore) {
+              pendingSelectionRestoreRef.current = pendingUndo.restore;
+            }
+          }
         }
         applyCells(message.cells ?? []);
         return;
@@ -3298,6 +3709,12 @@ function App() {
           runtime_id: typeof message.runtime_id === 'string' ? message.runtime_id : undefined,
           kernel_generation: typeof message.kernel_generation === 'number' ? message.kernel_generation : null,
           current_execution: (message.current_execution as Record<string, unknown> | null | undefined) ?? null,
+          running_cell_ids: Array.isArray(message.running_cell_ids)
+            ? message.running_cell_ids.filter((cellId: unknown): cellId is string => typeof cellId === 'string')
+            : undefined,
+          queued_cell_ids: Array.isArray(message.queued_cell_ids)
+            ? message.queued_cell_ids.filter((cellId: unknown): cellId is string => typeof cellId === 'string')
+            : undefined,
         });
         return;
       }
@@ -3325,14 +3742,33 @@ function App() {
         return;
       }
 
+      if (message.type === 'lsp-definition-target') {
+        const target: DefinitionNavigationTarget = {
+          cell_id: typeof message.cell_id === 'string' ? message.cell_id : '',
+          from: typeof message.from === 'number' ? message.from : 0,
+          to: typeof message.to === 'number' ? message.to : 0,
+        };
+        const cellIndex = stateRef.current.cells.findIndex((cell) => cell.cell_id === target.cell_id);
+        if (cellIndex < 0) {
+          return;
+        }
+        focusCell(cellIndex, 'edit');
+        requestAnimationFrame(() => {
+          codeMirrorRef.current.get(target.cell_id)?.selectRange(target.from, target.to);
+        });
+        return;
+      }
+
       if (message.type === 'ok') {
         setErrorMessage(null);
         setErrorIsConflict(false);
+        setErrorRecovery(null);
         return;
       }
 
       if (message.type === 'error') {
         if (typeof message.requestId === 'string') {
+          pendingNotebookUndoRef.current.delete(message.requestId);
           const pending = completionRequestsRef.current.get(message.requestId);
           if (pending) {
             completionRequestsRef.current.delete(message.requestId);
@@ -3351,6 +3787,7 @@ function App() {
             : 'Notebook action failed.',
         );
         setErrorIsConflict(Boolean(message.conflict));
+        setErrorRecovery(message.recovery ?? null);
         return;
       }
 
@@ -3360,13 +3797,20 @@ function App() {
           currentExecutingIds: stateRef.current.executingIds,
           currentQueuedIds: stateRef.current.queuedIds,
         });
-        executionStartRef.current.set(message.cell_id, Date.now());
-        setQueuedIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-        setExecutingIds((existing) =>
-          existing.includes(message.cell_id) ? existing : [...existing, message.cell_id],
-        );
-        setFailedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-        setPausedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
+        const reduction = reduceCommandExecution(stateRef.current, message);
+        const startedAt = Date.now();
+        updateExecutionStateRef(reduction.buckets);
+        for (const cellId of reduction.startedIds) {
+          executionStartRef.current.set(
+            cellId,
+            executionStartRef.current.get(cellId) ?? startedAt,
+          );
+        }
+        markExecutionRunning(reduction.startedIds);
+        setQueuedIds(reduction.buckets.queuedIds);
+        setExecutingIds(reduction.buckets.executingIds);
+        setFailedCellIds(reduction.buckets.failedCellIds);
+        setPausedCellIds(reduction.buckets.pausedCellIds);
         return;
       }
 
@@ -3377,133 +3821,160 @@ function App() {
           currentExecutingIds: stateRef.current.executingIds,
           currentQueuedIds: stateRef.current.queuedIds,
         });
-        setQueuedIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-        setExecutingIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-        const startTime = executionStartRef.current.get(message.cell_id);
-        executionStartRef.current.delete(message.cell_id);
-        const failed = message.type === 'execute-failed' || message.ok === false;
-        if (!failed && message.type === 'execute-finished' && startTime != null) {
-          const elapsed = startTime != null ? Date.now() - startTime : 0;
-          setCompletedTimes((prev) => ({ ...prev, [message.cell_id]: elapsed }));
+        const reduction = reduceCommandExecution(stateRef.current, message);
+        const finishedAt = Date.now();
+        updateExecutionStateRef(reduction.buckets);
+        const completedStartTimes = new Map<string, number | undefined>();
+        for (const cellId of reduction.completedIds) {
+          completedStartTimes.set(cellId, executionStartRef.current.get(cellId));
         }
-        if (failed) {
-          setFailedCellIds((existing) =>
-            existing.includes(message.cell_id) ? existing : [...existing, message.cell_id],
-          );
-          setPausedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
+        for (const cellId of [...reduction.completedIds, ...reduction.failedIds]) {
+          executionStartRef.current.delete(cellId);
+        }
+        clearSubmittedExecution([...reduction.completedIds, ...reduction.failedIds]);
+        setQueuedIds(reduction.buckets.queuedIds);
+        setExecutingIds(reduction.buckets.executingIds);
+        setFailedCellIds(reduction.buckets.failedCellIds);
+        setPausedCellIds(reduction.buckets.pausedCellIds);
+        if (reduction.completedIds.length > 0) {
           setCompletedTimes((prev) => {
             const next = { ...prev };
-            delete next[message.cell_id];
+            for (const cellId of reduction.completedIds) {
+              const startTime = completedStartTimes.get(cellId);
+              next[cellId] = startTime != null ? finishedAt - startTime : next[cellId] ?? 0;
+            }
             return next;
           });
-        } else {
-          setFailedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
-          setPausedCellIds((existing) => existing.filter((cellId) => cellId !== message.cell_id));
         }
-        if (message.type === 'execute-failed') {
-          setErrorMessage(
-            typeof message.message === 'string' && message.message.trim()
-              ? message.message
-              : 'Execution failed.',
-          );
-          setErrorIsConflict(false);
+        if (reduction.failedIds.length > 0) {
+          setCompletedTimes((prev) => {
+            const next = { ...prev };
+            for (const cellId of reduction.failedIds) {
+              delete next[cellId];
+            }
+            return next;
+          });
         }
+        // Cell execution errors (NameError, etc.) show in the cell output —
+        // don't surface them as a top-level notebook banner.
         return;
       }
 
       if (message.type === 'activity-update') {
         const current = stateRef.current;
-        const nextCells = [...current.cells];
-        const nextQueued = new Set(current.queuedIds);
-        const nextExecuting = new Set(current.executingIds);
-        const nextPaused = new Set(current.pausedCellIds);
-        let cellsChanged = false;
-        let needsFullReload = false;
 
+        // Collect per-cell patches from activity events. We apply these via a
+        // functional setCells updater so that a concurrent insert (which may
+        // still be inside a startTransition) is never clobbered by a stale
+        // snapshot of the cell array.
+        const cellPatches = new Map<string, { replace?: NotebookCell; outputs?: NotebookOutput[] }>();
         for (const eventItem of (message.events ?? []) as ActivityEvent[]) {
           const eventType = eventItem.event_type ?? eventItem.type;
           const cell = eventItem.data?.cell;
-          const cellIndex = nextCells.findIndex(
-            (entry) => entry.cell_id === eventItem.cell_id,
-          );
+          const cellId = eventItem.cell_id;
+          if (!cellId) continue;
 
-          if (eventType === 'cell-source-updated' && cell && cellIndex >= 0) {
-            nextCells[cellIndex] = cell;
-            cellsChanged = true;
+          if (eventType === 'cell-source-updated' && cell) {
+            cellPatches.set(cellId, { replace: cell });
           } else if (
             (eventType === 'cell-output-appended' ||
               eventType === 'cell-outputs-updated') &&
-            cell &&
-            cellIndex >= 0
+            cell
           ) {
-            nextCells[cellIndex] = {
-              ...nextCells[cellIndex],
-              ...cell,
-              outputs: cell.outputs ?? nextCells[cellIndex].outputs,
-            };
-            cellsChanged = true;
-            if (eventItem.cell_id) {
-              nextQueued.delete(eventItem.cell_id);
-              nextExecuting.add(eventItem.cell_id);
-              nextPaused.delete(eventItem.cell_id);
-              executionStartRef.current.set(
-                eventItem.cell_id,
-                executionStartRef.current.get(eventItem.cell_id) ?? Date.now(),
-              );
-            }
-          } else if (eventType === 'execution-started' && eventItem.cell_id) {
-            executionStartRef.current.set(eventItem.cell_id, Date.now());
-            nextQueued.delete(eventItem.cell_id);
-            nextExecuting.add(eventItem.cell_id);
-            nextPaused.delete(eventItem.cell_id);
-          } else if (
-            eventType === 'execution-finished' &&
-            eventItem.cell_id
-          ) {
-            nextQueued.delete(eventItem.cell_id);
-            nextExecuting.delete(eventItem.cell_id);
-            nextPaused.delete(eventItem.cell_id);
-            const startTime = executionStartRef.current.get(eventItem.cell_id);
-            if (startTime != null || current.executingIds.includes(eventItem.cell_id) || current.queuedIds.includes(eventItem.cell_id)) {
-              const elapsed = startTime != null ? Date.now() - startTime : 0;
-              executionStartRef.current.delete(eventItem.cell_id);
-              setCompletedTimes((prev) => ({ ...prev, [eventItem.cell_id!]: elapsed }));
-            }
-          } else if (
-            eventType === 'cell-inserted' ||
-            eventType === 'cell-removed' ||
-            eventType === 'notebook-reset-needed'
-          ) {
-            needsFullReload = true;
+            cellPatches.set(cellId, { outputs: cell.outputs ?? undefined, replace: cell });
           }
         }
 
-        if (message.runtime) {
-          handleRuntimeUpdate({
-            active: message.runtime.active,
-            busy: message.runtime.busy,
-            kernel_label: typeof message.runtime.kernel_label === 'string'
-              ? message.runtime.kernel_label
-              : kernelStatus.kernel_label,
-            runtime_id: typeof message.runtime.runtime_id === 'string'
-              ? message.runtime.runtime_id
-              : kernelStatus.runtime_id,
-            kernel_generation: typeof message.runtime.kernel_generation === 'number'
-              ? message.runtime.kernel_generation
-              : kernelStatus.kernel_generation ?? null,
-            current_execution: (message.runtime.current_execution as Record<string, unknown> | null | undefined) ?? null,
+        if (cellPatches.size > 0) {
+          setCells((prevCells) => {
+            let changed = false;
+            const patched = prevCells.map((entry) => {
+              const patch = cellPatches.get(entry.cell_id);
+              if (!patch) return entry;
+              changed = true;
+              if (patch.outputs !== undefined) {
+                return { ...entry, ...patch.replace, outputs: patch.outputs ?? entry.outputs };
+              }
+              return patch.replace ?? entry;
+            });
+            return changed ? patched : prevCells;
           });
         }
 
-        if (needsFullReload) {
+        const nextRuntime = message.runtime
+          ? {
+              active: message.runtime.active,
+              busy: message.runtime.busy,
+              kernel_label: typeof message.runtime.kernel_label === 'string'
+                ? message.runtime.kernel_label
+                : kernelStatus.kernel_label,
+              runtime_id: typeof message.runtime.runtime_id === 'string'
+                ? message.runtime.runtime_id
+                : kernelStatus.runtime_id,
+              kernel_generation: typeof message.runtime.kernel_generation === 'number'
+                ? message.runtime.kernel_generation
+                : kernelStatus.kernel_generation ?? null,
+              current_execution: (message.runtime.current_execution as Record<string, unknown> | null | undefined) ?? null,
+              running_cell_ids: Array.isArray(message.runtime.running_cell_ids)
+                ? message.runtime.running_cell_ids.filter((cellId: unknown): cellId is string => typeof cellId === 'string')
+                : undefined,
+              queued_cell_ids: Array.isArray(message.runtime.queued_cell_ids)
+                ? message.runtime.queued_cell_ids.filter((cellId: unknown): cellId is string => typeof cellId === 'string')
+                : undefined,
+            }
+          : null;
+        const activityExecution = reduceActivityAndRuntimeExecution(
+          current,
+          (message.events ?? []) as ActivityEvent[],
+          nextRuntime
+            ? {
+                busy: nextRuntime.busy,
+                current_execution: nextRuntime.current_execution,
+                running_cell_ids: runtimeCellIds(nextRuntime, 'running'),
+                queued_cell_ids: runtimeCellIds(nextRuntime, 'queued'),
+              }
+            : undefined,
+        );
+        const finishedAt = Date.now();
+        for (const cellId of activityExecution.startedIds) {
+          executionStartRef.current.set(
+            cellId,
+            executionStartRef.current.get(cellId) ?? finishedAt,
+          );
+        }
+        markExecutionRunning(activityExecution.startedIds);
+        if (activityExecution.completedIds.length > 0 || activityExecution.pausedIds.length > 0) {
+          clearSubmittedExecution([...activityExecution.completedIds, ...activityExecution.pausedIds]);
+          setCompletedTimes((prev) => {
+            const next = { ...prev };
+            for (const cellId of activityExecution.pausedIds) {
+              executionStartRef.current.delete(cellId);
+              delete next[cellId];
+            }
+            for (const cellId of activityExecution.completedIds) {
+              const startTime = executionStartRef.current.get(cellId);
+              if (startTime != null || current.executingIds.includes(cellId) || current.queuedIds.includes(cellId)) {
+                const elapsed = startTime != null ? finishedAt - startTime : 0;
+                executionStartRef.current.delete(cellId);
+                next[cellId] = elapsed;
+              }
+            }
+            return next;
+          });
+        }
+
+        if (nextRuntime) {
+          setKernelStatus(nextRuntime);
+        }
+
+        updateExecutionStateRef(activityExecution.buckets);
+        if (activityExecution.needsFullReload) {
           sendRequest({ type: 'load-contents' });
         } else {
-          if (cellsChanged) {
-            applyCells(nextCells);
-          }
-          setQueuedIds([...nextQueued]);
-          setExecutingIds([...nextExecuting]);
-          setPausedCellIds([...nextPaused]);
+          setQueuedIds(activityExecution.buckets.queuedIds);
+          setExecutingIds(activityExecution.buckets.executingIds);
+          setFailedCellIds(activityExecution.buckets.failedCellIds);
+          setPausedCellIds(activityExecution.buckets.pausedCellIds);
         }
         return;
       }
@@ -3515,7 +3986,19 @@ function App() {
     sendRequest({ type: 'get-kernels' });
     sendRequest({ type: 'get-runtime' });
     return () => window.removeEventListener('message', handleMessage);
-  }, [applyCells, handleRuntimeUpdate, kernelStatus.kernel_label, send, sendRequest]);
+  }, [applyCells, clearSubmittedExecution, handleRuntimeUpdate, kernelStatus.kernel_label, markExecutionRunning, send, sendRequest]);
+
+  const runRecoveryAction = useCallback((kind: string) => {
+    if (kind === 'refresh-browser') {
+      window.location.reload();
+      return;
+    }
+    if (kind === 'refresh-notebook') {
+      sendRequest({ type: 'get-workspace-tree' });
+      sendRequest({ type: 'get-runtime' });
+      sendRequest({ type: 'load-contents' });
+    }
+  }, [sendRequest]);
 
   // ── Keyboard handler ──
   useEffect(() => {
@@ -3552,9 +4035,11 @@ function App() {
       const target = event.target as HTMLElement | null;
       const targetTag = target?.tagName;
       const insideCodeMirror = Boolean(target?.closest('.cm-editor, .cm-content, .cm-line'));
-      const isInteractive =
+      const insideEditor =
         insideCodeMirror ||
-        targetTag === 'TEXTAREA' ||
+        targetTag === 'TEXTAREA';
+      const isInteractive =
+        ((current.mode === 'edit') && insideEditor) ||
         targetTag === 'SELECT' ||
         targetTag === 'BUTTON' ||
         targetTag === 'INPUT';
@@ -3593,15 +4078,18 @@ function App() {
           case 'insert-cell':
             insertCell(action.where, 'code', undefined, action.nextMode);
             break;
-            case 'delete-selected':
-              deleteSelectedCells();
-              break;
-            case 'change-cell-type':
-              changeSelectedCellType(action.cellType);
-              break;
-            case 'activate-pending-edit':
-              if (pendingActivation) {
-                pendingCellActivationRef.current = {
+          case 'delete-selected':
+            deleteSelectedCells();
+            break;
+          case 'undo-notebook':
+            undoNotebookStructure();
+            break;
+          case 'change-cell-type':
+            changeSelectedCellType(action.cellType);
+            break;
+          case 'activate-pending-edit':
+            if (pendingActivation) {
+              pendingCellActivationRef.current = {
                 index: pendingActivation.index,
                 mode: 'edit',
               };
@@ -3633,7 +4121,7 @@ function App() {
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [changeSelectedCellType, deleteSelectedCells, enterEditModeForCell, extendSelection, insertCell, moveFocus, runCellAndAdvance]);
+  }, [changeSelectedCellType, deleteSelectedCells, enterEditModeForCell, extendSelection, insertCell, moveFocus, runCellAndAdvance, undoNotebookStructure]);
 
   // ── Derived state ──
   const selectedSet = useMemo(() => new Set(selectedIndices), [selectedIndices]);
@@ -3789,7 +4277,7 @@ function App() {
             flexWrap: 'nowrap',
             minWidth: 0,
             paddingLeft: CELL_GUTTER_WIDTH,
-            overflow: 'hidden',
+            overflow: 'visible',
           }}>
             {isBrowserCanvas ? (
               <button
@@ -3848,7 +4336,7 @@ function App() {
             <button
               onClick={() => {
                 flushActiveDraft();
-                queueCellIds(cells.filter((c) => c.cell_type === 'code').map((c) => c.cell_id));
+                primeBulkExecution(cells.filter((c) => c.cell_type === 'code').map((c) => c.cell_id));
                 sendRequest({ type: 'execute-all' });
               }}
               aria-label="Run All"
@@ -3861,7 +4349,7 @@ function App() {
               onClick={() => {
                 flushActiveDraft();
                 clearKernelExecutionState();
-                queueCellIds(cells.filter((c) => c.cell_type === 'code').map((c) => c.cell_id));
+                primeBulkExecution(cells.filter((c) => c.cell_type === 'code').map((c) => c.cell_id));
                 sendRequest({ type: 'restart-and-run-all' });
               }}
               aria-label="Restart and Run All"
@@ -4040,6 +4528,53 @@ function App() {
               {errorIsConflict ? 'Notebook is temporarily locked by another active session.' : 'Notebook action failed.'}
             </div>
             <div style={{ marginTop: 4, fontSize: 13 }}>{errorMessage}</div>
+            {errorRecovery?.summary ? (
+              <div style={{ marginTop: 8, fontSize: 13 }}>{errorRecovery.summary}</div>
+            ) : null}
+            {Array.isArray(errorRecovery?.suggestions) && errorRecovery.suggestions.length > 0 ? (
+              <ul style={{ margin: '8px 0 0 18px', padding: 0, fontSize: 13 }}>
+                {errorRecovery.suggestions.map((suggestion, index) => (
+                  <li key={`${errorRecovery.reason}-suggestion-${index}`} style={{ marginTop: index === 0 ? 0 : 4 }}>
+                    {suggestion}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {Array.isArray(errorRecovery?.commands) && errorRecovery.commands.length > 0 ? (
+              <div style={{ marginTop: 8, fontSize: 12 }}>
+                {errorRecovery.commands.map((entry, index) => (
+                  <div key={`${errorRecovery.reason}-command-${index}`} style={{ marginTop: index === 0 ? 0 : 6 }}>
+                    <div style={{ fontWeight: 600 }}>{entry.label}</div>
+                    <code>{entry.value}</code>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {Array.isArray(errorRecovery?.actions) && errorRecovery.actions.length > 0 ? (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                {errorRecovery.actions
+                  .filter((entry) => entry.kind === 'refresh-browser' || entry.kind === 'refresh-notebook')
+                  .map((entry) => (
+                    <button
+                      key={`${errorRecovery.reason}-${entry.kind}`}
+                      type="button"
+                      onClick={() => runRecoveryAction(entry.kind)}
+                      style={{
+                        borderRadius: 999,
+                        border: '1px solid currentColor',
+                        background: 'transparent',
+                        color: 'inherit',
+                        padding: '4px 10px',
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {entry.label}
+                    </button>
+                  ))}
+              </div>
+            ) : null}
           </div>
         ) : null}
         {lspStatus?.state === 'unavailable' ? (
@@ -4108,6 +4643,8 @@ function App() {
                 index={index}
                 source={drafts[cell.cell_id] ?? cell.source}
                 isSelected={selectedSet.has(index)}
+                notebookMode={mode}
+                submittedExecutionStatus={submittedExecutionStatuses[cell.cell_id] ?? null}
                 isQueued={queuedSet.has(cell.cell_id)}
                 isExecuting={executingSet.has(cell.cell_id)}
                 hasFailedExecution={failedSet.has(cell.cell_id) || cellHasErrorOutput(cell)}
@@ -4123,6 +4660,7 @@ function App() {
                   requestAnimationFrame(() => autoResize(textareasRef.current.get(cellId) ?? null));
                 }}
                 requestCompletions={(value, offset) => requestLspCompletions(cell.cell_id, value, offset)}
+                requestDefinition={(value, offset) => requestLspDefinition(cell.cell_id, value, offset)}
                 onEditorKeyDown={handleEditorKeyDown}
                 onRunCell={(nextIndex) => runCell(nextIndex, { advance: false })}
                 onRunCellAndAdvance={runCellAndAdvance}

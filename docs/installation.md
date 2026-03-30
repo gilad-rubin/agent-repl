@@ -33,6 +33,22 @@ agent-repl --version
 agent-repl --help
 ```
 
+Optional guided onboarding after the CLI is installed:
+
+```bash
+agent-repl setup --smoke-test
+agent-repl doctor --probe-mcp
+```
+
+If you want to use `agent-repl` from an MCP client, bootstrap the workspace server and print a ready-to-paste config:
+
+```bash
+agent-repl mcp setup
+agent-repl mcp smoke-test
+```
+
+`setup` prints the canonical `/mcp` endpoint, the auth header value, and a standard `mcpServers` JSON block.
+
 ## Install the Extension
 
 Only required for:
@@ -106,6 +122,12 @@ The browser canvas now reuses the workspace's active human session when one alre
 
 ## Editor Settings
 
+If you want the Agent REPL canvas to become the workspace default for `*.ipynb` files in VS Code-family editors, let the CLI write the workspace setting for you:
+
+```bash
+agent-repl editor configure --default-canvas
+```
+
 Available extension settings:
 
 | Setting | Default | Description |
@@ -121,6 +143,7 @@ Available extension settings:
 | `agent-repl.executionMode` | `no-yank` | Background-safe execution preference for editor-backed runs |
 
 The canvas editor's Python IDE features write generated Pyright shadow files under `.agent-repl/pyright/` inside the workspace so notebooks do not accumulate sibling `.py` files.
+On first bootstrap, Agent REPL also makes sure `.agent-repl/` is present in the workspace `.gitignore` so runtime state stays out of commits by default.
 
 ## Development Install Loops
 
@@ -194,6 +217,8 @@ How to fix:
 
 ## Next Steps
 
+- [Onboarding](/Users/giladrubin/python_workspace/agent-repl/docs/onboarding.md)
 - [Getting Started](/Users/giladrubin/python_workspace/agent-repl/docs/getting-started.md)
 - [Command Reference](/Users/giladrubin/python_workspace/agent-repl/docs/commands.md)
+- [MCP](/Users/giladrubin/python_workspace/agent-repl/docs/mcp.md)
 - [Prompt Loop](/Users/giladrubin/python_workspace/agent-repl/docs/prompt-loop.md)

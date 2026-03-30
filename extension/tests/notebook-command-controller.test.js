@@ -124,6 +124,26 @@ test('shift-enter runs the focused cell and advances once', () => {
     assert.deepEqual(decision.actions, [{ type: 'run-and-advance', index: 1 }]);
 });
 
+test('cmd/ctrl-enter runs the focused cell and advances once', () => {
+    const metaDecision = decideNotebookCommandKeyAction(
+        createContext({ focusedIndex: 1, cellCount: 2 }),
+        createEvent({ key: 'Enter', metaKey: true }),
+        0,
+        1_000,
+    );
+    const ctrlDecision = decideNotebookCommandKeyAction(
+        createContext({ focusedIndex: 1, cellCount: 2 }),
+        createEvent({ key: 'Enter', ctrlKey: true }),
+        0,
+        1_000,
+    );
+
+    assert.equal(metaDecision.preventDefault, true);
+    assert.equal(ctrlDecision.preventDefault, true);
+    assert.deepEqual(metaDecision.actions, [{ type: 'run-and-advance', index: 1 }]);
+    assert.deepEqual(ctrlDecision.actions, [{ type: 'run-and-advance', index: 1 }]);
+});
+
 test('arrow keys move focus in command mode', () => {
     const upDecision = decideNotebookCommandKeyAction(
         createContext({ focusedIndex: 2, cellCount: 4 }),
@@ -211,6 +231,39 @@ test('double-d deletes selected cells and resets the timer', () => {
     assert.equal(firstPress.nextLastDPressAt, 1_000);
     assert.deepEqual(secondPress.actions, [{ type: 'delete-selected' }]);
     assert.equal(secondPress.nextLastDPressAt, 0);
+});
+
+test('command-mode z requests notebook-level undo', () => {
+    const decision = decideNotebookCommandKeyAction(
+        createContext(),
+        createEvent({ key: 'z' }),
+        1_000,
+        1_300,
+    );
+
+    assert.equal(decision.preventDefault, true);
+    assert.deepEqual(decision.actions, [{ type: 'undo-notebook' }]);
+    assert.equal(decision.nextLastDPressAt, 0);
+});
+
+test('cmd/ctrl-z is ignored so editor-native undo can keep ownership', () => {
+    const metaDecision = decideNotebookCommandKeyAction(
+        createContext(),
+        createEvent({ key: 'z', metaKey: true }),
+        0,
+        1_000,
+    );
+    const ctrlDecision = decideNotebookCommandKeyAction(
+        createContext(),
+        createEvent({ key: 'z', ctrlKey: true }),
+        0,
+        1_000,
+    );
+
+    assert.equal(metaDecision.preventDefault, false);
+    assert.equal(ctrlDecision.preventDefault, false);
+    assert.deepEqual(metaDecision.actions, []);
+    assert.deepEqual(ctrlDecision.actions, []);
 });
 
 test('cmd/ctrl-a selects every cell instead of inserting above', () => {

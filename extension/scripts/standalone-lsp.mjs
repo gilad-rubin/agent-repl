@@ -1,6 +1,14 @@
 import childProcess from 'node:child_process';
+import { createRequire } from 'node:module';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const {
+  computeLineStarts,
+  positionToOffset,
+  buildVirtualDocument,
+} = require('../out/shared/notebookVirtualDocument.js');
 
 const JSON_RPC_HEADER = '\r\n\r\n';
 const DIAGNOSTIC_SEVERITY = {
@@ -10,28 +18,8 @@ const DIAGNOSTIC_SEVERITY = {
   4: 'hint',
 };
 
-function computeLineStarts(text) {
-  const starts = [0];
-  for (let index = 0; index < text.length; index += 1) {
-    if (text.charCodeAt(index) === 10) {
-      starts.push(index + 1);
-    }
-  }
-  return starts;
-}
-
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
-}
-
-function positionToOffset(lineStarts, textLength, position) {
-  if (lineStarts.length === 0) {
-    return 0;
-  }
-  const lineIndex = clamp(position?.line ?? 0, 0, lineStarts.length - 1);
-  const lineStart = lineStarts[lineIndex];
-  const nextLineStart = lineIndex + 1 < lineStarts.length ? lineStarts[lineIndex + 1] : textLength;
-  return clamp(lineStart + (position?.character ?? 0), lineStart, nextLineStart);
 }
 
 function virtualDocumentPath(notebookPath) {
@@ -40,44 +28,10 @@ function virtualDocumentPath(notebookPath) {
 }
 
 function buildVirtualNotebookDocument(notebookPath, cells, version) {
-  const parts = [];
-  const codeCells = [];
-  let currentOffset = 0;
-
-  for (const cell of cells) {
-    if (cell.cell_type !== 'code') {
-      continue;
-    }
-
-    const header = `# %% [agent-repl cell ${cell.cell_id}]\n`;
-    parts.push(header);
-    currentOffset += header.length;
-
-    const contentFrom = currentOffset;
-    parts.push(cell.source);
-    currentOffset += cell.source.length;
-    const contentTo = currentOffset;
-
-    parts.push('\n\n');
-    currentOffset += 2;
-
-    codeCells.push({
-      cell_id: cell.cell_id,
-      index: cell.index,
-      contentFrom,
-      contentTo,
-      source: cell.source,
-      lineStarts: computeLineStarts(cell.source),
-    });
-  }
-
-  const text = parts.join('');
+  const base = buildVirtualDocument(cells, version);
   return {
+    ...base,
     uri: pathToFileURL(virtualDocumentPath(notebookPath)).toString(),
-    text,
-    lineStarts: computeLineStarts(text),
-    codeCells,
-    version,
   };
 }
 
@@ -95,12 +49,12 @@ function mapDiagnosticsToCells(virtualDocument, params) {
     const absoluteFrom = positionToOffset(
       virtualDocument.lineStarts,
       virtualDocument.text.length,
-      diagnostic.range?.start,
+      diagnostic.range?.start ?? { line: 0, character: 0 },
     );
     const absoluteTo = positionToOffset(
       virtualDocument.lineStarts,
       virtualDocument.text.length,
-      diagnostic.range?.end,
+      diagnostic.range?.end ?? { line: 0, character: 0 },
     );
     const segment = virtualDocument.codeCells.find((candidate) => (
       absoluteFrom <= candidate.contentTo &&

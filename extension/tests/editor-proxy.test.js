@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const path = require('node:path');
 
+const openedDocuments = [];
+const shownDocuments = [];
+
 function loadProxyModule() {
     const modulePath = path.resolve(__dirname, '../out/editor/proxy.js');
     const originalLoad = Module._load;
@@ -16,6 +19,53 @@ function loadProxyModule() {
                     getConfiguration() {
                         return { get() { return ''; } };
                     },
+                    async openTextDocument(uri) {
+                        openedDocuments.push(uri.fsPath);
+                        return { uri, fileName: uri.fsPath };
+                    },
+                },
+                window: {
+                    async showTextDocument(document, options) {
+                        const editor = {
+                            document,
+                            options,
+                            selection: null,
+                            revealRangeCalls: [],
+                            revealRange(range, revealType) {
+                                this.revealRangeCalls.push({ range, revealType });
+                            },
+                        };
+                        shownDocuments.push(editor);
+                        return editor;
+                    },
+                },
+                Uri: {
+                    file(targetPath) {
+                        return { fsPath: targetPath };
+                    },
+                },
+                Position: class Position {
+                    constructor(line, character) {
+                        this.line = line;
+                        this.character = character;
+                    }
+                },
+                Range: class Range {
+                    constructor(start, end) {
+                        this.start = start;
+                        this.end = end;
+                    }
+                },
+                Selection: class Selection {
+                    constructor(anchor, active) {
+                        this.anchor = anchor;
+                        this.active = active;
+                        this.start = anchor;
+                        this.end = active;
+                    }
+                },
+                TextEditorRevealType: {
+                    InCenterIfOutsideViewport: 'center',
                 },
                 Disposable: class Disposable {
                     dispose() {}
@@ -48,7 +98,107 @@ function loadProxyModule() {
 
 const { DaemonProxy } = loadProxyModule();
 
+function resetVscodeSpies() {
+    openedDocuments.length = 0;
+    shownDocuments.length = 0;
+}
+
+test('loadContents includes the active notebook path in the contents message', async () => {
+    resetVscodeSpies();
+    const postedMessages = [];
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    proxy.httpPost = async (endpoint, body) => {
+        assert.equal(endpoint, '/api/notebooks/contents');
+        assert.deepEqual(body, { path: 'notebooks/test3.ipynb' });
+        return {
+            cells: [{
+                index: 0,
+                cell_id: 'cell-1',
+                cell_type: 'code',
+                source: 'print("hello")',
+                outputs: [],
+                execution_count: null,
+                display_number: null,
+            }],
+        };
+    };
+    proxy.syncLsp = () => {};
+
+    await proxy.loadContents('req-contents');
+
+    assert.equal(postedMessages.length, 1);
+    assert.equal(postedMessages[0].type, 'contents');
+    assert.equal(postedMessages[0].requestId, 'req-contents');
+    assert.equal(postedMessages[0].path, 'notebooks/test3.ipynb');
+});
+
+test('startPolling primes the activity cursor before requesting live updates', async (t) => {
+    resetVscodeSpies();
+    const postedMessages = [];
+    const httpCalls = [];
+    let intervalCallback = null;
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    const originalSetInterval = global.setInterval;
+    const originalClearInterval = global.clearInterval;
+    global.setInterval = (callback) => {
+        intervalCallback = callback;
+        return { callback };
+    };
+    global.clearInterval = () => {};
+    t.after(() => {
+        global.setInterval = originalSetInterval;
+        global.clearInterval = originalClearInterval;
+    });
+
+    proxy.httpPost = async (endpoint, body) => {
+        httpCalls.push({ endpoint, body });
+        assert.equal(endpoint, '/api/notebooks/activity');
+        if (httpCalls.length === 1) {
+            assert.deepEqual(body, { path: 'notebooks/test3.ipynb' });
+            return { cursor: 123, recent_events: [], runtime: null };
+        }
+        assert.deepEqual(body, { path: 'notebooks/test3.ipynb', since: 123 });
+        return { cursor: 123, recent_events: [], runtime: null };
+    };
+
+    proxy.startPolling();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(typeof intervalCallback, 'function');
+    intervalCallback();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(
+        httpCalls.slice(0, 2).map((call) => call.body),
+        [
+            { path: 'notebooks/test3.ipynb' },
+            { path: 'notebooks/test3.ipynb', since: 123 },
+        ],
+    );
+    assert.equal(postedMessages.length, 0);
+});
+
 test('handleExecuteCell persists a source override before starting the cell', async () => {
+    resetVscodeSpies();
     const postedMessages = [];
     const httpCalls = [];
     const runtimeRequests = [];
@@ -90,6 +240,7 @@ test('handleExecuteCell persists a source override before starting the cell', as
     assert.equal(httpCalls[1].endpoint, '/api/notebooks/execute-cell');
     assert.equal(httpCalls[1].body.cell_id, 'cell-1');
     assert.equal(httpCalls[1].body.owner_session_id, 'session-1');
+    assert.equal(httpCalls[1].body.wait, false);
     assert.equal(postedMessages[0].type, 'execute-started');
     assert.equal(postedMessages[0].execution_id, 'exec-1');
     assert.equal(postedMessages.length, 1);
@@ -97,6 +248,7 @@ test('handleExecuteCell persists a source override before starting the cell', as
 });
 
 test('handleExecuteCell leaves a queued cell queued until activity marks it running', async () => {
+    resetVscodeSpies();
     const postedMessages = [];
     const runtimeRequests = [];
     const proxy = new DaemonProxy(
@@ -127,8 +279,66 @@ test('handleExecuteCell leaves a queued cell queued until activity marks it runn
         cell_id: 'cell-2',
     });
 
+    assert.equal(postedMessages.length, 1);
     assert.deepEqual(postedMessages, [{ type: 'ok', requestId: 'req-2' }]);
     assert.deepEqual(runtimeRequests, ['execute-queued-runtime']);
+});
+
+test('handleGetRuntime merges notebook status queue data into the runtime message', async () => {
+    const postedMessages = [];
+    const httpCalls = [];
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    proxy.httpPost = async (endpoint, body) => {
+        httpCalls.push({ endpoint, body });
+        if (endpoint === '/api/notebooks/runtime') {
+            return {
+                active: true,
+                runtime: {
+                    busy: true,
+                    current_execution: { cell_id: 'cell-running' },
+                    runtime_id: 'rt-1',
+                    kernel_generation: 4,
+                },
+                runtime_record: { label: 'Notebook Python' },
+            };
+        }
+        if (endpoint === '/api/notebooks/status') {
+            return {
+                running: [{ run_id: 'run-1', cell_id: 'cell-running' }],
+                queued: [{ run_id: 'run-2', cell_id: 'cell-queued', queue_position: 1 }],
+            };
+        }
+        return { status: 'ok' };
+    };
+
+    await proxy.handleGetRuntime({ requestId: 'runtime-1' });
+
+    assert.deepEqual(httpCalls.map((call) => call.endpoint), [
+        '/api/notebooks/runtime',
+        '/api/notebooks/status',
+    ]);
+    assert.deepEqual(postedMessages, [{
+        type: 'runtime',
+        requestId: 'runtime-1',
+        active: true,
+        busy: true,
+        kernel_label: 'Notebook Python',
+        runtime_id: 'rt-1',
+        kernel_generation: 4,
+        current_execution: { cell_id: 'cell-running' },
+        running_cell_ids: ['cell-running'],
+        queued_cell_ids: ['cell-queued'],
+    }]);
 });
 
 test('handleExecuteCell treats a completed headless execution as finished and refreshes contents', async () => {
@@ -213,10 +423,52 @@ test('handleExecuteAll includes the owner session id', async () => {
     assert.equal(httpCalls[0].endpoint, '/api/notebooks/execute-all');
     assert.deepEqual(httpCalls[0].body, {
         path: 'notebooks/test3.ipynb',
+        wait: false,
         owner_session_id: 'session-1',
     });
     assert.deepEqual(postedMessages, [{ type: 'ok', requestId: 'req-3' }]);
     assert.deepEqual(loadRequests, ['execute-all-finished']);
+    assert.deepEqual(runtimeRequests, ['execute-all-runtime']);
+});
+
+test('handleExecuteAll treats a started response as background work and skips the final contents refresh', async () => {
+    const httpCalls = [];
+    const postedMessages = [];
+    const runtimeRequests = [];
+    const loadRequests = [];
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    proxy.httpPost = async (endpoint, body) => {
+        httpCalls.push({ endpoint, body });
+        return { status: 'started' };
+    };
+    proxy.loadContents = async (requestId) => {
+        loadRequests.push(requestId);
+    };
+    proxy.handleGetRuntime = async (msg) => {
+        runtimeRequests.push(msg.requestId);
+    };
+
+    await proxy.handleExecuteAll({ requestId: 'req-3-started' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(httpCalls.length, 1);
+    assert.deepEqual(httpCalls[0].body, {
+        path: 'notebooks/test3.ipynb',
+        wait: false,
+        owner_session_id: 'session-1',
+    });
+    assert.deepEqual(postedMessages, [{ type: 'ok', requestId: 'req-3-started' }]);
+    assert.deepEqual(loadRequests, []);
     assert.deepEqual(runtimeRequests, ['execute-all-runtime']);
 });
 
@@ -254,10 +506,52 @@ test('handleRestartAndRunAll includes the owner session id', async () => {
     assert.equal(httpCalls[0].endpoint, '/api/notebooks/restart-and-run-all');
     assert.deepEqual(httpCalls[0].body, {
         path: 'notebooks/test3.ipynb',
+        wait: false,
         owner_session_id: 'session-1',
     });
     assert.deepEqual(postedMessages, [{ type: 'ok', requestId: 'req-4' }]);
     assert.deepEqual(loadRequests, ['restart-and-run-all-finished']);
+    assert.deepEqual(runtimeRequests, ['restart-and-run-all-runtime']);
+});
+
+test('handleRestartAndRunAll treats a started response as background work and skips the final contents refresh', async () => {
+    const httpCalls = [];
+    const postedMessages = [];
+    const runtimeRequests = [];
+    const loadRequests = [];
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    proxy.httpPost = async (endpoint, body) => {
+        httpCalls.push({ endpoint, body });
+        return { status: 'started' };
+    };
+    proxy.loadContents = async (requestId) => {
+        loadRequests.push(requestId);
+    };
+    proxy.handleGetRuntime = async (msg) => {
+        runtimeRequests.push(msg.requestId);
+    };
+
+    await proxy.handleRestartAndRunAll({ requestId: 'req-4-started' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(httpCalls.length, 1);
+    assert.deepEqual(httpCalls[0].body, {
+        path: 'notebooks/test3.ipynb',
+        wait: false,
+        owner_session_id: 'session-1',
+    });
+    assert.deepEqual(postedMessages, [{ type: 'ok', requestId: 'req-4-started' }]);
+    assert.deepEqual(loadRequests, []);
     assert.deepEqual(runtimeRequests, ['restart-and-run-all-runtime']);
 });
 
@@ -557,4 +851,93 @@ test('handleRestartAndRunAll fallback stops after the first failed cell', async 
     assert.deepEqual(postedMessages, [{ type: 'ok', requestId: 'req-8b' }]);
     assert.deepEqual(loadRequests, ['restart-and-run-all-finished']);
     assert.deepEqual(runtimeRequests, ['restart-and-run-all-runtime']);
+});
+
+test('handleLspDefinition opens workspace file targets in the editor', async () => {
+    resetVscodeSpies();
+    const postedMessages = [];
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    proxy.cells = [
+        { cell_id: 'cell-1', cell_type: 'code', index: 0, source: 'from test import hello', outputs: [], execution_count: null, display_number: null },
+    ];
+    proxy.syncLsp = () => {};
+    proxy.lspClient = {
+        resolveDefinitionAt: async () => ({
+            kind: 'file',
+            uri: 'file:///workspace/test.py',
+            filePath: '/workspace/test.py',
+            range: {
+                start: { line: 0, character: 4 },
+                end: { line: 0, character: 9 },
+            },
+        }),
+    };
+
+    await proxy.handleLspDefinition({
+        requestId: 'req-def-file',
+        cell_id: 'cell-1',
+        source: 'from test import hello',
+        offset: 17,
+    });
+
+    assert.deepEqual(openedDocuments, ['/workspace/test.py']);
+    assert.equal(shownDocuments.length, 1);
+    assert.equal(shownDocuments[0].selection.start.line, 0);
+    assert.equal(shownDocuments[0].selection.start.character, 4);
+    assert.equal(shownDocuments[0].selection.end.character, 9);
+    assert.deepEqual(postedMessages, [{ type: 'ok', requestId: 'req-def-file' }]);
+});
+
+test('handleLspDefinition routes same-notebook targets back to the canvas', async () => {
+    resetVscodeSpies();
+    const postedMessages = [];
+    const proxy = new DaemonProxy(
+        { fsPath: '/workspace/notebooks/test3.ipynb' },
+        { webview: { postMessage(message) { postedMessages.push(message); } } },
+        {
+            extensionPath: '/extension',
+            workspaceState: {
+                get() { return 'session-1'; },
+            },
+        },
+    );
+
+    proxy.cells = [
+        { cell_id: 'cell-1', cell_type: 'code', index: 0, source: 'hello()', outputs: [], execution_count: null, display_number: null },
+    ];
+    proxy.syncLsp = () => {};
+    proxy.lspClient = {
+        resolveDefinitionAt: async () => ({
+            kind: 'cell',
+            cellId: 'cell-1',
+            from: 0,
+            to: 5,
+        }),
+    };
+
+    await proxy.handleLspDefinition({
+        requestId: 'req-def-cell',
+        cell_id: 'cell-1',
+        source: 'hello()',
+        offset: 1,
+    });
+
+    assert.deepEqual(openedDocuments, []);
+    assert.deepEqual(postedMessages, [{
+        type: 'lsp-definition-target',
+        requestId: 'req-def-cell',
+        cell_id: 'cell-1',
+        from: 0,
+        to: 5,
+    }]);
 });
