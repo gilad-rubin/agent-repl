@@ -1800,6 +1800,14 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       handleModelChanged();
     };
     const handleDocumentKeyDown = (event: KeyboardEvent) => {
+      // Cmd+S always saves — bypass all routing checks
+      const accelKey = event.metaKey || event.ctrlKey;
+      const normalizedKeyEarly = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+      if (accelKey && normalizedKeyEarly === 's') {
+        event.preventDefault();
+        void commands.execute(COMMAND_IDS.save);
+        return;
+      }
       const target = event.target;
       if (!shouldRouteNotebookEvent(target, mountNode, notebook)) {
         return;
@@ -1807,7 +1815,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       if (!shouldHandleNotebookShortcut(event, notebook)) {
         return;
       }
-      const normalizedKey = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+      const normalizedKey = normalizedKeyEarly;
       const routedFromDocumentRoot = target === document.body || target === document.documentElement;
       if (routedFromDocumentRoot) {
         const accel = event.metaKey || event.ctrlKey;
@@ -1824,9 +1832,6 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
             }
             if (normalizedKey === 'Enter' && event.altKey) {
               return COMMAND_IDS.runAndInsertBelow;
-            }
-            if (normalizedKey === 's' && accel) {
-              return COMMAND_IDS.save;
             }
             return null;
           }
@@ -1969,6 +1974,19 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       mountNode.textContent = '';
     };
   }, [changeSelectedCellType, deleteSelectedCells, executeActiveCell, executeAll, flushAutosave, initialCells, initialDocumentVersion, initialNotebookMetadata, initialTrustSnapshot, insertRelativeCell, moveSelectedCell, scheduleAutosave, undoNotebookStructure]);
+
+  // Global Cmd+S handler — independent of notebook lifecycle
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        event.stopPropagation();
+        void flushAutosave({ announce: true });
+      }
+    };
+    document.addEventListener('keydown', handler, true);
+    return () => document.removeEventListener('keydown', handler, true);
+  }, [flushAutosave]);
 
   // Inject cell status bars and executing-cell data attributes
   useEffect(() => {
