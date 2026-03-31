@@ -781,6 +781,15 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       // noop
     }
   }, [themeMode]);
+
+  // Sync carbon theme attribute to document root and mount node for CSS selectors
+  useEffect(() => {
+    document.documentElement.setAttribute('data-carbon-theme', carbonTheme);
+    const mount = mountRef.current;
+    if (mount) {
+      mount.setAttribute('data-carbon-theme', carbonTheme);
+    }
+  }, [carbonTheme]);
   const [runtime, setRuntime] = useState<RuntimeSnapshot>({
     busy: false,
     kernel_label: '',
@@ -1813,6 +1822,8 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     if (!mountNode || !initialCells) {
       return;
     }
+    const _tSurface = performance.now();
+    console.log('[TIMING] surface creation start');
     const restoreWarningFilter = installBenignYjsWarningFilter();
     let disposed = false;
 
@@ -2197,17 +2208,26 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     document.addEventListener('keyup', handleDocumentKeyUp, true);
     document.addEventListener('input', handleDocumentInput, true);
 
+    const _tSync = performance.now();
+    console.log(`[TIMING] surface sync setup: ${(_tSync - _tSurface).toFixed(0)}ms`);
+
     void (async () => {
       const widgetState = extractWidgetState(initialNotebookMetadata);
       if (widgetState && !disposed) {
+        const _tW = performance.now();
         await widgetManager.clear_state();
         await widgetManager.set_state(widgetState);
+        console.log(`[TIMING] widget state: ${(performance.now() - _tW).toFixed(0)}ms`);
       }
+      const _tAttach = performance.now();
       Widget.attach(notebook, mountNode);
       notebook.update();
+      console.log(`[TIMING] DOM attach + update: ${(performance.now() - _tAttach).toFixed(0)}ms`);
       lastSyncedCellsRef.current = cloneCells(initialCells);
       model.dirty = false;
+      const _tConfig = performance.now();
       configureNotebookEditors();
+      console.log(`[TIMING] configureNotebookEditors: ${(performance.now() - _tConfig).toFixed(0)}ms`);
       if (notebook.widgets.length > 0) {
         notebook.activeCellIndex = Math.max(0, notebook.activeCellIndex);
       }
@@ -2215,6 +2235,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         if (disposed) {
           return;
         }
+        const _tRAF = performance.now();
         // Render all markdown cells on load
         for (const widget of notebook.widgets) {
           if (widget.model.type === 'markdown' && 'rendered' in widget) {
@@ -2227,10 +2248,12 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           notebook.activeCellIndex = firstCodeIndex;
         }
         focusNotebookCommandSelection(notebook);
+        console.log(`[TIMING] rAF (markdown render + focus): ${(performance.now() - _tRAF).toFixed(0)}ms`);
       });
 
       modelRef.current = model;
       notebookRef.current = notebook;
+      console.log(`[TIMING] surface creation total: ${(performance.now() - _tSurface).toFixed(0)}ms`);
       setSurfaceReady(true);
       setLoading(false);
     })().catch((err) => {
@@ -2415,6 +2438,8 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         setLoading(false);
         return;
       }
+      const _t0 = performance.now();
+      console.log('[TIMING] bootstrap start');
       setLoading(true);
       setError(null);
       setSurfaceReady(false);
@@ -2428,22 +2453,37 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       fallbackDocumentVersionRef.current = 0;
       for (let attempt = 0; attempt < BOOTSTRAP_MAX_ATTEMPTS && !disposed; attempt += 1) {
         try {
+          const _tA = performance.now();
           await ensureAttached();
+          console.log(`[TIMING] ensureAttached: ${(performance.now() - _tA).toFixed(0)}ms`);
+          const _tP = performance.now();
           const [runtimeResult, snapshot, workspaceResult, kernelsResult] = await Promise.all([
             (async () => {
+              const _t = performance.now();
               await loadRuntime();
+              console.log(`[TIMING]   loadRuntime: ${(performance.now() - _t).toFixed(0)}ms`);
               return true;
             })(),
-            fetchSharedModelSnapshot(),
             (async () => {
+              const _t = performance.now();
+              const s = await fetchSharedModelSnapshot();
+              console.log(`[TIMING]   fetchSharedModelSnapshot: ${(performance.now() - _t).toFixed(0)}ms`);
+              return s;
+            })(),
+            (async () => {
+              const _t = performance.now();
               await loadWorkspaceTree();
+              console.log(`[TIMING]   loadWorkspaceTree: ${(performance.now() - _t).toFixed(0)}ms`);
               return true;
             })(),
             (async () => {
+              const _t = performance.now();
               await loadKernels();
+              console.log(`[TIMING]   loadKernels: ${(performance.now() - _t).toFixed(0)}ms`);
               return true;
             })(),
           ]);
+          console.log(`[TIMING] parallel fetches total: ${(performance.now() - _tP).toFixed(0)}ms`);
           void runtimeResult;
           void workspaceResult;
           void kernelsResult;
@@ -2455,6 +2495,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           setInitialNotebookMetadata(nextNotebookMetadata);
           setInitialTrustSnapshot(nextTrust);
           setTrustSnapshot(nextTrust);
+          console.log(`[TIMING] bootstrap total: ${(performance.now() - _t0).toFixed(0)}ms`);
           return;
         } catch (err) {
           if (disposed) {
