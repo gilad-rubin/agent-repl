@@ -1527,13 +1527,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     setError(null);
     pendingExecutionRef.current = true;
 
-    await postJson('/api/standalone/notebook/execute-cell', {
-      client_id: PREVIEW_CLIENT_ID,
-      path: currentNotebookPath,
-      cell_id: activeCell.cell_id,
-      cell_index: activeIndex,
-    });
-
+    // Advance to next cell IMMEDIATELY — don't wait for execution
     if (mode === 'insert') {
       await insertRelativeCell('below', { switchToEdit: true });
     } else if (mode === 'advance') {
@@ -1546,7 +1540,13 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       }
     }
 
-    await Promise.all([loadRuntime(), loadContents()]);
+    // Fire execution request without blocking — output arrives via WebSocket
+    postJson('/api/standalone/notebook/execute-cell', {
+      client_id: PREVIEW_CLIENT_ID,
+      path: currentNotebookPath,
+      cell_id: activeCell.cell_id,
+      cell_index: activeIndex,
+    }).then(() => Promise.all([loadRuntime(), loadContents()])).catch(() => {});
   }, [flushAutosave, insertRelativeCell, loadContents, loadRuntime, currentNotebookPath]);
 
   const executeAll = useCallback(async () => {
@@ -1839,6 +1839,15 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
               return COMMAND_IDS.runAndInsertBelow;
             }
             return null;
+          }
+          if (normalizedKey === 'Enter' && event.shiftKey) {
+            return COMMAND_IDS.runAndAdvance;
+          }
+          if (normalizedKey === 'Enter' && accel) {
+            return COMMAND_IDS.runCell;
+          }
+          if (normalizedKey === 'Enter' && event.altKey) {
+            return COMMAND_IDS.runAndInsertBelow;
           }
           if (accel && normalizedKey === 'a') {
             return COMMAND_IDS.selectAll;
