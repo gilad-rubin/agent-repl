@@ -874,10 +874,20 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
               sharedModel: {
                 setOutputs: (outputs: NotebookOutput[]) => void;
               };
+              outputs: {
+                clear: (wait?: boolean) => void;
+                fromJSON: (outputs: NotebookOutput[]) => void;
+              };
               trusted: boolean;
             };
             codeCellModel.executionCount = nextCell.execution_count ?? null;
+            // Update both shared model and output area model for rendering
             codeCellModel.sharedModel.setOutputs(nextCell.outputs ?? []);
+            const nextOutputs = nextCell.outputs ?? [];
+            codeCellModel.outputs.clear();
+            if (nextOutputs.length > 0) {
+              codeCellModel.outputs.fromJSON(nextOutputs);
+            }
             codeCellModel.trusted = nextCell.trusted === true;
           }
         }
@@ -951,6 +961,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       return;
     }
     if (nextNotebookMetadataSignature !== appliedNotebookMetadataSignatureRef.current) {
+      // Notebook metadata changed — full reset needed
       appliedDocumentVersionRef.current = nextVersion;
       appliedTrustSignatureRef.current = nextTrustSignature;
       appliedNotebookMetadataSignatureRef.current = nextNotebookMetadataSignature;
