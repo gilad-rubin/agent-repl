@@ -113,8 +113,7 @@ async function startBridge(
     }
 
     const token = generateToken();
-    const maxQueue = config.get<number>('maxQueueSize', 20);
-    const routes = buildRoutes(maxQueue);
+    const routes = buildRoutes();
     server = new BridgeServer(token, routes);
 
     // Hot-reload: clear require cache for our modules, rebuild routes in-place
@@ -130,7 +129,7 @@ async function startBridge(
             }
         }
         const fresh = require('./routes') as { buildRoutes: typeof buildRoutes };
-        const newRoutes = fresh.buildRoutes(maxQueue);
+        const newRoutes = fresh.buildRoutes();
         newRoutes['POST /api/reload'] = server!.getRoute('POST /api/reload')!;
         server!.setRoutes(newRoutes);
 

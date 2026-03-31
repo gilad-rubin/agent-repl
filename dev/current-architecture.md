@@ -108,7 +108,7 @@ Key modules:
 | `editor/provider.ts` | Custom `.ipynb` canvas provider and open-canvas tracking |
 | `editor/proxy.ts` | Webview/runtime message bridge and presence updates |
 | `editor/webview.ts` | HTML shell that loads the shared canvas bundle |
-| `execution/queue.ts` | Daemon-routed execution queue — all execution via `POST /api/notebooks/execute-cell` |
+| `execution/queue.ts` | Jupyter API cache and IOPub output helpers (execution is daemon-routed) |
 | `notebook/*` | Resolver, edit operations, output conversion, identity helpers |
 
 ### Canvas UI
@@ -127,7 +127,7 @@ The current shipped preview path uses the same built assets:
 - browser preview: `extension/preview.html` + `extension/scripts/preview-webview.mjs`
 - VS Code custom editor: `editor/provider.ts` + `editor/webview.ts`
 
-In browser mode, the host shell still looks like `agent-repl`: activity rail, explorer, toolbar framing, theme controls, and kernel picker live in the host layer. Inside that shell, the notebook itself is now a real JupyterLab `Notebook` widget. That means:
+The JupyterLab surface is now the default for the browser preview (the legacy canvas is accessible via `?surface=legacy`). In browser mode, the host shell still looks like `agent-repl`: activity rail, explorer, toolbar framing, theme controls, and kernel picker live in the host layer. Inside that shell, the notebook itself is a real JupyterLab `Notebook` widget. That means:
 
 - notebook editing/rendering behavior is increasingly JupyterLab-owned
 - daemon/session/runtime behavior remains `agent-repl`-owned
@@ -285,7 +285,7 @@ This is the main replacement rule for ongoing work:
 All notebook execution routes through the daemon via `POST /api/notebooks/execute-cell`:
 
 - CLI, MCP, browser UI, and VS Code canvas all use the same daemon HTTP endpoint
-- The extension's `execution/queue.ts` dispatches to `daemonPost` — no native VS Code execution (`notebook.cell.execute`, `kernel.executeCode`) is used for workspace notebooks
+- The extension's `execution/queue.ts` provides Jupyter API helpers and IOPub output converters — no native VS Code execution is used for workspace notebooks
 - `HeadlessNotebookProjection.executeCells` in `session.ts` uses the same daemon path
 - Queue state and running/idle status are derived from daemon responses and WebSocket push events
 - Execution is serialized per notebook by the daemon's execution ledger
@@ -308,7 +308,7 @@ The settings with the biggest architectural impact are:
 - `agent-repl.browserCanvasUrl`
 - `agent-repl.executionMode`
 
-`executionMode` is no longer used for execution routing. All execution goes through the daemon. The setting may be removed in a future cleanup.
+`executionMode` is vestigial — all execution goes through the daemon. The setting and `maxQueueSize` can be removed from `package.json` in a future cleanup.
 
 Canvas Python IDE features are powered by a virtual notebook document plus a generated shadow file under the workspace-local `.agent-repl/pyright/` tree. That keeps Pyright's on-disk scratch state out of the notebook directories while preserving notebook-relative analysis semantics.
 

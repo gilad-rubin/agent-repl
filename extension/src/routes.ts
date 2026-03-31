@@ -3,9 +3,9 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Routes } from './server';
-import { resolveNotebook, resolveNotebookUri, resolveOrOpenNotebook, findOpenNotebook, findEditor, ensureNotebookEditor, captureEditorFocus, restoreEditorFocus } from './notebook/resolver';
+import { resolveNotebook, resolveNotebookUri, resolveOrOpenNotebook, findOpenNotebook, ensureNotebookEditor, captureEditorFocus, restoreEditorFocus } from './notebook/resolver';
 import { applyEdits, EditOp } from './notebook/operations';
-import { getCellId, ensureIds, resolveCell, withCellId, newCellId } from './notebook/identity';
+import { getCellId, ensureIds, resolveCell, newCellId } from './notebook/identity';
 import { toJupyter, stripForAgent } from './notebook/outputs';
 import { resetJupyterApiCache, getJupyterApi } from './execution/queue';
 import { discoverDaemon, daemonPost, workspaceRootForPath } from './session';
@@ -686,7 +686,7 @@ function requireDaemon(fsPath: string): { daemon: { url: string; token: string }
     return { daemon, workspaceRoot };
 }
 
-export function buildRoutes(maxQueue: number): Routes {
+export function buildRoutes(): Routes {
     return {
         // --- Health ---
         'GET /api/health': async () => ({
