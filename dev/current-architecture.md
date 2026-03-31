@@ -104,7 +104,7 @@ Key modules:
 | `extension.ts` | Activation, command registration, provider wiring |
 | `server.ts` | HTTP server, route dispatch, bearer-token auth |
 | `routes.ts` | Bridge API handlers and editor integration endpoints |
-| `session.ts` | Shared-runtime auto-attach, heartbeats, projection sync |
+| `session.ts` | Shared-runtime auto-attach, heartbeats, daemon HTTP helpers |
 | `editor/provider.ts` | Custom `.ipynb` canvas provider and open-canvas tracking |
 | `editor/proxy.ts` | Webview/runtime message bridge and presence updates |
 | `editor/webview.ts` | HTML shell that loads the shared canvas bundle |
@@ -286,7 +286,6 @@ All notebook execution routes through the daemon via `POST /api/notebooks/execut
 
 - CLI, MCP, browser UI, and VS Code canvas all use the same daemon HTTP endpoint
 - The extension's `execution/queue.ts` provides Jupyter API helpers and IOPub output converters — no native VS Code execution is used for workspace notebooks
-- `HeadlessNotebookProjection.executeCells` in `session.ts` uses the same daemon path
 - Queue state and running/idle status are derived from daemon responses and WebSocket push events
 - Execution is serialized per notebook by the daemon's execution ledger
 

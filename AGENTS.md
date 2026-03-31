@@ -29,26 +29,22 @@ SQLite state + YDoc notebooks + headless kernels + checkpoints
 
 All surfaces call the same `CoreState` service layer. See [dev/core-guide.md](dev/core-guide.md) for module map and design rules, [dev/extension-guide.md](dev/extension-guide.md) for extension internals.
 
-### JupyterLab Direction
+### JupyterLab Notebook Surface
 
-The human-facing notebook surface is now moving onto a real JupyterLab notebook implementation.
+The human-facing notebook surface is a JupyterLab `Notebook` widget. It is the default for browser preview (legacy canvas accessible via `?surface=legacy`).
 
-What JupyterLab should own:
+JupyterLab owns:
 
 - code and markdown cell editing behavior
-- command/edit mode semantics and notebook keyboard flows
+- command/edit mode semantics and notebook keyboard flows (including undo/redo, search via Cmd+F, cell shortcuts)
 - notebook output rendering, trust semantics, and widget-compatible rendering
-- notebook-level styling/interaction defaults wherever upstream already has a strong answer
 
-What `agent-repl` must continue to own:
+`agent-repl` owns:
 
 - daemon/runtime/session authority
 - headless execution and attach/detach behavior
 - workspace routing and cross-project notebook resolution
-- collaboration/session attribution, leases, branches, and review workflow
-- product shell concerns around explorer/toolbar integration and browser/VS Code hosting
-
-Treat old custom notebook-surface code as transitional unless it is clearly host-specific or product-specific.
+- host shell concerns: explorer, toolbar, kernel picker, theme, clear-outputs button
 
 ## Rules
 
@@ -88,9 +84,8 @@ Key points:
 - Session operations use daemon HTTP directly (not CLI execFile), except during initial daemon bootstrap
 - Execution paths must stay background-safe (no focus stealing)
 - Use `npm run preview:webview` for renderer work, Extension Development Host for integration
-- `extension/webview-src/jupyterlab-preview.tsx` is the current notebook-surface spike and should be the default place to extend notebook semantics before growing `main.tsx` further
-- Prefer replacing bespoke notebook behavior with JupyterLab primitives instead of duplicating it in the host shell
-- Keep custom UI work focused on host shell/product affordances; treat notebook-editing and rich-output behavior as JupyterLab-owned unless there is a clear product reason not to
+- `extension/webview-src/jupyterlab-preview.tsx` is the primary notebook surface (default for browser preview); extend notebook semantics here, not in `main.tsx`
+- Keep custom UI work focused on host shell/product affordances; treat notebook-editing and rich-output behavior as JupyterLab-owned
 - Prefer `agent-repl editor dev --editor vscode` over testing an installed extension during normal development
 - When claiming a browser fix, verify it with the browser workflow in [dev/browser-verification-guide.md](dev/browser-verification-guide.md), including intermediate cell output when execution/rendering changed
 - Prefer `@carbon/icons-react` over custom SVG for notebook chrome icons

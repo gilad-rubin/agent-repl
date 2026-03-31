@@ -30,7 +30,7 @@ These behaviors are architectural commitments from the v1 modernization. They sh
 |---|---|---|---|
 | All workspace notebook execution routes through daemon HTTP | The v1 architecture commits to one execution path for all surfaces | No `notebook.cell.execute` or `kernel.executeCode` in execution paths. [queue-no-yank.test.js](/extension/tests/queue-no-yank.test.js) | Strong |
 | Extension queue dispatches to `daemonPost`, not VS Code commands | Prevents execution path divergence between editor and headless | `execution/queue.ts` uses `daemonPost` from `session.ts`. [queue-focus-restore.test.js](/extension/tests/queue-focus-restore.test.js) | Strong |
-| HeadlessNotebookProjection.executeCells uses daemon HTTP | Projection execution must not bypass the unified path | `session.ts` calls `daemonPost('/api/notebooks/execute-cell')`. [session-auto-attach.test.js](/extension/tests/session-auto-attach.test.js) | Strong |
+| Extension execution helpers use daemon HTTP | No execution path should bypass the unified daemon route | `session.ts` exposes `daemonPost` which all execution routes use. [session-auto-attach.test.js](/extension/tests/session-auto-attach.test.js) | Strong |
 
 ## Notes
 
