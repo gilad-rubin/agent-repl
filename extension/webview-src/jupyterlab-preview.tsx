@@ -2604,13 +2604,18 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
 
           {secondaryStatus ? (
             <div className="agent-repl-jupyterlab-toolbarStatus" style={{
-              margin: '30px 24px 0',
-              padding: '12px 16px',
-              borderRadius: 4,
-              border: '1px solid var(--cds-border-subtle)',
+              position: 'fixed',
+              bottom: 16,
+              right: 16,
+              padding: '8px 14px',
+              borderRadius: 6,
               background: 'var(--cds-layer)',
               color: 'var(--cds-text-secondary)',
-              fontSize: 13,
+              fontSize: 12,
+              boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+              zIndex: 1000,
+              pointerEvents: 'none',
+              opacity: 0.9,
             }}>
               {secondaryStatus}
             </div>
