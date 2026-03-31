@@ -69,8 +69,9 @@ API changes touch multiple layers — keep in sync:
 1. CLI parser/handlers (`src/agent_repl/cli.py`)
 2. Core services (`src/agent_repl/core/server.py`, service modules)
 3. Route modules + request models (`src/agent_repl/core/*_http_routes.py`, `*_requests.py`)
-4. MCP tools (`src/agent_repl/core/mcp_adapter.py`)
+4. MCP tools (`src/agent_repl/core/mcp_adapter.py`) — 6 bundled tools, not flat
 5. Extension routes (`extension/src/routes.ts`) when editor-backed
+6. WebSocket transport (`src/agent_repl/core/ws_transport.py`) for live sync events
 6. Docs (`README.md`, `docs/`, `dev/`)
 
 <important if="editing files in extension/src/ or extension/webview-src/">
@@ -81,6 +82,9 @@ Read [dev/extension-guide.md](dev/extension-guide.md) for module map, dev loops,
 
 Key points:
 - `execution/queue.ts` is the most complex module — read fully before modifying
+- All execution routes through the daemon — no native VS Code execution, no Jupyter API fallbacks
+- Live sync uses `extension/src/shared/wsClient.ts` — shared by both proxy and browser host
+- Session operations use daemon HTTP directly (not CLI execFile), except during initial daemon bootstrap
 - Execution paths must stay background-safe (no focus stealing)
 - Use `npm run preview:webview` for renderer work, Extension Development Host for integration
 - `extension/webview-src/jupyterlab-preview.tsx` is the current notebook-surface spike and should be the default place to extend notebook semantics before growing `main.tsx` further
@@ -111,6 +115,8 @@ Key points:
 - When stale server, workspace mismatch, route mismatch, or lease/runtime conflicts are detected, prefer structured recovery metadata and safe automatic fallback over bare string errors
 - Source input pattern (`-s`, `--source-file`, stdin) is shared across `ix`, `respond`, `edit` — keep consistent
 - Omitted `--session-id` reuses the preferred active human session
+- Session resolution is centralized in `CollaborationService.resolve_preferred_session()` — CLI and extension both call daemon HTTP, no inline ranking logic
+- MCP exposes 6 bundled tools: `notebook_observe`, `notebook_edit`, `notebook_execute`, `notebook_runtime`, `workspace_files`, `checkpoint`
 
 </important>
 
