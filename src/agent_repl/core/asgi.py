@@ -11,6 +11,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from agent_repl.core.checkpoint_http_routes import routes as checkpoint_routes
 from agent_repl.core.collaboration_http_routes import routes as collaboration_routes
 from agent_repl.core.document_http_routes import routes as document_routes
 from agent_repl.core.notebook_http_routes import routes as notebook_routes
@@ -130,6 +131,7 @@ def create_app(
     # ------------------------------------------------------------------
 
     domain_routes: list[Route] = [
+        *checkpoint_routes(state),
         *notebook_routes(state),
         *collaboration_routes(state),
         *document_routes(state),

@@ -1454,6 +1454,36 @@ def cmd_core(args: argparse.Namespace) -> int:
         _out(result, args.pretty)
         return 0
 
+    if args.core_command == "checkpoint-create":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).checkpoint_create(
+            args.path,
+            label=getattr(args, "label", None),
+            session_id=getattr(args, "session_id", None),
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "checkpoint-restore":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).checkpoint_restore(
+            args.checkpoint_id,
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "checkpoint-list":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).checkpoint_list(
+            args.path,
+        )
+        _out(result, args.pretty)
+        return 0
+
+    if args.core_command == "checkpoint-delete":
+        result = _core_client(workspace_root, runtime_dir=runtime_dir).checkpoint_delete(
+            args.checkpoint_id,
+        )
+        _out(result, args.pretty)
+        return 0
+
     if args.core_command == "serve":
         serve_forever(workspace_root, runtime_dir=args.runtime_dir)
         return 0
@@ -2082,6 +2112,28 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
     vp.add_argument("--run-id", required=True)
     vp.add_argument("--status-value", required=True, choices=["completed", "failed", "interrupted"])
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("checkpoint-create", help="Create a checkpoint for a notebook")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--path", required=True, help="Notebook path")
+    vp.add_argument("--label", help="Optional label for the checkpoint")
+    vp.add_argument("--session-id", help="Session that created the checkpoint")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("checkpoint-restore", help="Restore a notebook from a checkpoint")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--checkpoint-id", required=True, help="Checkpoint ID to restore")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("checkpoint-list", help="List checkpoints for a notebook")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--path", required=True, help="Notebook path")
+    vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
+
+    vp = coresub.add_parser("checkpoint-delete", help="Delete a checkpoint")
+    vp.add_argument("--workspace-root", help="Workspace root to inspect (default: cwd)")
+    vp.add_argument("--checkpoint-id", required=True, help="Checkpoint ID to delete")
     vp.add_argument("--runtime-dir", help=argparse.SUPPRESS)
 
     vp = coresub.add_parser("serve", help=argparse.SUPPRESS)

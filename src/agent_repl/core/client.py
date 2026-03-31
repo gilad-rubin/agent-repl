@@ -553,6 +553,30 @@ class CoreClient(JsonApiClient):
     def finish_run(self, run_id: str, *, status: str) -> dict[str, Any]:
         return self._post("/api/runs/finish", {"run_id": run_id, "status": status})
 
+    def checkpoint_create(
+        self,
+        path: str,
+        *,
+        label: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        from agent_repl.core.checkpoint_requests import CheckpointCreateRequest
+        body = CheckpointCreateRequest(path=path, label=label, session_id=session_id).to_payload()
+        return self._post("/api/checkpoints/create", body)
+
+    def checkpoint_restore(self, checkpoint_id: str) -> dict[str, Any]:
+        from agent_repl.core.checkpoint_requests import CheckpointRestoreRequest
+        body = CheckpointRestoreRequest(checkpoint_id=checkpoint_id).to_payload()
+        return self._post("/api/checkpoints/restore", body)
+
+    def checkpoint_list(self, path: str) -> dict[str, Any]:
+        return self._get(f"/api/checkpoints/list?path={path}")
+
+    def checkpoint_delete(self, checkpoint_id: str) -> dict[str, Any]:
+        from agent_repl.core.checkpoint_requests import CheckpointDeleteRequest
+        body = CheckpointDeleteRequest(checkpoint_id=checkpoint_id).to_payload()
+        return self._post("/api/checkpoints/delete", body)
+
     def _poll_execution(self, initial: dict[str, Any], timeout: float) -> dict[str, Any]:
         return poll_execution_until_complete(
             initial,

@@ -53,6 +53,10 @@ agent-repl exec demo.ipynb --cell-id <id>
 - `status` — check execution state for long-running or uncertain cells
 - `run-all` / `restart` / `restart-run-all` — notebook-wide execution control
 - `select-kernel` — switch the notebook kernel
+- `core checkpoint-create` — snapshot notebook state before risky work
+- `core checkpoint-restore` — restore a prior notebook snapshot
+- `core checkpoint-list` — list checkpoints for a notebook
+- `core checkpoint-delete` — remove a checkpoint
 - `setup` — onboarding helper that can configure editor defaults, run MCP setup, and execute a notebook smoke test
 - `doctor` — JSON readiness report for install method, workspace kernel, editor defaults, and optional MCP
 - `editor configure --default-canvas` — make the Agent REPL canvas the workspace default for `*.ipynb`
@@ -76,6 +80,8 @@ agent-repl ix demo.ipynb --cells-json '[{"type":"code","source":"import pandas a
 When onboarding a fresh workspace, prefer `agent-repl setup --smoke-test` over manually stitching together verification commands. When you only need diagnostics, prefer `agent-repl doctor`.
 
 **Understand rollback behavior.** If `ix` fails due to infrastructure (kernel crash, timeout, connection lost), the inserted cell is rolled back and the notebook is unchanged. Python exceptions in your code are *not* rolled back — those produce normal error output.
+
+**Use checkpoints before risky work.** `core checkpoint-create --path notebook.ipynb --label "before refactor"` snapshots the full notebook state. If things go wrong, `core checkpoint-restore --checkpoint-id <id>` brings it back. Restore refuses if cells are still executing.
 
 **Use `cat --no-outputs` for cell IDs.** When you need to edit or rerun a specific cell, `cat` gives you the cell IDs. Don't guess them.
 

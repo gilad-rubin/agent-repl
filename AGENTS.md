@@ -21,10 +21,10 @@ cd extension && npm run preview:webview  # browser canvas preview
 Human or Agent
     ↕
 CLI / Browser Preview / VS Code Canvas
-    ↕
+    ↕ (WebSocket push for live sync, HTTP for mutations)
 ASGI Daemon + MCP (src/agent_repl/core/)
     ↕
-SQLite state + YDoc notebooks + headless kernels
+SQLite state + YDoc notebooks + headless kernels + checkpoints
 ```
 
 All surfaces call the same `CoreState` service layer. See [dev/core-guide.md](dev/core-guide.md) for module map and design rules, [dev/extension-guide.md](dev/extension-guide.md) for extension internals.
@@ -56,8 +56,10 @@ Treat old custom notebook-surface code as transitional unless it is clearly host
 - **Docs are part of done.** Update `AGENTS.md`, `SKILL.md`, `docs/`, `dev/` together.
 - **Adapters stay thin.** CLI, extension, browser, MCP reuse shared contracts — no re-encoding notebook semantics.
 - **Execution truth is server-owned.** Clients derive queue/running state from the daemon.
+- **Live sync is WebSocket push.** All surfaces receive activity, execution, and presence events via WebSocket (`/ws`). No HTTP polling. Mutations go through HTTP; WebSocket is read-only push.
 - **Staleness and conflict recovery are product behavior.** CLI, MCP, browser, and IDE surfaces should detect stale or mismatched state, self-heal when safe, and otherwise return actionable next steps instead of generic failures.
 - **Mutations route through YDoc** then mirror to nbformat for disk. See [dev/core-guide.md](dev/core-guide.md).
+- **Checkpoints over branching.** Use checkpoints to snapshot/restore notebook state. No branch/merge in v1.
 - **Commit and push autonomously** as you work on a feature. This will allow backtracking.
 
 ## Coupling
@@ -103,7 +105,7 @@ Read [dev/core-guide.md](dev/core-guide.md) for the full module map, route struc
 
 Key points:
 - `client.py` = extension bridge; `core/client.py` = shared runtime client; `cli.py` = public surface
-- Hidden `agent-repl core ...` commands are the diagnostics surface
+- Hidden `agent-repl core ...` commands are the diagnostics surface; `agent-repl core checkpoint-*` commands manage checkpoints
 - Public onboarding commands are `agent-repl setup`, `agent-repl doctor`, `agent-repl editor configure --default-canvas`, and `agent-repl editor dev`
 - `setup` should report post-action state in JSON so agents can continue safely after editor or MCP configuration
 - When stale server, workspace mismatch, route mismatch, or lease/runtime conflicts are detected, prefer structured recovery metadata and safe automatic fallback over bare string errors
