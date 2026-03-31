@@ -827,22 +827,54 @@ body { margin: 0; }
 [data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon pre,
 [data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-InputArea-editor,
 [data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-InputArea-editor {
-  background: #1b1f23;
-  border-color: rgba(235, 229, 219, 0.08);
+  background: #1b1f23 !important;
+  border-color: rgba(235, 229, 219, 0.08) !important;
 }
 
 [data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-InputArea-editor:focus-within,
 [data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-InputArea-editor:focus-within {
-  border-color: rgba(217, 119, 6, 0.42);
-  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12);
+  border-color: rgba(217, 119, 6, 0.42) !important;
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12) !important;
+}
+
+/* Dark mode: CodeMirror fold placeholder and all editor internals */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-editor,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-editor {
+  background: transparent !important;
+  color: var(--cds-text-primary) !important;
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-foldPlaceholder,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-foldPlaceholder {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  color: rgba(255, 255, 255, 0.5) !important;
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-foldGutter .cm-gutterElement,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-foldGutter .cm-gutterElement {
+  color: rgba(255, 255, 255, 0.3) !important;
+}
+
+/* Dark mode: ensure JupyterLab theme-light doesn't leak through */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-Cell-inputWrapper,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-Cell-inputWrapper,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-Cell-outputWrapper,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-Cell-outputWrapper {
+  background: transparent !important;
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-InputArea,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-InputArea {
+  background: transparent !important;
 }
 
 /* Dark mode: output areas */
 [data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-OutputArea-output,
 [data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-OutputArea-output {
-  background: rgba(255, 255, 255, 0.03);
-  border-color: rgba(255, 255, 255, 0.06);
-  color: var(--cds-text-primary);
+  background: rgba(255, 255, 255, 0.03) !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+  color: var(--cds-text-primary) !important;
 }
 
 /* Dark mode: output text, pre blocks, rendered content */
@@ -850,9 +882,9 @@ body { margin: 0; }
 [data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-OutputArea-output pre,
 [data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedText pre,
 [data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedText pre {
-  background: transparent;
-  color: var(--cds-text-primary);
-  border: none;
+  background: transparent !important;
+  color: var(--cds-text-primary) !important;
+  border: none !important;
 }
 
 /* Dark mode: prompts ([ ]:, [1]:) */
