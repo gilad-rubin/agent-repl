@@ -122,6 +122,7 @@ These commands require the VS Code / Cursor extension: `respond`, `kernels`, `re
 | Cmd+Enter | Any | Run cell in place |
 | Alt+Enter | Any | Run cell and insert below |
 | Cmd+S | Any | Save notebook |
+| Cmd+B | Any | Toggle file explorer |
 | Escape | Edit | Enter command mode |
 | Enter | Command | Enter edit mode |
 | A | Command | Insert cell above |
@@ -136,6 +137,10 @@ These commands require the VS Code / Cursor extension: `respond`, `kernels`, `re
 | Cmd+Shift+ArrowUp | Command | Move cell up |
 | Cmd+Shift+ArrowDown | Command | Move cell down |
 | Cmd+A | Command | Select all cells |
+| C | Command | Copy selected cells |
+| V | Command | Paste cells |
+| Shift+M | Command | Merge selected cells |
+| Cmd+Shift+- | Edit | Split cell at cursor |
 | Cmd+F | Edit | Search within cell (CodeMirror) |
 | Cmd+Z / Cmd+Shift+Z | Edit | Undo / redo cell source |
 
