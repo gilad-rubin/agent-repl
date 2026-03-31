@@ -142,5 +142,66 @@ class TestDomainRouteDispatch(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
 
 
+class TestWebSocketNonceEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.state = _mock_state()
+        # Attach a real WS transport so the nonce endpoint works
+        from agent_repl.core.ws_transport import WebSocketTransport
+        self.state._ws_transport = WebSocketTransport(
+            instance_id={"pid": 12345, "started_at": 1000.0},
+        )
+        self.app = create_app(self.state)
+        self.client = TestClient(self.app, raise_server_exceptions=False)
+        self.headers = {"Authorization": "token test-token"}
+
+    def test_ws_nonce_returns_nonce(self):
+        resp = self.client.post("/api/ws-nonce", headers=self.headers)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIn("nonce", body)
+        self.assertTrue(len(body["nonce"]) > 0)
+
+    def test_ws_nonce_requires_auth(self):
+        resp = self.client.post("/api/ws-nonce")
+        self.assertEqual(resp.status_code, 401)
+
+
+class TestWebSocketRoute(unittest.TestCase):
+    def setUp(self):
+        self.state = _mock_state()
+        from agent_repl.core.ws_transport import WebSocketTransport
+        self.state._ws_transport = WebSocketTransport(
+            instance_id={"pid": 12345, "started_at": 1000.0},
+        )
+        self.app = create_app(self.state)
+        self.headers = {"Authorization": "token test-token"}
+
+    def test_ws_rejects_without_nonce(self):
+        client = TestClient(self.app)
+        with client.websocket_connect("/ws") as ws:
+            # The middleware accepts then immediately closes with 4401
+            data = ws.receive()
+            self.assertEqual(data.get("code"), 4401)
+
+    def test_ws_connects_with_valid_nonce(self):
+        client = TestClient(self.app, raise_server_exceptions=False)
+        nonce = self.state._ws_transport.create_nonce()
+        with client.websocket_connect(f"/ws?nonce={nonce}") as ws:
+            hello = ws.receive_json()
+            self.assertEqual(hello["type"], "hello")
+            self.assertEqual(hello["instance"]["pid"], 12345)
+
+    def test_ws_rejects_reused_nonce(self):
+        client = TestClient(self.app, raise_server_exceptions=False)
+        nonce = self.state._ws_transport.create_nonce()
+        # Use it once
+        with client.websocket_connect(f"/ws?nonce={nonce}") as ws:
+            ws.receive_json()
+        # Reuse should fail
+        with client.websocket_connect(f"/ws?nonce={nonce}") as ws:
+            data = ws.receive()
+            self.assertEqual(data.get("code"), 4401)
+
+
 if __name__ == "__main__":
     unittest.main()

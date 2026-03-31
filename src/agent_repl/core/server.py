@@ -22,6 +22,7 @@ from jupyter_client import KernelManager
 from jupyter_client.kernelspec import KernelSpec
 
 from agent_repl.client import BridgeClient
+from agent_repl.core.checkpoint_service import CheckpointService
 from agent_repl.core.collaboration import CollaborationConflictError
 from agent_repl.core.collaboration_service import CollaborationService
 from agent_repl.core.execution_ledger_service import ExecutionLedgerService
@@ -30,6 +31,7 @@ from agent_repl.core.notebook_mutation_service import NotebookMutationService
 from agent_repl.core.notebook_read_service import NotebookReadService
 from agent_repl.core.notebook_trust_service import NotebookTrustService
 from agent_repl.core.notebook_write_service import NotebookWriteService
+from agent_repl.core.ws_transport import WebSocketTransport
 from agent_repl.core.ydoc_service import YDocService
 from agent_repl.recovery import runtime_busy_recovery
 
@@ -240,6 +242,42 @@ class ActivityEventRecord:
 
 
 @dataclass
+class CheckpointRecord:
+    checkpoint_id: str
+    path: str
+    label: str | None
+    snapshot_nbformat: str
+    snapshot_ydoc: bytes | None
+    metadata: dict[str, Any] | None
+    created_by_session_id: str | None
+    created_at: float
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "checkpoint_id": self.checkpoint_id,
+            "path": self.path,
+            "label": self.label,
+            "snapshot_nbformat": self.snapshot_nbformat,
+            "snapshot_ydoc_size": len(self.snapshot_ydoc) if self.snapshot_ydoc else 0,
+            "metadata": self.metadata,
+            "created_by_session_id": self.created_by_session_id,
+            "created_at": self.created_at,
+        }
+
+    def payload_for_db(self) -> dict[str, Any]:
+        return {
+            "checkpoint_id": self.checkpoint_id,
+            "path": self.path,
+            "label": self.label,
+            "snapshot_nbformat": self.snapshot_nbformat,
+            "snapshot_ydoc": self.snapshot_ydoc,
+            "metadata": self.metadata,
+            "created_by_session_id": self.created_by_session_id,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
 class BranchRecord:
     branch_id: str
     document_id: str
@@ -329,6 +367,7 @@ class CoreState:
     runtime_records: dict[str, RuntimeRecord] = field(default_factory=dict)
     run_records: dict[str, RunRecord] = field(default_factory=dict)
     execution_records: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    checkpoint_records: dict[str, CheckpointRecord] = field(default_factory=dict, repr=False)
     activity_records: list[ActivityEventRecord] = field(default_factory=list, repr=False)
     headless_runtimes: dict[str, HeadlessNotebookRuntime] = field(default_factory=dict, repr=False)
     _validated_kernel_pythons: set[str] = field(default_factory=set, init=False, repr=False)
@@ -336,6 +375,7 @@ class CoreState:
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _notebook_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _notebook_locks_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _checkpoint_service: CheckpointService = field(init=False, repr=False)
     _collaboration_service: CollaborationService = field(init=False, repr=False)
     _execution_ledger_service: ExecutionLedgerService = field(init=False, repr=False)
     _notebook_execution_service: NotebookExecutionService = field(init=False, repr=False)
@@ -343,6 +383,7 @@ class CoreState:
     _notebook_read_service: NotebookReadService = field(init=False, repr=False)
     _notebook_trust_service: NotebookTrustService = field(init=False, repr=False)
     _notebook_write_service: NotebookWriteService = field(init=False, repr=False)
+    _ws_transport: WebSocketTransport = field(init=False, repr=False)
     _ydoc_service: YDocService = field(init=False, repr=False)
     _db: Any = field(default=None, init=False, repr=False)
     _owner_thread_id: int = field(default=0, init=False, repr=False)
@@ -355,6 +396,7 @@ class CoreState:
             (record.timestamp for record in self.activity_records),
             default=self.started_at,
         )
+        self._checkpoint_service = CheckpointService(self)
         self._collaboration_service = CollaborationService(
             self,
             session_record_type=SessionRecord,
@@ -374,6 +416,9 @@ class CoreState:
             db_file=os.getenv("AGENT_REPL_NOTEBOOK_TRUST_DB"),
         )
         self._notebook_write_service = NotebookWriteService(self)
+        self._ws_transport = WebSocketTransport(
+            instance_id={"pid": self.pid, "started_at": self.started_at},
+        )
         self._ydoc_service = YDocService()
         self._recompute_counts()
 
@@ -415,6 +460,25 @@ class CoreState:
         ]
         return payload
 
+    # -- Checkpoint delegates ---------------------------------------------------
+
+    def checkpoint_create(
+        self,
+        path: str,
+        label: str | None = None,
+        session_id: str | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._checkpoint_service.create_checkpoint(path, label, session_id)
+
+    def checkpoint_restore(self, checkpoint_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._checkpoint_service.restore_checkpoint(checkpoint_id)
+
+    def checkpoint_list(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._checkpoint_service.list_checkpoints(path)
+
+    def checkpoint_delete(self, checkpoint_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._checkpoint_service.delete_checkpoint(checkpoint_id)
+
     def list_sessions_payload(self) -> dict[str, Any]:
         return self._collaboration_service.list_sessions_payload()
 
@@ -448,7 +512,9 @@ class CoreState:
             self.activity_records.append(event)
             if len(self.activity_records) > MAX_ACTIVITY_RECORDS:
                 del self.activity_records[: len(self.activity_records) - MAX_ACTIVITY_RECORDS]
-            return event.payload()
+            payload = event.payload()
+            self._ws_transport.fire_activity(payload)
+            return payload
 
     def _transition_runtime_record(
         self,
@@ -640,6 +706,7 @@ class CoreState:
                 runs=[r.payload() for r in self.run_records.values()],
                 activity=[r.payload() for r in self.activity_records],
                 executions=list(self.execution_records.values()),
+                checkpoints=[r.payload_for_db() for r in self.checkpoint_records.values()],
             )
 
     def touch_session(self, session_id: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -2434,6 +2501,20 @@ def _load_or_create_state(
             record["execution_id"]: record
             for record in data.get("executions", [])
             if isinstance(record, dict) and isinstance(record.get("execution_id"), str)
+        },
+        checkpoint_records={
+            record["checkpoint_id"]: CheckpointRecord(
+                checkpoint_id=record["checkpoint_id"],
+                path=record["path"],
+                label=record.get("label"),
+                snapshot_nbformat=record["snapshot_nbformat"],
+                snapshot_ydoc=record.get("snapshot_ydoc"),
+                metadata=record.get("metadata"),
+                created_by_session_id=record.get("created_by_session_id"),
+                created_at=record["created_at"],
+            )
+            for record in data.get("checkpoints", [])
+            if isinstance(record, dict) and isinstance(record.get("checkpoint_id"), str)
         },
     )
     _normalize_restored_state(state)

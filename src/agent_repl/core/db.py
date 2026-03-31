@@ -183,6 +183,19 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_executions_status
             ON executions(status);
+
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            checkpoint_id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            label TEXT,
+            snapshot_nbformat TEXT NOT NULL,
+            snapshot_ydoc BLOB,
+            metadata TEXT,
+            created_by_session_id TEXT,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_path
+            ON checkpoints(path);
     """)
 
 # -----------------------------------------------------------------------
@@ -199,6 +212,7 @@ def persist_all(
     runs: list[dict[str, Any]],
     activity: list[dict[str, Any]],
     executions: list[dict[str, Any]] | None = None,
+    checkpoints: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write all operational state to SQLite in a single transaction."""
     with conn:
@@ -209,6 +223,7 @@ def persist_all(
         _replace_runs(conn, runs)
         _replace_activity(conn, activity)
         _replace_executions(conn, executions or [])
+        _replace_checkpoints(conn, checkpoints or [])
 
 
 def load_all(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
@@ -221,6 +236,7 @@ def load_all(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
         "runs": _load_rows(conn, "runs"),
         "activity": _load_rows(conn, "activity", order_by="timestamp ASC"),
         "executions": _load_rows(conn, "executions"),
+        "checkpoints": _load_rows(conn, "checkpoints", order_by="created_at ASC"),
     }
 
 
@@ -270,6 +286,11 @@ def _deserialize_json_fields(table: str, record: dict[str, Any]) -> None:
             record["outputs"] = json.loads(record["outputs"])
         except (ValueError, TypeError):
             record["outputs"] = None
+    if table == "checkpoints" and isinstance(record.get("metadata"), str):
+        try:
+            record["metadata"] = json.loads(record["metadata"])
+        except (ValueError, TypeError):
+            record["metadata"] = None
 
 
 def _replace_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) -> None:
@@ -398,4 +419,21 @@ def _replace_executions(conn: sqlite3.Connection, executions: list[dict[str, Any
             json.dumps(e["outputs"]) if e.get("outputs") is not None else None,
             e.get("execution_count"), e.get("error"),
             e["created_at"], e["updated_at"],
+        ))
+
+
+def _replace_checkpoints(conn: sqlite3.Connection, checkpoints: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM checkpoints")
+    for c in checkpoints:
+        conn.execute("""
+            INSERT OR REPLACE INTO checkpoints
+                (checkpoint_id, path, label, snapshot_nbformat, snapshot_ydoc,
+                 metadata, created_by_session_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            c["checkpoint_id"], c["path"], c.get("label"),
+            c["snapshot_nbformat"],
+            c.get("snapshot_ydoc"),
+            json.dumps(c["metadata"]) if c.get("metadata") is not None else None,
+            c.get("created_by_session_id"), c["created_at"],
         ))
