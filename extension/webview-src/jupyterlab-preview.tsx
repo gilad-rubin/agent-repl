@@ -2041,10 +2041,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           void loadRuntime();
         }
         if (shouldReloadStandaloneNotebookContents(events)) {
-          const model = modelRef.current;
-          if (model && !model.dirty) {
-            void loadContents();
-          }
+          void loadContents();
         }
         if (pendingExecutionRef.current && !runtimeBusyRef.current) {
           pendingExecutionRef.current = false;

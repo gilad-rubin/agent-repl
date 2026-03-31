@@ -29,7 +29,11 @@ export function isNotebookStructureReloadEvent(eventType: string): boolean {
 
 export function shouldReloadStandaloneNotebookContents(events: ActivityEventLike[]): boolean {
     return events.some((event) => (
-        event.type === 'cell-source-updated' || isNotebookStructureReloadEvent(event.type)
+        event.type === 'cell-source-updated'
+        || event.type === 'cell-executed'
+        || event.type === 'execution-finished'
+        || event.type === 'execution'
+        || isNotebookStructureReloadEvent(event.type)
     ));
 }
 
