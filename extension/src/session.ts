@@ -8,10 +8,10 @@ import * as vscode from 'vscode';
 import { toJupyter, toVSCode } from './notebook/outputs';
 import { pushActivityEvent } from './routes';
 import { logNotebookDiagnostic } from './debug';
+import { DaemonWebSocket, type SocketLike } from './shared/wsClient';
 
 const execFile = util.promisify(childProcess.execFile);
 const HEARTBEAT_INTERVAL_MS = 30_000;
-const PROJECTION_SYNC_INTERVAL_MS = 1_000;
 export const PROJECTION_CONTROLLER_ID = 'agent-repl.headless-runtime';
 
 type CliPlan = {
@@ -435,12 +435,16 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
     private readonly attaching = new Set<string>();
     private readonly tracked = new Map<string, TrackedProjection>();
     private readonly userClosed = new Set<string>();
-    private syncTimer: NodeJS.Timeout | undefined;
+    private daemonWs: DaemonWebSocket | null = null;
+    private wsSubscriptions = new Set<string>();
+    private readonly _discoverDaemon: (workspaceRoot: string) => DaemonInfo | undefined;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly extensionId: string,
+        daemonDiscovery?: (workspaceRoot: string) => DaemonInfo | undefined,
     ) {
+        this._discoverDaemon = daemonDiscovery ?? discoverDaemon;
         this.controller = vscode.notebooks.createNotebookController(
             PROJECTION_CONTROLLER_ID,
             'jupyter-notebook',
@@ -504,16 +508,11 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
                 }
             }),
         );
-        this.syncTimer = setInterval(() => {
-            void this.syncTrackedNotebooks();
-        }, PROJECTION_SYNC_INTERVAL_MS);
+        this.startWs();
     }
 
     dispose(): void {
-        if (this.syncTimer) {
-            clearInterval(this.syncTimer);
-            this.syncTimer = undefined;
-        }
+        this.stopWs();
         for (const tracked of this.tracked.values()) {
             void this.clearNotebookPresence(tracked.notebook);
             tracked.activeExecution?.execution.end(false, Date.now());
@@ -617,7 +616,6 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
 
         this.syncTrackedExecution(tracked, state);
         const signature = projectionSignature(state.contents.cells);
-        const activityState = await this.syncNotebookActivity(tracked, state);
 
         // Never replay runtime-owned snapshots over a dirty notebook. The local
         // editor may be mid-edit or closing, and forcing replaceCells() here
@@ -625,32 +623,23 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         if (notebook.isDirty) {
             logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.skipDirty', {
                 signatureLength: signature.length,
-                activityChanged: activityState.changed,
-                activityNeedsSnapshot: activityState.needsSnapshot,
             });
             return false;
         }
 
-        let changed = false;
         if (tracked.lastAppliedSignature === signature) {
-            // Nothing changed since last apply — skip entirely.
-            logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.skipSignatureMatch', {
-                activityChanged: activityState.changed,
-                activityNeedsSnapshot: activityState.needsSnapshot,
-            });
-        } else if (!activityState.changed || activityState.needsSnapshot) {
-            logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.applySnapshot', {
-                previousSignatureLength: tracked.lastAppliedSignature?.length ?? 0,
-                nextSignatureLength: signature.length,
-                projectionCellCount: state.contents.cells.length,
-                activityChanged: activityState.changed,
-                activityNeedsSnapshot: activityState.needsSnapshot,
-            });
-            await applyProjectionSnapshot(notebook, state.contents.cells);
-            tracked.lastAppliedSignature = signature;
-            changed = true;
+            logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.skipSignatureMatch', {});
+            return false;
         }
-        return changed || activityState.changed;
+
+        logNotebookDiagnostic(notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookProjection.applySnapshot', {
+            previousSignatureLength: tracked.lastAppliedSignature?.length ?? 0,
+            nextSignatureLength: signature.length,
+            projectionCellCount: state.contents.cells.length,
+        });
+        await applyProjectionSnapshot(notebook, state.contents.cells);
+        tracked.lastAppliedSignature = signature;
+        return true;
     }
 
     private async executeCells(cells: readonly vscode.NotebookCell[], notebook: vscode.NotebookDocument): Promise<void> {
@@ -660,8 +649,13 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             throw new Error(`No workspace root matched '${notebook.uri.fsPath}'`);
         }
         const config = vscode.workspace.getConfiguration('agent-repl');
-        const sessionId = this.sessionIdForWorkspace(workspaceRoot);
         await this.projectVisibleNotebook(workspaceRoot, config, notebook);
+        const daemon = this._discoverDaemon(workspaceRoot);
+        if (!daemon) {
+            throw new Error('Daemon not available for execution');
+        }
+        const notebookPath = path.relative(workspaceRoot, notebook.uri.fsPath);
+        const sessionId = this.sessionIdForWorkspace(workspaceRoot);
         for (const cell of targetCells) {
             if (cell.kind !== vscode.NotebookCellKind.Code) {
                 continue;
@@ -669,14 +663,12 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
             const execution = this.controller.createNotebookCellExecution(cell);
             execution.start(Date.now());
             try {
-                const result = await runCliJson<VisibleCellExecutionResult>(workspaceRoot, config, [
-                    'core', 'execute-visible-cell',
-                    '--workspace-root', workspaceRoot,
-                    ...(sessionId ? ['--session-id', sessionId] : []),
-                    notebook.uri.fsPath,
-                    '--cell-index', String(cell.index),
-                    '--source', cell.document.getText(),
-                ]);
+                const result = await daemonPost<VisibleCellExecutionResult>(daemon, '/api/notebooks/execute-cell', {
+                    path: notebookPath,
+                    cell_index: cell.index,
+                    wait: true,
+                    ...(sessionId ? { owner_session_id: sessionId } : {}),
+                });
                 if (typeof result.execution_count === 'number') {
                     execution.executionOrder = result.execution_count;
                 }
@@ -772,6 +764,7 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         }
         const tracked: TrackedProjection = { notebook };
         this.tracked.set(notebook.uri.fsPath, tracked);
+        this.wsSubscribeNotebook(notebook);
         return tracked;
     }
 
@@ -783,68 +776,132 @@ export class HeadlessNotebookProjection implements vscode.Disposable {
         void this.clearNotebookPresence(tracked.notebook);
         this.finishTrackedExecution(tracked, undefined);
         this.tracked.delete(fsPath);
-    }
-
-    private async syncTrackedNotebooks(): Promise<void> {
-        for (const tracked of this.tracked.values()) {
-            try {
-                await this.syncNotebookProjection(tracked.notebook);
-            } catch (err: any) {
-                console.warn('[agent-repl] notebook projection sync failed:', err?.message ?? String(err));
+        // Unsubscribe from WS push for this notebook.
+        const workspaceRoot = workspaceRootForPath(fsPath);
+        if (workspaceRoot) {
+            const relative = path.relative(workspaceRoot, fsPath);
+            if (this.wsSubscriptions.has(relative)) {
+                this.wsSubscriptions.delete(relative);
+                this.daemonWs?.unsubscribe(relative);
             }
         }
     }
 
-    private async syncNotebookActivity(
-        tracked: TrackedProjection,
-        state?: NotebookProjectionState,
-    ): Promise<{ changed: boolean; needsSnapshot: boolean }> {
-        const workspaceRoot = workspaceRootForPath(tracked.notebook.uri.fsPath);
-        if (!workspaceRoot) {
-            return { changed: false, needsSnapshot: false };
-        }
-        const config = vscode.workspace.getConfiguration('agent-repl');
-        const sessionId = this.sessionIdForWorkspace(workspaceRoot);
-        if (sessionId) {
-            try {
-                await runCliJson(workspaceRoot, config, [
-                    'core', 'session-presence-upsert',
-                    '--workspace-root', workspaceRoot,
-                    '--session-id', sessionId,
-                    '--activity', 'observing',
-                    tracked.notebook.uri.fsPath,
-                ]);
-            } catch (err: any) {
-                console.warn('[agent-repl] notebook presence sync failed:', err?.message ?? String(err));
-            }
-        }
+    // -- WebSocket push (replaces timer-based HTTP polling) --------------------
 
-        const args = [
-            'core', 'notebook-activity',
-            '--workspace-root', workspaceRoot,
-            tracked.notebook.uri.fsPath,
-        ];
-        if (typeof tracked.lastActivityCursor === 'number' && tracked.lastActivityCursor > 0) {
-            args.push('--since', String(tracked.lastActivityCursor));
-        }
-        const activity = await runCliJson<NotebookActivityState>(workspaceRoot, config, args);
-        const events = activity.recent_events ?? [];
-        logNotebookDiagnostic(tracked.notebook.uri.fsPath, 'HeadlessNotebookProjection.syncNotebookActivity', {
-            sinceCursor: tracked.lastActivityCursor ?? null,
-            nextCursor: activity.cursor ?? null,
-            eventTypes: events.map((event) => event.type ?? 'unknown'),
+    private startWs(): void {
+        if (this.daemonWs) return;
+        const workspaceRoot = primaryWorkspaceRoot();
+        if (!workspaceRoot) return;
+        const daemon = this._discoverDaemon(workspaceRoot);
+        if (!daemon) return;
+
+        this.daemonWs = new DaemonWebSocket({
+            daemonUrl: daemon.url,
+            daemonToken: daemon.token,
+            createSocket: (url: string): SocketLike => {
+                if (typeof (globalThis as any).WebSocket === 'function') {
+                    return new (globalThis as any).WebSocket(url);
+                }
+                try {
+                    const WSLib = require('ws');
+                    return new WSLib(url);
+                } catch { /* not available */ }
+                throw new Error('No WebSocket implementation available');
+            },
+            fetchFn: globalThis.fetch ?? (async (input: any, init?: any) => {
+                // Minimal Node fetch shim via http module for nonce request.
+                const url = new URL(typeof input === 'string' ? input : input.url);
+                return new Promise<Response>((resolve, reject) => {
+                    const req = http.request(url, {
+                        method: init?.method ?? 'GET',
+                        headers: init?.headers as Record<string, string>,
+                    }, (res) => {
+                        const chunks: Buffer[] = [];
+                        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+                        res.on('end', () => {
+                            const body = Buffer.concat(chunks).toString();
+                            resolve({
+                                ok: (res.statusCode ?? 500) < 400,
+                                status: res.statusCode ?? 500,
+                                json: async () => JSON.parse(body),
+                            } as Response);
+                        });
+                    });
+                    req.on('error', reject);
+                    req.end();
+                });
+            }),
+            onMessage: (msg) => this.handleWsMessage(msg),
+            onConnect: () => {
+                // Re-subscribe all tracked notebooks.
+                for (const relativePath of this.wsSubscriptions) {
+                    this.daemonWs?.subscribe(relativePath);
+                }
+            },
+            onDisconnect: () => { /* reconnect is automatic */ },
+            onInstanceChange: () => {
+                // Daemon restarted — full resync for all tracked notebooks.
+                for (const tracked of this.tracked.values()) {
+                    void this.syncNotebookProjection(tracked.notebook).catch((err: any) => {
+                        console.warn('[agent-repl] notebook projection resync failed:', err?.message ?? String(err));
+                    });
+                }
+            },
         });
-        const applyResult = await applyIncrementalActivityEvents(tracked, events);
-        for (const event of events) {
-            pushActivityEvent(event);
+        this.daemonWs.connect();
+    }
+
+    private stopWs(): void {
+        if (this.daemonWs) {
+            this.daemonWs.close();
+            this.daemonWs = null;
         }
-        if (typeof activity.cursor === 'number') {
-            tracked.lastActivityCursor = activity.cursor;
+        this.wsSubscriptions.clear();
+    }
+
+    private wsSubscribeNotebook(notebook: vscode.NotebookDocument): void {
+        const workspaceRoot = workspaceRootForPath(notebook.uri.fsPath);
+        if (!workspaceRoot) return;
+        const relative = path.relative(workspaceRoot, notebook.uri.fsPath);
+        if (this.wsSubscriptions.has(relative)) return;
+        this.wsSubscriptions.add(relative);
+        this.daemonWs?.subscribe(relative);
+    }
+
+    private handleWsMessage(msg: any): void {
+        // Route to the tracked notebook by path.
+        const eventPath: string | undefined = msg.path ?? msg.data?.path;
+        if (!eventPath) return;
+        let tracked: TrackedProjection | undefined;
+        for (const [fsPath, t] of this.tracked) {
+            const workspaceRoot = workspaceRootForPath(fsPath);
+            if (workspaceRoot && path.relative(workspaceRoot, fsPath) === eventPath) {
+                tracked = t;
+                break;
+            }
         }
-        if (!tracked.notebook.isDirty && state?.contents && applyResult.changed && !applyResult.needsSnapshot) {
-            tracked.lastAppliedSignature = projectionSignature(state.contents.cells);
-        }
-        return applyResult;
+        if (!tracked) return;
+
+        // Wrap into activity event array and process.
+        const events: NotebookActivityEvent[] = [msg];
+        void (async () => {
+            try {
+                const applyResult = await applyIncrementalActivityEvents(tracked!, events);
+                for (const event of events) {
+                    pushActivityEvent(event);
+                }
+                if (typeof msg.cursor === 'number') {
+                    tracked!.lastActivityCursor = msg.cursor;
+                }
+                // If incremental apply says we need a snapshot, do a full sync.
+                if (applyResult.needsSnapshot) {
+                    await this.syncNotebookProjection(tracked!.notebook);
+                }
+            } catch (err: any) {
+                console.warn('[agent-repl] WS event handling failed:', err?.message ?? String(err));
+            }
+        })();
     }
 
     private async clearNotebookPresence(notebook: vscode.NotebookDocument): Promise<void> {
@@ -925,7 +982,7 @@ async function applyProjectionSnapshot(
     await replaceProjectionCells(notebook, 0, notebook.cellCount, cells);
 }
 
-async function applyIncrementalActivityEvents(
+export async function applyIncrementalActivityEvents(
     tracked: TrackedProjection,
     events: NotebookActivityEvent[],
 ): Promise<{ changed: boolean; needsSnapshot: boolean }> {

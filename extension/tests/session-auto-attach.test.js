@@ -263,6 +263,7 @@ function _httpResponseKey(endpoint) {
     if (endpoint.includes('/sessions/start')) return 'session-start';
     if (endpoint.includes('/sessions/touch')) return 'session-touch';
     if (endpoint.includes('/sessions/detach')) return 'session-detach';
+    if (endpoint.includes('/notebooks/execute-cell')) return 'execute-cell';
     return 'default';
 }
 
@@ -712,6 +713,7 @@ test('HeadlessNotebookProjection executes the visible cell source against the sh
     const {
         module: { HeadlessNotebookProjection },
         execCalls,
+        httpCalls,
         executions,
         getController,
     } = loadSessionModule(
@@ -722,7 +724,9 @@ test('HeadlessNotebookProjection executes the visible cell source against the sh
                     status: 'ok',
                     cell_count: 1,
                 },
-                'execute-visible-cell': {
+            },
+            httpResponses: {
+                'execute-cell': {
                     status: 'ok',
                     execution_count: 3,
                     outputs: [{ output_type: 'execute_result', data: { 'text/plain': '9' }, metadata: {} }],
@@ -730,19 +734,20 @@ test('HeadlessNotebookProjection executes the visible cell source against the sh
             },
         },
     );
-    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl');
+    const daemonDiscovery = () => ({ url: 'http://127.0.0.1:9999', token: 'tok' });
+    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl', daemonDiscovery);
     try {
         const controller = getController();
         await controller.executeHandler([cell], doc, controller);
-        assert.equal(execCalls.length, 2);
+        // project-visible-notebook still uses CLI
+        assert.equal(execCalls.length, 1);
         assert.ok(execCalls[0][1].includes('project-visible-notebook'));
         assert.ok(execCalls[0][1].includes('/workspace/notebooks/demo.ipynb'));
-        assert.ok(execCalls[1][1].includes('execute-visible-cell'));
-        assert.ok(execCalls[1][1].includes('/workspace/notebooks/demo.ipynb'));
-        assert.ok(execCalls[1][1].includes('--cell-index'));
-        assert.ok(execCalls[1][1].includes('0'));
-        assert.ok(execCalls[1][1].includes('--source'));
-        assert.ok(execCalls[1][1].includes('x = 9\nx'));
+        // execute-cell now routes through daemon HTTP
+        const execCall = httpCalls.find(c => c.url.includes('/notebooks/execute-cell'));
+        assert.ok(execCall, 'should call daemon execute-cell endpoint');
+        assert.equal(execCall.body.cell_index, 0);
+        assert.equal(execCall.body.wait, true);
         assert.equal(executions.length, 1);
         assert.equal(executions[0].executionOrder, 3);
         assert.equal(executions[0].success, true);
@@ -785,6 +790,7 @@ test('HeadlessNotebookProjection falls back to the selected first cell when VS C
     const {
         module: { HeadlessNotebookProjection },
         execCalls,
+        httpCalls,
         executions,
         getController,
     } = loadSessionModule(
@@ -797,7 +803,9 @@ test('HeadlessNotebookProjection falls back to the selected first cell when VS C
                     status: 'ok',
                     cell_count: 2,
                 },
-                'execute-visible-cell': {
+            },
+            httpResponses: {
+                'execute-cell': {
                     status: 'ok',
                     execution_count: 1,
                     outputs: [{ output_type: 'execute_result', data: { 'text/plain': '1' }, metadata: {} }],
@@ -805,16 +813,19 @@ test('HeadlessNotebookProjection falls back to the selected first cell when VS C
             },
         },
     );
-    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl');
+    const daemonDiscovery = () => ({ url: 'http://127.0.0.1:9999', token: 'tok' });
+    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl', daemonDiscovery);
     try {
         const controller = getController();
         await controller.executeHandler([], doc, controller);
-        assert.equal(execCalls.length, 2);
-        assert.ok(execCalls[1][1].includes('execute-visible-cell'));
-        assert.ok(execCalls[1][1].includes('--cell-index'));
-        assert.ok(execCalls[1][1].includes('0'));
-        assert.ok(execCalls[1][1].includes('--source'));
-        assert.ok(execCalls[1][1].includes('x = 1\nx'));
+        // project-visible-notebook still uses CLI
+        assert.equal(execCalls.length, 1);
+        assert.ok(execCalls[0][1].includes('project-visible-notebook'));
+        // execute-cell routes through daemon HTTP; verify cell_index 0 (first selected cell)
+        const execCall = httpCalls.find(c => c.url.includes('/notebooks/execute-cell'));
+        assert.ok(execCall, 'should call daemon execute-cell endpoint');
+        assert.equal(execCall.body.cell_index, 0);
+        assert.equal(execCall.body.wait, true);
         assert.equal(executions.length, 1);
         assert.equal(executions[0].success, true);
         assert.equal(executions[0].outputs[0].items[0].value, '1');
@@ -823,7 +834,7 @@ test('HeadlessNotebookProjection falls back to the selected first cell when VS C
     }
 });
 
-test('HeadlessNotebookProjection forwards core notebook activity events and syncs notebook presence', async () => {
+test('HeadlessNotebookProjection syncNotebookProjection does not poll activity (activity arrives via WS push)', async () => {
     const doc = {
         notebookType: 'jupyter-notebook',
         uri: { fsPath: '/workspace/notebooks/demo.ipynb' },
@@ -846,7 +857,6 @@ test('HeadlessNotebookProjection forwards core notebook activity events and sync
         module: { HeadlessNotebookProjection },
         docsByPath,
         execCalls,
-        activityEvents,
     } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
         {
@@ -872,29 +882,6 @@ test('HeadlessNotebookProjection forwards core notebook activity events and sync
                         ],
                     },
                 },
-                'notebook-activity': [
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        cursor: 10,
-                        recent_events: [
-                            {
-                                event_id: 'evt-1',
-                                type: 'execution-started',
-                                detail: 'Executing cell 1',
-                                path: 'notebooks/demo.ipynb',
-                                timestamp: 10,
-                            },
-                        ],
-                    },
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        cursor: 10,
-                        recent_events: [],
-                    },
-                ],
-                'session-presence-upsert': { status: 'ok' },
             },
         },
     );
@@ -908,17 +895,20 @@ test('HeadlessNotebookProjection forwards core notebook activity events and sync
     const projection = new HeadlessNotebookProjection(context, 'agent-repl.agent-repl');
     try {
         await projection.syncNotebookProjection(doc);
-        await projection.syncNotebookProjection(doc);
-        assert.equal(activityEvents.length, 1);
-        assert.equal(activityEvents[0].type, 'execution-started');
-        assert.ok(execCalls.some(([, args]) => args.includes('session-presence-upsert')));
-        assert.ok(execCalls.some(([, args]) => args.includes('notebook-activity')));
+        // Activity polling was removed — syncNotebookProjection should NOT call
+        // notebook-activity or session-presence-upsert. Activity events arrive via WS push.
+        assert.ok(!execCalls.some(([, args]) => args.includes('notebook-activity')),
+            'should not call notebook-activity (removed in favor of WS push)');
+        assert.ok(!execCalls.some(([, args]) => args.includes('session-presence-upsert')),
+            'should not call session-presence-upsert (removed in favor of WS push)');
+        // notebook-projection is still called for snapshot sync
+        assert.ok(execCalls.some(([, args]) => args.includes('notebook-projection')));
     } finally {
         projection.dispose();
     }
 });
 
-test('HeadlessNotebookProjection applies incremental inserted-cell activity without replacing the whole notebook', async () => {
+test('applyIncrementalActivityEvents applies incremental inserted-cell activity without replacing the whole notebook', async () => {
     const doc = {
         notebookType: 'jupyter-notebook',
         uri: { fsPath: '/workspace/notebooks/demo.ipynb' },
@@ -942,119 +932,48 @@ test('HeadlessNotebookProjection applies incremental inserted-cell activity with
     doc.cellAt = (index) => doc.cells[index];
 
     const {
-        module: { HeadlessNotebookProjection },
+        module: { applyIncrementalActivityEvents },
         docsByPath,
         notebookEdits,
     } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
-        {
-            execResponses: {
-                'notebook-projection': [
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        active: true,
-                        mode: 'headless',
-                        runtime: { busy: false, current_execution: null },
-                        contents: {
-                            path: 'notebooks/demo.ipynb',
-                            cells: [
-                                {
-                                    index: 0,
-                                    cell_id: 'cell-1',
-                                    cell_type: 'code',
-                                    source: 'x = 1\nx',
-                                    outputs: [],
-                                    execution_count: null,
-                                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
-                                },
-                            ],
-                        },
-                    },
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        active: true,
-                        mode: 'headless',
-                        runtime: { busy: false, current_execution: null },
-                        contents: {
-                            path: 'notebooks/demo.ipynb',
-                            cells: [
-                                {
-                                    index: 0,
-                                    cell_id: 'cell-1',
-                                    cell_type: 'code',
-                                    source: 'x = 1\nx',
-                                    outputs: [],
-                                    execution_count: null,
-                                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
-                                },
-                                {
-                                    index: 1,
-                                    cell_id: 'cell-2',
-                                    cell_type: 'code',
-                                    source: 'y = x + 1\ny',
-                                    outputs: [],
-                                    execution_count: null,
-                                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-2' } } },
-                                },
-                            ],
-                        },
-                    },
-                ],
-                'notebook-activity': [
-                    { status: 'ok', path: 'notebooks/demo.ipynb', cursor: 1, recent_events: [] },
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        cursor: 2,
-                        recent_events: [
-                            {
-                                event_id: 'evt-insert',
-                                type: 'cell-inserted',
-                                path: 'notebooks/demo.ipynb',
-                                cell_id: 'cell-2',
-                                cell_index: 1,
-                                timestamp: 2,
-                                data: {
-                                    cell: {
-                                        index: 1,
-                                        cell_id: 'cell-2',
-                                        cell_type: 'code',
-                                        source: 'y = x + 1\ny',
-                                        outputs: [],
-                                        execution_count: null,
-                                        metadata: { custom: { 'agent-repl': { cell_id: 'cell-2' } } },
-                                    },
-                                },
-                            },
-                        ],
-                    },
-                ],
-                'session-presence-upsert': { status: 'ok' },
-            },
-        },
     );
     docsByPath.set(doc.uri.fsPath, doc);
-    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl');
-    try {
-        const firstChanged = await projection.syncNotebookProjection(doc);
-        assert.equal(firstChanged, true);
 
-        const secondChanged = await projection.syncNotebookProjection(doc);
-        assert.equal(secondChanged, true);
-        assert.equal(doc.cells.length, 2);
-        assert.equal(doc.cells[1].document.getText(), 'y = x + 1\ny');
-        assert.equal(notebookEdits.length, 2);
-        assert.equal(notebookEdits[1].range.start, 1);
-        assert.equal(notebookEdits[1].range.end, 1);
-        assert.equal(doc.saveCalls, 0);
-    } finally {
-        projection.dispose();
-    }
+    const tracked = { notebook: doc };
+    const events = [
+        {
+            event_id: 'evt-insert',
+            type: 'cell-inserted',
+            path: 'notebooks/demo.ipynb',
+            cell_id: 'cell-2',
+            cell_index: 1,
+            timestamp: 2,
+            data: {
+                cell: {
+                    index: 1,
+                    cell_id: 'cell-2',
+                    cell_type: 'code',
+                    source: 'y = x + 1\ny',
+                    outputs: [],
+                    execution_count: null,
+                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-2' } } },
+                },
+            },
+        },
+    ];
+    const result = await applyIncrementalActivityEvents(tracked, events);
+    assert.equal(result.changed, true);
+    assert.equal(result.needsSnapshot, false);
+    assert.equal(doc.cells.length, 2);
+    assert.equal(doc.cells[1].document.getText(), 'y = x + 1\ny');
+    assert.equal(notebookEdits.length, 1);
+    assert.equal(notebookEdits[0].range.start, 1);
+    assert.equal(notebookEdits[0].range.end, 1);
+    assert.equal(doc.saveCalls, 0);
 });
 
-test('HeadlessNotebookProjection applies output-append activity without falling back to a full snapshot replace', async () => {
+test('applyIncrementalActivityEvents applies output-append activity without falling back to a full snapshot replace', async () => {
     const doc = {
         notebookType: 'jupyter-notebook',
         uri: { fsPath: '/workspace/notebooks/demo.ipynb' },
@@ -1085,130 +1004,48 @@ test('HeadlessNotebookProjection applies output-append activity without falling 
     doc.cellAt = (index) => doc.cells[index];
 
     const {
-        module: { HeadlessNotebookProjection },
+        module: { applyIncrementalActivityEvents },
         docsByPath,
         notebookEdits,
-        executions,
     } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
-        {
-            execResponses: {
-                'notebook-projection': [
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        active: true,
-                        mode: 'headless',
-                        runtime: { busy: true, current_execution: { cell_index: 0, cell_id: 'cell-1' } },
-                        contents: {
-                            path: 'notebooks/demo.ipynb',
-                            cells: [
-                                {
-                                    index: 0,
-                                    cell_id: 'cell-1',
-                                    cell_type: 'code',
-                                    source: 'import time\nprint("start")',
-                                    outputs: [],
-                                    execution_count: null,
-                                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
-                                },
-                                {
-                                    index: 1,
-                                    cell_id: 'cell-2',
-                                    cell_type: 'code',
-                                    source: 'y = 2',
-                                    outputs: [],
-                                    execution_count: null,
-                                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-2' } } },
-                                },
-                            ],
-                        },
-                    },
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        active: true,
-                        mode: 'headless',
-                        runtime: { busy: true, current_execution: { cell_index: 0, cell_id: 'cell-1' } },
-                        contents: {
-                            path: 'notebooks/demo.ipynb',
-                            cells: [
-                                {
-                                    index: 0,
-                                    cell_id: 'cell-1',
-                                    cell_type: 'code',
-                                    source: 'import time\nprint("start")',
-                                    outputs: [{ output_type: 'stream', name: 'stdout', text: 'start\n' }],
-                                    execution_count: 1,
-                                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
-                                },
-                                {
-                                    index: 1,
-                                    cell_id: 'cell-2',
-                                    cell_type: 'code',
-                                    source: 'y = 2',
-                                    outputs: [],
-                                    execution_count: null,
-                                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-2' } } },
-                                },
-                            ],
-                        },
-                    },
-                ],
-                'notebook-activity': [
-                    { status: 'ok', path: 'notebooks/demo.ipynb', cursor: 1, recent_events: [] },
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        cursor: 2,
-                        recent_events: [
-                            {
-                                event_id: 'evt-output',
-                                type: 'cell-output-appended',
-                                path: 'notebooks/demo.ipynb',
-                                cell_id: 'cell-1',
-                                cell_index: 0,
-                                timestamp: 2,
-                                data: {
-                                    output: { output_type: 'stream', name: 'stdout', text: 'start\n' },
-                                    cell: {
-                                        index: 0,
-                                        cell_id: 'cell-1',
-                                        cell_type: 'code',
-                                        source: 'import time\nprint("start")',
-                                        outputs: [{ output_type: 'stream', name: 'stdout', text: 'start\n' }],
-                                        execution_count: 1,
-                                        metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
-                                    },
-                                },
-                            },
-                        ],
-                    },
-                ],
-                'session-presence-upsert': { status: 'ok' },
-            },
-        },
     );
     docsByPath.set(doc.uri.fsPath, doc);
-    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl');
-    try {
-        const firstChanged = await projection.syncNotebookProjection(doc);
-        assert.equal(firstChanged, true);
-        assert.equal(executions.length, 1);
 
-        const secondChanged = await projection.syncNotebookProjection(doc);
-        assert.equal(secondChanged, true);
-        assert.equal(notebookEdits.length, 2);
-        assert.equal(notebookEdits[1].range.start, 0);
-        assert.equal(notebookEdits[1].range.end, 1);
-        assert.equal(doc.cells[0].outputs[0].items[0].value, 'start\n');
-        assert.equal(doc.saveCalls, 0);
-    } finally {
-        projection.dispose();
-    }
+    const tracked = { notebook: doc };
+    const events = [
+        {
+            event_id: 'evt-output',
+            type: 'cell-output-appended',
+            path: 'notebooks/demo.ipynb',
+            cell_id: 'cell-1',
+            cell_index: 0,
+            timestamp: 2,
+            data: {
+                output: { output_type: 'stream', name: 'stdout', text: 'start\n' },
+                cell: {
+                    index: 0,
+                    cell_id: 'cell-1',
+                    cell_type: 'code',
+                    source: 'import time\nprint("start")',
+                    outputs: [{ output_type: 'stream', name: 'stdout', text: 'start\n' }],
+                    execution_count: 1,
+                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
+                },
+            },
+        },
+    ];
+    const result = await applyIncrementalActivityEvents(tracked, events);
+    assert.equal(result.changed, true);
+    assert.equal(result.needsSnapshot, false);
+    assert.equal(notebookEdits.length, 1);
+    assert.equal(notebookEdits[0].range.start, 0);
+    assert.equal(notebookEdits[0].range.end, 1);
+    assert.equal(doc.cells[0].outputs[0].items[0].value, 'start\n');
+    assert.equal(doc.saveCalls, 0);
 });
 
-test('HeadlessNotebookProjection ends the active execution when the executing cell is deleted incrementally', async () => {
+test('applyIncrementalActivityEvents ends the active execution when the executing cell is deleted', async () => {
     const doc = {
         notebookType: 'jupyter-notebook',
         uri: { fsPath: '/workspace/notebooks/demo.ipynb' },
@@ -1232,89 +1069,54 @@ test('HeadlessNotebookProjection ends the active execution when the executing ce
     doc.cellAt = (index) => doc.cells[index];
 
     const {
-        module: { HeadlessNotebookProjection },
+        module: { applyIncrementalActivityEvents },
         docsByPath,
-        executions,
         notebookEdits,
     } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
-        {
-            execResponses: {
-                'notebook-projection': [
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        active: true,
-                        mode: 'headless',
-                        runtime: { busy: true, current_execution: { cell_index: 0, cell_id: 'cell-1' } },
-                        contents: {
-                            path: 'notebooks/demo.ipynb',
-                            cells: [
-                                {
-                                    index: 0,
-                                    cell_id: 'cell-1',
-                                    cell_type: 'code',
-                                    source: 'long_running()',
-                                    outputs: [],
-                                    execution_count: null,
-                                    metadata: { custom: { 'agent-repl': { cell_id: 'cell-1' } } },
-                                },
-                            ],
-                        },
-                    },
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        active: true,
-                        mode: 'headless',
-                        runtime: { busy: true, current_execution: { cell_index: 0, cell_id: 'cell-1' } },
-                        contents: {
-                            path: 'notebooks/demo.ipynb',
-                            cells: [],
-                        },
-                    },
-                ],
-                'notebook-activity': [
-                    { status: 'ok', path: 'notebooks/demo.ipynb', cursor: 1, recent_events: [] },
-                    {
-                        status: 'ok',
-                        path: 'notebooks/demo.ipynb',
-                        cursor: 2,
-                        recent_events: [
-                            {
-                                event_id: 'evt-delete',
-                                type: 'cell-removed',
-                                path: 'notebooks/demo.ipynb',
-                                cell_id: 'cell-1',
-                                cell_index: 0,
-                                timestamp: 2,
-                            },
-                        ],
-                    },
-                ],
-                'session-presence-upsert': { status: 'ok' },
-            },
-        },
     );
     docsByPath.set(doc.uri.fsPath, doc);
-    const projection = new HeadlessNotebookProjection({ workspaceState: { get: () => undefined, update: async () => {} } }, 'agent-repl.agent-repl');
-    try {
-        const firstChanged = await projection.syncNotebookProjection(doc);
-        assert.equal(firstChanged, true);
-        assert.equal(executions.length, 1);
-        assert.equal(executions[0].started, true);
-        assert.equal(executions[0].ended, false);
 
-        const secondChanged = await projection.syncNotebookProjection(doc);
-        assert.equal(secondChanged, true);
-        assert.equal(executions[0].ended, true);
-        assert.equal(executions[0].success, false);
-        assert.equal(doc.cells.length, 0);
-        assert.equal(notebookEdits[1].range.start, 0);
-        assert.equal(notebookEdits[1].range.end, 1);
-    } finally {
-        projection.dispose();
-    }
+    // Simulate an active execution that will be ended by the cell removal.
+    const execution = {
+        outputs: [],
+        executionOrder: undefined,
+        started: true,
+        ended: false,
+        success: undefined,
+        replaceOutput: async (outputs) => { execution.outputs = outputs; },
+        start: () => { execution.started = true; },
+        end: (success) => { execution.ended = true; execution.success = success; },
+    };
+    const tracked = {
+        notebook: doc,
+        activeExecution: {
+            cellId: 'cell-1',
+            cellIndex: 0,
+            execution,
+            outputs: [],
+        },
+    };
+    const events = [
+        {
+            event_id: 'evt-delete',
+            type: 'cell-removed',
+            path: 'notebooks/demo.ipynb',
+            cell_id: 'cell-1',
+            cell_index: 0,
+            timestamp: 2,
+        },
+    ];
+    const result = await applyIncrementalActivityEvents(tracked, events);
+    assert.equal(result.changed, true);
+    assert.equal(doc.cells.length, 0);
+    assert.equal(notebookEdits.length, 1);
+    assert.equal(notebookEdits[0].range.start, 0);
+    assert.equal(notebookEdits[0].range.end, 1);
+    // The active execution should have been ended by the cell removal.
+    assert.equal(execution.ended, true);
+    assert.equal(execution.success, false);
+    assert.equal(tracked.activeExecution, undefined);
 });
 
 test('HeadlessNotebookProjection includes the collaboration session id when projecting and executing cells', async () => {
@@ -1341,13 +1143,16 @@ test('HeadlessNotebookProjection includes the collaboration session id when proj
         module: { HeadlessNotebookProjection },
         docsByPath,
         execCalls,
+        httpCalls,
         getController,
     } = loadSessionModule(
         [{ uri: { fsPath: '/workspace' } }],
         {
             execResponses: {
                 'project-visible-notebook': { status: 'ok', path: 'notebooks/demo.ipynb', cell_count: 1, mode: 'headless' },
-                'execute-visible-cell': { status: 'ok', outputs: [], execution_count: 1 },
+            },
+            httpResponses: {
+                'execute-cell': { status: 'ok', outputs: [], execution_count: 1 },
             },
         },
     );
@@ -1358,18 +1163,20 @@ test('HeadlessNotebookProjection includes the collaboration session id when proj
             update: async () => {},
         },
     };
-    const projection = new HeadlessNotebookProjection(context, 'agent-repl.agent-repl');
+    const daemonDiscovery = () => ({ url: 'http://127.0.0.1:9999', token: 'tok' });
+    const projection = new HeadlessNotebookProjection(context, 'agent-repl.agent-repl', daemonDiscovery);
     try {
         const controller = getController();
         await controller.executeHandler([doc.cellAt(0)], doc);
+        // project-visible-notebook still uses CLI and should include session id
         const projectCall = execCalls.find(([, args]) => args.includes('project-visible-notebook'));
-        const executeCall = execCalls.find(([, args]) => args.includes('execute-visible-cell'));
         assert.ok(projectCall);
-        assert.ok(executeCall);
         assert.ok(projectCall[1].includes('--session-id'));
         assert.ok(projectCall[1].includes('sess-1'));
-        assert.ok(executeCall[1].includes('--session-id'));
-        assert.ok(executeCall[1].includes('sess-1'));
+        // execute-cell now routes through daemon HTTP and should include session id
+        const execCall = httpCalls.find(c => c.url.includes('/notebooks/execute-cell'));
+        assert.ok(execCall, 'should call daemon execute-cell endpoint');
+        assert.equal(execCall.body.owner_session_id, 'sess-1');
     } finally {
         projection.dispose();
     }

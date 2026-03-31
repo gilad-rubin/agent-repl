@@ -23,6 +23,8 @@ import { HTMLManager } from '@jupyter-widgets/html-manager/lib/htmlmanager';
 import type { IManagerState } from '@jupyter-widgets/base-manager';
 
 import { buildReplaceSourceOperations } from '../src/shared/notebookEditPayload';
+import { DaemonWebSocket } from '../src/shared/wsClient';
+import { shouldReloadStandaloneNotebookContents } from '../src/shared/notebookActivity';
 
 import '@lumino/widgets/style/index.css';
 import '@jupyterlab/rendermime/style/base.css';
@@ -116,7 +118,6 @@ type JupyterLabPreviewDebugWindow = Window & {
 };
 
 const PREVIEW_CLIENT_ID = globalThis.crypto?.randomUUID?.() ?? `jupyterlab-preview-${Date.now()}`;
-const POLL_INTERVAL_MS = 500;
 const AUTOSAVE_DELAY_MS = 350;
 const BENIGN_YJS_PREMATURE_ACCESS_WARNING = 'Invalid access: Add Yjs type to a document before reading data.';
 const BENIGN_YJS_MULTIDOC_WARNING = '[yjs#509] Not same Y.Doc';
@@ -2028,33 +2029,40 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       return;
     }
 
-    let cancelled = false;
-    const intervalId = window.setInterval(() => {
-      if (cancelled) {
-        return;
-      }
-      void (async () => {
-        try {
-          await loadRuntime();
-          const shouldRefreshContents = pendingExecutionRef.current || runtimeBusyRef.current;
+    const origin = window.location.origin;
+    const ws = new DaemonWebSocket({
+      daemonUrl: origin,
+      daemonToken: '', // same-origin; proxy handles auth
+      createSocket: (url: string) => new WebSocket(url) as any,
+      fetchFn: window.fetch.bind(window),
+      onMessage: (msg: any) => {
+        const events: Array<{ type: string }> = msg ? [msg] : [];
+        if (msg.runtime) {
+          void loadRuntime();
+        }
+        if (shouldReloadStandaloneNotebookContents(events)) {
           const model = modelRef.current;
-          if (shouldRefreshContents && model && !model.dirty) {
-            await loadContents();
-          }
-          if (!runtimeBusyRef.current) {
-            pendingExecutionRef.current = false;
-          }
-        } catch (err) {
-          if (!cancelled) {
-            setError(err instanceof Error ? err.message : String(err));
+          if (model && !model.dirty) {
+            void loadContents();
           }
         }
-      })();
-    }, POLL_INTERVAL_MS);
+        if (pendingExecutionRef.current && !runtimeBusyRef.current) {
+          pendingExecutionRef.current = false;
+        }
+      },
+      onConnect: () => {
+        ws.subscribe(currentNotebookPath);
+      },
+      onDisconnect: () => { /* reconnect is automatic */ },
+      onInstanceChange: () => {
+        void loadRuntime();
+        void loadContents();
+      },
+    });
+    ws.connect();
 
     return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
+      ws.close();
     };
   }, [loadContents, loadRuntime, currentNotebookPath, surfaceReady]);
 
