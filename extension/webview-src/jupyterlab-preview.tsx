@@ -2278,14 +2278,22 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         }
 
         // Non-streaming events: full refresh for reconciliation
-        const events: Array<{ type: string }> = msg ? [msg] : [];
-        const isExecutionEvent = msgType === 'execution-finished'
+        const isExecutionFinished = msgType === 'execution-finished'
           || msgType === 'cell-outputs-updated';
-        if (msg.runtime || isExecutionEvent) {
+        if (msg.runtime || isExecutionFinished) {
           void loadRuntime();
         }
-        if (isExecutionEvent || shouldReloadStandaloneNotebookContents(events)) {
+        if (isExecutionFinished) {
+          // Final reconciliation — loadContents does fromJSON which replaces streaming outputs cleanly
           void loadContents();
+        } else {
+          // Non-execution events (source edits, structure changes)
+          const events: Array<{ type: string }> = msg ? [msg] : [];
+          if (shouldReloadStandaloneNotebookContents(events)
+            && msgType !== 'cell-output-appended'
+            && msgType !== 'execution-started') {
+            void loadContents();
+          }
         }
         if (pendingExecutionRef.current && !runtimeBusyRef.current) {
           pendingExecutionRef.current = false;
