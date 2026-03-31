@@ -8,6 +8,7 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
     const modulePath = path.resolve(__dirname, '../out/session.js');
     const originalLoad = Module._load;
     const execCalls = [];
+    const httpCalls = [];
     const commandCalls = [];
     const affinityCalls = [];
     const activityEvents = [];
@@ -16,6 +17,8 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
     const notebookEdits = [];
     let createdController;
     const execResponses = options.execResponses || {};
+    const httpResponses = options.httpResponses || {};
+    const daemonInfo = options.daemonInfo || null;
     const activeNotebookEditor = options.activeNotebookEditor;
     const visibleNotebookEditors = options.visibleNotebookEditors || [];
     Module._load = function patchedLoad(request, parent, isMain) {
@@ -161,6 +164,39 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
                 execFile: (...args) => args,
             };
         }
+        if (request === 'http') {
+            return {
+                request: (url, opts, callback) => {
+                    const endpoint = typeof url === 'string' ? url : (url.pathname || url.toString());
+                    httpCalls.push({ url: endpoint, method: opts?.method, body: null });
+                    const entry = httpCalls[httpCalls.length - 1];
+                    const chunks = [];
+                    const req = {
+                        on: (event, handler) => {
+                            if (event === 'error') req._errorHandler = handler;
+                            if (event === 'timeout') req._timeoutHandler = handler;
+                        },
+                        write: (data) => { entry.body = JSON.parse(data); },
+                        end: () => {
+                            const key = _httpResponseKey(endpoint);
+                            const configured = httpResponses[key] || httpResponses.default || { status: 'ok' };
+                            const payload = Array.isArray(configured) ? configured.shift() : configured;
+                            const resData = JSON.stringify(payload);
+                            const res = {
+                                statusCode: 200,
+                                on: (event, handler) => {
+                                    if (event === 'data') handler(Buffer.from(resData));
+                                    if (event === 'end') handler();
+                                },
+                            };
+                            callback(res);
+                        },
+                        destroy: () => {},
+                    };
+                    return req;
+                },
+            };
+        }
         if (request === './routes') {
             return {
                 pushActivityEvent: (event) => {
@@ -202,9 +238,13 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
 
     delete require.cache[modulePath];
     try {
+        const mod = require(modulePath);
+        // Expose daemonInfo for constructing SessionAutoAttach with injection
+        mod._testDaemonDiscovery = daemonInfo ? () => daemonInfo : undefined;
         return {
-            module: require(modulePath),
+            module: mod,
             execCalls,
+            httpCalls,
             commandCalls,
             affinityCalls,
             activityEvents,
@@ -216,6 +256,14 @@ function loadSessionModule(workspaceFolders = [], options = {}) {
     } finally {
         Module._load = originalLoad;
     }
+}
+
+function _httpResponseKey(endpoint) {
+    if (endpoint.includes('/sessions/resolve')) return 'session-resolve';
+    if (endpoint.includes('/sessions/start')) return 'session-start';
+    if (endpoint.includes('/sessions/touch')) return 'session-touch';
+    if (endpoint.includes('/sessions/detach')) return 'session-detach';
+    return 'default';
 }
 
 test('coreCliPlans prefers uv run when a pyproject exists in the workspace root', () => {
@@ -304,6 +352,71 @@ test('SessionAutoAttach reuses the preferred human session when no workspace ses
         await attach.detachIfAttached();
         attach.dispose();
     }
+});
+
+test('SessionAutoAttach resolves the preferred session via daemon HTTP when the daemon is available', async () => {
+    const store = new Map();
+    const context = {
+        workspaceState: {
+            get: (key) => store.get(key),
+            update: async (key, value) => {
+                if (typeof value === 'undefined') {
+                    store.delete(key);
+                } else {
+                    store.set(key, value);
+                }
+            },
+        },
+    };
+    const {
+        module: { SessionAutoAttach },
+        execCalls,
+        httpCalls,
+    } = loadSessionModule(
+        [{ uri: { fsPath: '/workspace' } }],
+        {
+            daemonInfo: { url: 'http://127.0.0.1:9999', token: 'test-token' },
+            httpResponses: {
+                'session-resolve': {
+                    status: 'ok',
+                    session: {
+                        session_id: 'sess-http',
+                        actor: 'human',
+                        client: 'vscode',
+                        status: 'attached',
+                        capabilities: ['projection', 'editor', 'presence'],
+                        last_seen_at: 9,
+                        created_at: 2,
+                    },
+                },
+                'session-start': {
+                    status: 'ok',
+                    session: { session_id: 'sess-http' },
+                },
+                'session-detach': { status: 'ok' },
+            },
+        },
+    );
+    const daemonDiscovery = () => ({ url: 'http://127.0.0.1:9999', token: 'test-token' });
+    const attach = new SessionAutoAttach(context, daemonDiscovery);
+    try {
+        await attach.attachIfEnabled({ get: (_name, fallback) => fallback });
+        // Should use HTTP, not CLI, for resolve + start
+        assert.equal(execCalls.length, 0);
+        assert.ok(httpCalls.some(c => c.url.includes('/sessions/resolve')));
+        assert.ok(httpCalls.some(c => c.url.includes('/sessions/start')));
+        const startCall = httpCalls.find(c => c.url.includes('/sessions/start'));
+        assert.equal(startCall.body.session_id, 'sess-http');
+        assert.equal(startCall.body.actor, 'human');
+        assert.equal(startCall.body.client, 'vscode');
+        assert.deepEqual(startCall.body.capabilities, ['projection', 'editor', 'presence']);
+        assert.equal(store.get('agent-repl.session:/workspace'), 'sess-http');
+    } finally {
+        await attach.detachIfAttached();
+        attach.dispose();
+    }
+    // Detach should also use HTTP
+    assert.ok(httpCalls.some(c => c.url.includes('/sessions/detach')));
 });
 
 test('HeadlessNotebookProjection selects the shared runtime controller when a notebook already has a live headless runtime', async () => {
