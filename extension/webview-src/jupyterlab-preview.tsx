@@ -1184,7 +1184,18 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     };
 
     runtimeBusyRef.current = nextRuntime.busy;
-    setRuntime(nextRuntime);
+    // Preserve optimistic queued_cell_ids if daemon reports none
+    // (daemon runs cells sequentially, so it never reports queued)
+    setRuntime((prev) => {
+      const daemonQueued = nextRuntime.queued_cell_ids;
+      const mergedQueued = daemonQueued.length > 0
+        ? daemonQueued
+        : prev.queued_cell_ids.filter((id) =>
+            !nextRuntime.running_cell_ids.includes(id)
+            && !executedCellIdsRef.current.has(id)
+          );
+      return { ...nextRuntime, queued_cell_ids: mergedQueued };
+    });
   }, [currentNotebookPath]);
 
   const loadWorkspaceTree = useCallback(async () => {
@@ -2434,7 +2445,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         } else {
           setBarContent('agent-repl-cell-status agent-repl-cell-status-queued', '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-dasharray="3 3"/></svg>');
         }
-      } else if (kernelRestarted) {
+      } else if (kernelRestarted && !queuedSet.has(cellId)) {
         if (bar) bar.remove();
       } else {
         const hasError = (cellModel as any).executionCount != null
@@ -2465,8 +2476,6 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         setLoading(false);
         return;
       }
-      const _t0 = performance.now();
-      console.log('[TIMING] bootstrap start');
       setLoading(true);
       setError(null);
       setSurfaceReady(false);
@@ -2480,40 +2489,13 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       fallbackDocumentVersionRef.current = 0;
       for (let attempt = 0; attempt < BOOTSTRAP_MAX_ATTEMPTS && !disposed; attempt += 1) {
         try {
-          const _tA = performance.now();
-          await ensureAttached();
-          console.log(`[TIMING] ensureAttached: ${(performance.now() - _tA).toFixed(0)}ms`);
-          const _tP = performance.now();
-          const [runtimeResult, snapshot, workspaceResult, kernelsResult] = await Promise.all([
-            (async () => {
-              const _t = performance.now();
-              await loadRuntime();
-              console.log(`[TIMING]   loadRuntime: ${(performance.now() - _t).toFixed(0)}ms`);
-              return true;
-            })(),
-            (async () => {
-              const _t = performance.now();
-              const s = await fetchSharedModelSnapshot();
-              console.log(`[TIMING]   fetchSharedModelSnapshot: ${(performance.now() - _t).toFixed(0)}ms`);
-              return s;
-            })(),
-            (async () => {
-              const _t = performance.now();
-              await loadWorkspaceTree();
-              console.log(`[TIMING]   loadWorkspaceTree: ${(performance.now() - _t).toFixed(0)}ms`);
-              return true;
-            })(),
-            (async () => {
-              const _t = performance.now();
-              await loadKernels();
-              console.log(`[TIMING]   loadKernels: ${(performance.now() - _t).toFixed(0)}ms`);
-              return true;
-            })(),
+          const [, , snapshot] = await Promise.all([
+            ensureAttached(),
+            loadRuntime(),
+            fetchSharedModelSnapshot(),
+            loadWorkspaceTree(),
+            loadKernels(),
           ]);
-          console.log(`[TIMING] parallel fetches total: ${(performance.now() - _tP).toFixed(0)}ms`);
-          void runtimeResult;
-          void workspaceResult;
-          void kernelsResult;
           const nextCells = Array.isArray(snapshot.cells) ? snapshot.cells : [];
           const nextNotebookMetadata = normalizeNotebookMetadata(snapshot.notebook_metadata);
           const nextTrust = trustSnapshotFromPayload(snapshot, nextCells);
@@ -2522,7 +2504,6 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           setInitialNotebookMetadata(nextNotebookMetadata);
           setInitialTrustSnapshot(nextTrust);
           setTrustSnapshot(nextTrust);
-          console.log(`[TIMING] bootstrap total: ${(performance.now() - _t0).toFixed(0)}ms`);
           return;
         } catch (err) {
           if (disposed) {
