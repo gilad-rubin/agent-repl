@@ -1,14 +1,16 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 import { StandaloneNotebookLspSession } from './standalone-lsp.mjs';
 
 const execFileAsync = promisify(execFile);
 const RUNTIME_FILE_PREFIX = 'agent-repl-core-';
+const SQLITE_THREAD_ERROR_FRAGMENT = 'SQLite objects created in a thread can only be used in that same thread.';
 
 function standaloneDebug(event, data = {}) {
   const record = {
@@ -37,10 +39,23 @@ function normalizePathname(value) {
   return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
+function canonicalPath(value) {
+  const resolved = path.resolve(value);
+  try {
+    return normalizePathname(fs.realpathSync.native?.(resolved) ?? fs.realpathSync(resolved));
+  } catch {
+    return normalizePathname(resolved);
+  }
+}
+
 function pathWithin(targetPath, rootPath) {
-  const target = normalizePathname(path.resolve(targetPath));
-  const root = normalizePathname(path.resolve(rootPath));
+  const target = canonicalPath(targetPath);
+  const root = canonicalPath(rootPath);
   return target === root || target.startsWith(`${root}${path.sep}`);
+}
+
+function samePath(leftPath, rightPath) {
+  return canonicalPath(leftPath) === canonicalPath(rightPath);
 }
 
 const IGNORED_WORKSPACE_DIRS = new Set([
@@ -57,7 +72,48 @@ const IGNORED_WORKSPACE_DIRS = new Set([
   'node_modules',
 ]);
 
-export function normalizeNotebookPath(workspaceRoot, requestedPath) {
+const WORKSPACE_ROOT_MARKERS = [
+  '.git',
+  'pyproject.toml',
+  'package.json',
+  'uv.lock',
+];
+
+function findWorkspaceRootForNotebook(defaultWorkspaceRoot, absoluteNotebookPath) {
+  if (pathWithin(absoluteNotebookPath, defaultWorkspaceRoot)) {
+    return path.resolve(defaultWorkspaceRoot);
+  }
+
+  let probeDir = path.dirname(path.resolve(absoluteNotebookPath));
+  try {
+    const stats = fs.statSync(absoluteNotebookPath);
+    probeDir = stats.isDirectory() ? path.resolve(absoluteNotebookPath) : path.dirname(path.resolve(absoluteNotebookPath));
+  } catch {
+    // Keep the dirname fallback for not-yet-created files.
+  }
+
+  let currentDir = probeDir;
+  while (true) {
+    for (const marker of WORKSPACE_ROOT_MARKERS) {
+      if (fs.existsSync(path.join(currentDir, marker))) {
+        return currentDir;
+      }
+    }
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) {
+      break;
+    }
+    currentDir = parentDir;
+  }
+
+  if (path.basename(probeDir).toLowerCase() === 'notebooks') {
+    return path.dirname(probeDir);
+  }
+
+  return probeDir;
+}
+
+export function resolveNotebookTarget(workspaceRoot, requestedPath) {
   if (typeof requestedPath !== 'string' || !requestedPath.trim()) {
     throw new Error('Missing notebook path. Open the browser view with ?path=relative/notebook.ipynb');
   }
@@ -66,10 +122,16 @@ export function normalizeNotebookPath(workspaceRoot, requestedPath) {
   const absoluteCandidate = path.isAbsolute(trimmed)
     ? path.resolve(trimmed)
     : path.resolve(workspaceRoot, trimmed);
-  if (!pathWithin(absoluteCandidate, workspaceRoot)) {
-    throw new Error('Notebook path must stay inside the workspace root');
-  }
-  return path.relative(workspaceRoot, absoluteCandidate) || path.basename(absoluteCandidate);
+  const resolvedWorkspaceRoot = findWorkspaceRootForNotebook(workspaceRoot, absoluteCandidate);
+  return {
+    absolutePath: absoluteCandidate,
+    workspaceRoot: resolvedWorkspaceRoot,
+    notebookPath: path.relative(resolvedWorkspaceRoot, absoluteCandidate) || path.basename(absoluteCandidate),
+  };
+}
+
+export function normalizeNotebookPath(workspaceRoot, requestedPath) {
+  return resolveNotebookTarget(workspaceRoot, requestedPath).notebookPath;
 }
 
 function compareExplorerEntries(left, right) {
@@ -193,7 +255,28 @@ function resolveKernelDirs() {
   return [...dirs].filter((dir) => fs.existsSync(dir));
 }
 
-function discoverKernels(workspaceRoot) {
+function probeKernelCapability(pythonPath) {
+  if (!pythonPath || !fs.existsSync(pythonPath)) {
+    return false;
+  }
+  try {
+    const probe = spawnSync(pythonPath, ['-c', 'import ipykernel'], {
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    return probe.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+export function discoverKernels(
+  workspaceRoot,
+  {
+    kernelDirs = resolveKernelDirs(),
+    probeCapability = probeKernelCapability,
+  } = {},
+) {
   const workspaceVenvPython = path.join(
     workspaceRoot,
     '.venv',
@@ -209,7 +292,7 @@ function discoverKernels(workspaceRoot) {
     }
   };
 
-  for (const kernelsDir of resolveKernelDirs()) {
+  for (const kernelsDir of kernelDirs) {
     let entries = [];
     try {
       entries = fs.readdirSync(kernelsDir, { withFileTypes: true });
@@ -229,9 +312,12 @@ function discoverKernels(workspaceRoot) {
       try {
         const spec = JSON.parse(fs.readFileSync(kernelJson, 'utf8'));
         const python = Array.isArray(spec.argv) && typeof spec.argv[0] === 'string' ? spec.argv[0] : null;
+        if (!python || !probeCapability(python)) {
+          continue;
+        }
         const recommended = hasWorkspaceVenv && python === workspaceVenvPython;
         pushKernel({
-          id: entry.name,
+          id: python,
           label: spec.display_name ?? entry.name,
           recommended,
           python,
@@ -243,7 +329,7 @@ function discoverKernels(workspaceRoot) {
   }
 
   let preferredKernel = null;
-  if (hasWorkspaceVenv) {
+  if (hasWorkspaceVenv && probeCapability(workspaceVenvPython)) {
     preferredKernel = kernels.find((kernel) => kernel.python === workspaceVenvPython) ?? null;
     if (!preferredKernel) {
       preferredKernel = {
@@ -271,7 +357,7 @@ function discoverKernels(workspaceRoot) {
     })),
     preferred_kernel: preferredKernel
       ? { id: preferredKernel.id, label: preferredKernel.label }
-      : undefined,
+      : null,
   };
 }
 
@@ -320,8 +406,18 @@ async function fetchJson(url, init) {
   return payload;
 }
 
-function createDaemonLocator(workspaceRoot) {
-  return () => {
+function isRecoverableDaemonFetchError(error) {
+  const message = String(error?.message ?? error ?? '');
+  return !error?.statusCode && (
+    message.includes('fetch failed')
+    || message.includes('ECONNREFUSED')
+    || message.includes('socket hang up')
+    || message.includes('network')
+  );
+}
+
+export function createDaemonLocator() {
+  return (workspaceRoot) => {
     const dir = runtimeDir();
     if (!fs.existsSync(dir)) {
       throw new Error(`Runtime directory not found: ${dir}`);
@@ -338,7 +434,7 @@ function createDaemonLocator(workspaceRoot) {
     for (const file of files) {
       try {
         const info = JSON.parse(fs.readFileSync(file.fullPath, 'utf8'));
-        if (!pathWithin(workspaceRoot, info.workspace_root)) {
+        if (!samePath(workspaceRoot, info.workspace_root)) {
           continue;
         }
         return {
@@ -364,9 +460,20 @@ export function createStandaloneServices({
   const sessions = new Map();
   const lspSessions = new Map();
   const backgroundNotebookCommands = new Map();
-  const locateDaemon = locateDaemonOverride ?? createDaemonLocator(workspaceRoot);
+  const locateDaemon = locateDaemonOverride ?? createDaemonLocator();
   const fetchJsonFn = fetchJsonOverride ?? fetchJson;
   const pyrightServerScript = path.join(extensionRoot, 'node_modules', 'pyright', 'langserver.index.js');
+
+  function sessionKey(clientId, targetWorkspaceRoot) {
+    return `${clientId}:${targetWorkspaceRoot}`;
+  }
+
+  function resolveTargetWorkspaceRoot(payload) {
+    if (typeof payload?.path === 'string' && payload.path.trim()) {
+      return resolveNotebookTarget(workspaceRoot, payload.path).workspaceRoot;
+    }
+    return workspaceRoot;
+  }
 
   async function runAgentRepl(args, cwd = workspaceRoot) {
     const workspacePython = path.join(
@@ -377,13 +484,8 @@ export function createStandaloneServices({
     );
     const launchPlans = [
       {
-        command: 'uv',
-        args: ['run', '--project', repoRoot, 'agent-repl', ...args],
-        env: process.env,
-      },
-      {
         command: workspacePython,
-        args: ['-m', 'agent_repl.cli', ...args],
+        args: ['-m', 'agent_repl', ...args],
         env: {
           ...process.env,
           PYTHONPATH: path.join(repoRoot, 'src'),
@@ -391,11 +493,16 @@ export function createStandaloneServices({
       },
       {
         command: 'python3',
-        args: ['-m', 'agent_repl.cli', ...args],
+        args: ['-m', 'agent_repl', ...args],
         env: {
           ...process.env,
           PYTHONPATH: path.join(repoRoot, 'src'),
         },
+      },
+      {
+        command: 'uv',
+        args: ['run', '--project', repoRoot, 'agent-repl', ...args],
+        env: process.env,
       },
     ];
 
@@ -417,41 +524,108 @@ export function createStandaloneServices({
       : new Error('Failed to launch agent-repl');
   }
 
-  async function ensureSession(clientId) {
-    const existing = sessions.get(clientId);
+  async function waitForDaemonReady(daemon, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    let lastError = null;
+    while (Date.now() < deadline) {
+      try {
+        await fetchJsonFn(`${daemon.baseUrl}/api/health`, {
+          method: 'GET',
+          headers: {
+            Authorization: `token ${daemon.token}`,
+          },
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        await delay(150);
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Timed out waiting for daemon at ${daemon.baseUrl}`);
+  }
+
+  async function waitForLocatedDaemon(targetWorkspaceRoot, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    let lastError = null;
+    while (Date.now() < deadline) {
+      try {
+        return locateDaemon(targetWorkspaceRoot);
+      } catch (error) {
+        lastError = error;
+        await delay(150);
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`No running agent-repl core daemon matched '${targetWorkspaceRoot}'`);
+  }
+
+  async function ensureSession(clientId, targetWorkspaceRoot) {
+    const existing = sessions.get(sessionKey(clientId, targetWorkspaceRoot));
     if (existing) {
-      return existing;
+      try {
+        await waitForDaemonReady(existing.daemon, 1_500);
+        return existing;
+      } catch {
+        sessions.delete(sessionKey(clientId, targetWorkspaceRoot));
+      }
     }
 
-    const daemon = locateDaemon();
+    let daemon = null;
     try {
-      const payload = await fetchJsonFn(`${daemon.baseUrl}/api/sessions/resolve`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `token ${daemon.token}`,
-        },
-        body: JSON.stringify({ actor: 'human' }),
-      });
-      const reusableSessionId = payload?.session?.session_id;
-      if (reusableSessionId) {
-        const session = {
-          sessionId: reusableSessionId,
-          daemon,
-          owned: false,
-        };
-        sessions.set(clientId, session);
-        return session;
-      }
+      daemon = locateDaemon(targetWorkspaceRoot);
     } catch {
-      // Fall back to creating a standalone-owned session when discovery fails.
+      daemon = null;
+    }
+
+    if (!daemon) {
+      try {
+        await (runAgentReplOverride ?? runAgentRepl)([
+          'core',
+          'start',
+          '--workspace-root',
+          targetWorkspaceRoot,
+        ], repoRoot);
+        daemon = await waitForLocatedDaemon(targetWorkspaceRoot);
+      } catch {
+        daemon = null;
+      }
+    }
+
+    if (daemon) {
+      try {
+        await waitForDaemonReady(daemon);
+        const payload = await fetchJsonFn(`${daemon.baseUrl}/api/sessions/resolve`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `token ${daemon.token}`,
+          },
+          body: JSON.stringify({ actor: 'human' }),
+        });
+        const reusableSessionId = payload?.session?.session_id;
+        if (reusableSessionId) {
+          const session = {
+            sessionId: reusableSessionId,
+            daemon,
+            owned: false,
+            workspaceRoot: targetWorkspaceRoot,
+          };
+          sessions.set(sessionKey(clientId, targetWorkspaceRoot), session);
+          return session;
+        }
+      } catch {
+        // Fall back to creating a standalone-owned session when health or reuse discovery fails.
+      }
     }
 
     const attachResult = await (runAgentReplOverride ?? runAgentRepl)([
       'core',
       'attach',
       '--workspace-root',
-      workspaceRoot,
+      targetWorkspaceRoot,
       '--actor',
       'human',
       '--client-type',
@@ -462,38 +636,80 @@ export function createStandaloneServices({
       clientId,
     ], repoRoot);
 
+    daemon = await waitForLocatedDaemon(targetWorkspaceRoot);
+    await waitForDaemonReady(daemon);
+
     const session = {
       sessionId: attachResult?.session?.session_id ?? clientId,
       daemon,
       owned: true,
+      workspaceRoot: targetWorkspaceRoot,
     };
-    sessions.set(clientId, session);
+    sessions.set(sessionKey(clientId, targetWorkspaceRoot), session);
     return session;
   }
 
-  async function daemonPost(clientId, endpoint, body) {
-    const session = await ensureSession(clientId);
-    return fetchJsonFn(`${session.daemon.baseUrl}${endpoint}`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `token ${session.daemon.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+  async function daemonPost(clientId, targetWorkspaceRoot, endpoint, body) {
+    const attemptRequest = async () => {
+      const session = await ensureSession(clientId, targetWorkspaceRoot);
+      return fetchJsonFn(`${session.daemon.baseUrl}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `token ${session.daemon.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+    };
+
+    try {
+      return await attemptRequest();
+    } catch (error) {
+      if (!isRecoverableDaemonFetchError(error)) {
+        throw error;
+      }
+      standaloneDebug('proxy:reconnect-after-fetch-failure', {
+        endpoint,
+        clientId,
+        workspaceRoot: targetWorkspaceRoot,
+        error: error?.message ?? String(error),
+      });
+      sessions.delete(sessionKey(clientId, targetWorkspaceRoot));
+      return attemptRequest();
+    }
   }
 
-  function lspKey(clientId, notebookPath) {
-    return `${clientId}:${notebookPath}`;
+  async function restartDaemonForWorkspace(clientId, targetWorkspaceRoot) {
+    sessions.delete(sessionKey(clientId, targetWorkspaceRoot));
+    try {
+      await (runAgentReplOverride ?? runAgentRepl)([
+        'core',
+        'stop',
+        '--workspace-root',
+        targetWorkspaceRoot,
+      ], repoRoot);
+    } catch {
+      // Best-effort: the daemon may already be gone.
+    }
+    await (runAgentReplOverride ?? runAgentRepl)([
+      'core',
+      'start',
+      '--workspace-root',
+      targetWorkspaceRoot,
+    ], repoRoot);
   }
 
-  function getLspSession(clientId, notebookPath) {
-    const key = lspKey(clientId, notebookPath);
+  function lspKey(clientId, targetWorkspaceRoot, notebookPath) {
+    return `${clientId}:${targetWorkspaceRoot}:${notebookPath}`;
+  }
+
+  function getLspSession(clientId, targetWorkspaceRoot, notebookPath) {
+    const key = lspKey(clientId, targetWorkspaceRoot, notebookPath);
     let session = lspSessions.get(key);
     if (!session) {
       session = new StandaloneNotebookLspSession({
-        workspaceRoot,
-        notebookPath: path.join(workspaceRoot, notebookPath),
+        workspaceRoot: targetWorkspaceRoot,
+        notebookPath: path.join(targetWorkspaceRoot, notebookPath),
         serverCommand: process.env.AGENT_REPL_PYRIGHT_COMMAND?.trim() || process.execPath,
         serverArgs: process.env.AGENT_REPL_PYRIGHT_COMMAND?.trim()
           ? ['--stdio']
@@ -505,30 +721,36 @@ export function createStandaloneServices({
   }
 
   function disposeClient(clientId) {
-    const session = sessions.get(clientId);
-    sessions.delete(clientId);
+    const ownedSessions = [];
+    for (const [key, session] of sessions.entries()) {
+      if (!key.startsWith(`${clientId}:`)) {
+        continue;
+      }
+      ownedSessions.push(session);
+      sessions.delete(key);
+    }
     for (const [key, lsp] of lspSessions.entries()) {
       if (key.startsWith(`${clientId}:`)) {
         lsp.dispose();
         lspSessions.delete(key);
       }
     }
-    return session;
+    return ownedSessions;
   }
 
   async function handleAttach(payload) {
     const clientId = typeof payload.client_id === 'string' && payload.client_id ? payload.client_id : null;
-    const notebookPath = normalizeNotebookPath(workspaceRoot, payload.path);
+    const target = resolveNotebookTarget(workspaceRoot, payload.path);
     if (!clientId) {
       throw new Error('Missing client_id');
     }
-    const session = await ensureSession(clientId);
+    const session = await ensureSession(clientId, target.workspaceRoot);
     return {
       status: 'ok',
       client_id: clientId,
       session_id: session.sessionId,
-      path: notebookPath,
-      workspace_root: workspaceRoot,
+      path: target.notebookPath,
+      workspace_root: target.workspaceRoot,
     };
   }
 
@@ -537,8 +759,9 @@ export function createStandaloneServices({
     if (!clientId) {
       throw new Error('Missing client_id');
     }
-    const session = await ensureSession(clientId);
-    return daemonPost(clientId, '/api/sessions/touch', { session_id: session.sessionId });
+    const targetWorkspaceRoot = resolveTargetWorkspaceRoot(payload);
+    const session = await ensureSession(clientId, targetWorkspaceRoot);
+    return daemonPost(clientId, targetWorkspaceRoot, '/api/sessions/touch', { session_id: session.sessionId });
   }
 
   async function handleSessionEnd(payload) {
@@ -546,33 +769,40 @@ export function createStandaloneServices({
     if (!clientId) {
       throw new Error('Missing client_id');
     }
-    const session = disposeClient(clientId);
-    if (!session) {
+    const sessionsForClient = disposeClient(clientId);
+    if (sessionsForClient.length === 0) {
       return { status: 'ok', ended: false };
     }
-    if (!session.owned) {
-      return { status: 'ok', ended: false, borrowed: true };
-    }
-    return fetchJsonFn(`${session.daemon.baseUrl}/api/sessions/detach`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `token ${session.daemon.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ session_id: session.sessionId }),
-    }).catch(() => ({ status: 'ok', detached: true }));
+    const ownedSessions = sessionsForClient.filter((session) => session.owned);
+    await Promise.all(ownedSessions.map((session) => (
+      fetchJsonFn(`${session.daemon.baseUrl}/api/sessions/detach`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `token ${session.daemon.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ session_id: session.sessionId }),
+      }).catch(() => ({ status: 'ok', detached: true }))
+    )));
+    return {
+      status: 'ok',
+      ended: ownedSessions.length > 0,
+      borrowed: ownedSessions.length !== sessionsForClient.length,
+      detached_sessions: ownedSessions.length,
+    };
   }
 
-  async function handleNotebookProxy(endpoint, payload, { withOwnerSession = false } = {}) {
+  async function handleNotebookProxy(endpoint, payload, { withOwnerSession = false, allowRouteMismatchRetry = true } = {}) {
     const clientId = typeof payload.client_id === 'string' && payload.client_id ? payload.client_id : null;
     if (!clientId) {
       throw new Error('Missing client_id');
     }
-    const notebookPath = normalizeNotebookPath(workspaceRoot, payload.path);
+    const target = resolveNotebookTarget(workspaceRoot, payload.path);
+    const notebookPath = target.notebookPath;
     const body = { ...payload, path: notebookPath };
     delete body.client_id;
     if (withOwnerSession) {
-      const session = await ensureSession(clientId);
+      const session = await ensureSession(clientId, target.workspaceRoot);
       body.owner_session_id = session.sessionId;
     }
     const startMs = Date.now();
@@ -585,7 +815,7 @@ export function createStandaloneServices({
       owner_session_id: body.owner_session_id ?? null,
     });
     try {
-      const result = await daemonPost(clientId, endpoint, body);
+      const result = await daemonPost(clientId, target.workspaceRoot, endpoint, body);
       standaloneDebug('proxy:response', {
         endpoint,
         clientId,
@@ -595,6 +825,18 @@ export function createStandaloneServices({
       });
       return result;
     } catch (error) {
+      if (allowRouteMismatchRetry && error?.statusCode === 404) {
+        standaloneDebug('proxy:route-mismatch-retry', {
+          endpoint,
+          clientId,
+          workspaceRoot: target.workspaceRoot,
+        });
+        await restartDaemonForWorkspace(clientId, target.workspaceRoot);
+        return handleNotebookProxy(endpoint, payload, {
+          withOwnerSession,
+          allowRouteMismatchRetry: false,
+        });
+      }
       standaloneDebug('proxy:error', {
         endpoint,
         clientId,
@@ -619,7 +861,8 @@ export function createStandaloneServices({
     if (!clientId) {
       throw new Error('Missing client_id');
     }
-    const notebookPath = normalizeNotebookPath(workspaceRoot, payload.path);
+    const target = resolveNotebookTarget(workspaceRoot, payload.path);
+    const notebookPath = target.notebookPath;
     const commandId = randomUUID();
     const startMs = Date.now();
 
@@ -659,19 +902,20 @@ export function createStandaloneServices({
     return {
       status: 'started',
       path: notebookPath,
+      workspace_root: target.workspaceRoot,
       command_id: commandId,
       ...responsePayload,
     };
   }
 
   async function handleWorkspaceTree(payload) {
-    const notebookPath = typeof payload.path === 'string' && payload.path.trim()
-      ? normalizeNotebookPath(workspaceRoot, payload.path)
+    const target = typeof payload.path === 'string' && payload.path.trim()
+      ? resolveNotebookTarget(workspaceRoot, payload.path)
       : null;
     return {
       status: 'ok',
-      ...listNotebookWorkspaceTree(workspaceRoot),
-      selected_path: notebookPath,
+      ...listNotebookWorkspaceTree(target?.workspaceRoot ?? workspaceRoot),
+      selected_path: target?.notebookPath ?? null,
     };
   }
 
@@ -695,7 +939,7 @@ export function createStandaloneServices({
           return true;
         }
         if (requestPath === '/api/standalone/kernels') {
-          sendJson(response, 200, discoverKernels(workspaceRoot));
+          sendJson(response, 200, discoverKernels(resolveTargetWorkspaceRoot(payload)));
           return true;
         }
         if (requestPath === '/api/standalone/workspace-tree') {
@@ -707,17 +951,43 @@ export function createStandaloneServices({
           if (!clientId) {
             throw new Error('Missing client_id');
           }
-          const notebookPath = normalizeNotebookPath(workspaceRoot, payload.path);
+          const target = resolveNotebookTarget(workspaceRoot, payload.path);
+          const notebookPath = target.notebookPath;
           if (!Array.isArray(payload.cells)) {
             throw new Error('Missing cells');
           }
-          const lsp = getLspSession(clientId, notebookPath);
+          const lsp = getLspSession(clientId, target.workspaceRoot, notebookPath);
           const result = await lsp.syncCells(payload.cells.filter((cell) => cell && typeof cell === 'object'));
           sendJson(response, 200, {
             status: 'ok',
             diagnostics_by_cell: result.diagnosticsByCell,
             lsp_status: result.status,
           });
+          return true;
+        }
+
+        if (requestPath === '/api/standalone/notebook/shared-model') {
+          try {
+            sendJson(response, 200, await handleNotebookProxy('/api/notebooks/shared-model', payload, {
+              allowRouteMismatchRetry: false,
+            }));
+          } catch (error) {
+            if (typeof payload?.client_id === 'string' && error?.message?.includes(SQLITE_THREAD_ERROR_FRAGMENT)) {
+              await restartDaemonForWorkspace(payload.client_id, resolveTargetWorkspaceRoot(payload));
+              sendJson(response, 200, await handleNotebookProxy('/api/notebooks/shared-model', payload, {
+                allowRouteMismatchRetry: false,
+              }));
+              return true;
+            }
+            if (error?.statusCode !== 404) {
+              throw error;
+            }
+            const legacySnapshot = await handleNotebookProxy('/api/notebooks/contents', payload);
+            sendJson(response, 200, {
+              ...legacySnapshot,
+              document_version: Date.now(),
+            });
+          }
           return true;
         }
 
@@ -732,6 +1002,7 @@ export function createStandaloneServices({
           ['/api/standalone/notebook/restart-and-run-all', ['/api/notebooks/restart-and-run-all', true]],
           ['/api/standalone/notebook/runtime', ['/api/notebooks/runtime', false]],
           ['/api/standalone/notebook/status', ['/api/notebooks/status', false]],
+          ['/api/standalone/notebook/trust', ['/api/notebooks/trust', false]],
           ['/api/standalone/notebook/activity', ['/api/notebooks/activity', false]],
         ]);
 

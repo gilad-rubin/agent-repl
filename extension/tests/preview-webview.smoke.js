@@ -14,9 +14,10 @@ let previewUrl = `http://127.0.0.1:${previewPort}/preview.html`;
 let mockPreviewUrl = `${previewUrl}?mock=1`;
 
 let previewServer;
+let previewServerExitPromise;
 let browser;
 
-async function waitForPreviewReady(url, timeoutMs = 30_000) {
+async function waitForPreviewReady(url, timeoutMs = 60_000) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
         try {
@@ -52,6 +53,39 @@ async function findOpenPort() {
             });
         });
     });
+}
+
+async function runAgentReplCli(args, cwd = path.resolve(extensionRoot, '..')) {
+    return await new Promise((resolve, reject) => {
+        const child = spawn('uv', ['run', '--project', cwd, 'agent-repl', ...args], {
+            cwd,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => {
+            stdout += chunk.toString();
+        });
+        child.stderr.on('data', (chunk) => {
+            stderr += chunk.toString();
+        });
+        child.on('error', reject);
+        child.on('exit', (code) => {
+            if (code === 0) {
+                resolve({ stdout, stderr });
+                return;
+            }
+            reject(new Error(stderr || stdout || `agent-repl exited with ${code}`));
+        });
+    });
+}
+
+async function stopWorkspaceDaemon(workspaceRoot) {
+    try {
+        await runAgentReplCli(['core', 'stop', '--workspace-root', workspaceRoot]);
+    } catch {
+        // Best-effort cleanup: there may not be a daemon yet.
+    }
 }
 
 async function launchBrowser() {
@@ -103,6 +137,66 @@ async function openWorkspaceNotebookPage(notebookPath) {
     return { context, page };
 }
 
+async function openJupyterLabWorkspaceNotebookPage(notebookPath) {
+    const workspaceRoot = path.resolve(extensionRoot, '..');
+    await runAgentReplCli(['core', 'start', '--workspace-root', workspaceRoot], workspaceRoot);
+    const context = await browser.newContext({
+        viewport: { width: 1440, height: 960 },
+    });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
+        origin: new URL(previewUrl).origin,
+    });
+    const page = await context.newPage();
+    const targetUrl = `${previewUrl}?path=${encodeURIComponent(notebookPath)}&surface=jupyterlab`;
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+    await waitForJupyterLabReady(page);
+    return { context, page };
+}
+
+async function waitForJupyterLabReady(page) {
+    await page.waitForSelector('.agent-repl-jupyterlab-toolbar', { timeout: 60_000 });
+    await page.waitForFunction(() => {
+        const shell = document.querySelector('[data-jupyterlab-phase]');
+        const phase = shell?.getAttribute('data-jupyterlab-phase');
+        return phase === 'ready' || phase === 'error';
+    }, { timeout: 60_000 });
+    const errorText = await page.locator('.agent-repl-jupyterlab-preview-state--error').textContent().catch(() => null);
+    if (errorText && errorText.trim()) {
+        throw new Error(`JupyterLab preview failed to boot: ${errorText.trim()}`);
+    }
+    await page.waitForSelector('.agent-repl-jupyterlab-notebook', { timeout: 60_000 });
+    await page.waitForFunction(() => {
+        return document.querySelectorAll('.agent-repl-jupyterlab-notebook .jp-Cell').length > 0;
+    }, { timeout: 60_000 });
+}
+
+async function waitForJupyterLabCommandMode(page) {
+    await page.waitForFunction(() => {
+        const notebook = document.querySelector('.agent-repl-jupyterlab-notebook');
+        return notebook?.classList.contains('jp-mod-commandMode') ?? false;
+    }, { timeout: 30_000 });
+}
+
+async function focusJupyterLabNotebook(page) {
+    await page.evaluate(() => {
+        const activeCell = document.querySelector('.agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-active');
+        if (activeCell instanceof HTMLElement) {
+            activeCell.focus();
+            return;
+        }
+        const notebook = document.querySelector('.agent-repl-jupyterlab-notebook');
+        if (notebook instanceof HTMLElement) {
+            notebook.focus();
+        }
+    });
+    await page.waitForFunction(() => {
+        const notebook = document.querySelector('.agent-repl-jupyterlab-notebook');
+        return notebook instanceof HTMLElement
+            && document.activeElement instanceof HTMLElement
+            && notebook.contains(document.activeElement);
+    }, { timeout: 10_000 });
+}
+
 async function closePageHandle(handle) {
     await handle.page.close().catch(() => {});
     await handle.context.close().catch(() => {});
@@ -143,6 +237,63 @@ async function writeNotebook(filePath, cellSources) {
     await fs.writeFile(filePath, JSON.stringify(notebook, null, 2));
 }
 
+function collectWidgetFixture(sourceNotebook) {
+    const widgetState = sourceNotebook.metadata?.widgets?.['application/vnd.jupyter.widget-state+json'];
+    if (!widgetState || typeof widgetState !== 'object') {
+        throw new Error('Source notebook does not include saved widget state');
+    }
+
+    for (const cell of sourceNotebook.cells ?? []) {
+        for (const output of cell.outputs ?? []) {
+            const view = output?.data?.['application/vnd.jupyter.widget-view+json'];
+            if (!view || typeof view !== 'object' || typeof view.model_id !== 'string') {
+                continue;
+            }
+            if (!(view.model_id in widgetState)) {
+                continue;
+            }
+
+            const neededIds = new Set([view.model_id]);
+            const queue = [view.model_id];
+            while (queue.length > 0) {
+                const modelId = queue.pop();
+                const model = widgetState[modelId];
+                if (!model) {
+                    continue;
+                }
+                const refs = JSON.stringify(model).match(/IPY_MODEL_[0-9a-f]+/g) ?? [];
+                for (const ref of refs) {
+                    const nextId = ref.replace('IPY_MODEL_', '');
+                    if (!neededIds.has(nextId) && widgetState[nextId]) {
+                        neededIds.add(nextId);
+                        queue.push(nextId);
+                    }
+                }
+            }
+
+            const minimizedState = {};
+            for (const modelId of neededIds) {
+                minimizedState[modelId] = widgetState[modelId];
+            }
+
+            return {
+                cell: {
+                    ...cell,
+                    outputs: [output],
+                },
+                metadata: {
+                    ...(sourceNotebook.metadata ?? {}),
+                    widgets: {
+                        'application/vnd.jupyter.widget-state+json': minimizedState,
+                    },
+                },
+            };
+        }
+    }
+
+    throw new Error('Could not find a saved widget view with matching widget state');
+}
+
 async function waitForNotebookSource(filePath, expectedText, timeoutMs = 15_000) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
@@ -161,6 +312,23 @@ async function waitForNotebookSource(filePath, expectedText, timeoutMs = 15_000)
     throw new Error(`Notebook source did not include ${expectedText} within ${timeoutMs}ms`);
 }
 
+async function waitForNotebook(filePath, predicate, timeoutMs = 15_000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        try {
+            const raw = await fs.readFile(filePath, 'utf8');
+            const notebook = JSON.parse(raw);
+            if (predicate(notebook)) {
+                return notebook;
+            }
+        } catch {
+            // Keep polling until the saved contents land.
+        }
+        await delay(150);
+    }
+    throw new Error(`Notebook contents did not satisfy the expected predicate within ${timeoutMs}ms`);
+}
+
 test.before(async () => {
     previewPort = await findOpenPort();
     previewUrl = `http://127.0.0.1:${previewPort}/preview.html`;
@@ -172,6 +340,9 @@ test.before(async () => {
             AGENT_REPL_PREVIEW_PORT: String(previewPort),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    previewServerExitPromise = new Promise((resolve) => {
+        previewServer.once('exit', () => resolve());
     });
 
     let startupLogs = '';
@@ -197,6 +368,14 @@ test.after(async () => {
     if (previewServer && !previewServer.killed) {
         previewServer.kill('SIGTERM');
     }
+    await Promise.race([
+        previewServerExitPromise,
+        delay(5_000),
+    ]).catch(() => {});
+    if (previewServer?.exitCode == null && !previewServer?.killed) {
+        previewServer.kill('SIGKILL');
+    }
+    await stopWorkspaceDaemon(path.resolve(extensionRoot, '..'));
 });
 
 test('preview uses a monospaced font for code cells', async () => {
@@ -408,6 +587,476 @@ test('workspace preview renders markdown, html tables, and json outputs from per
             await page.locator('[data-rich-output-kind="json"]').textContent(),
             /"items": \[/,
         );
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('jupyterlab preview renders a notebook-like surface and runs code through the standalone host', async () => {
+    const notebookPath = path.join(extensionRoot, '..', 'tmp', `jupyterlab-live-${Date.now()}.ipynb`);
+    const notebook = {
+        cells: [
+            {
+                cell_type: 'markdown',
+                id: `jupyterlab-md-${Date.now()}`,
+                metadata: {},
+                source: ['# Notebook Demo\n', '\n', 'The code cell below should run live.\n'],
+            },
+            {
+                cell_type: 'code',
+                execution_count: null,
+                id: `jupyterlab-code-${Date.now()}`,
+                metadata: {},
+                outputs: [],
+                source: [
+                    'from IPython.display import HTML, Markdown, display\n',
+                    'display(Markdown("## Live output"))\n',
+                    'display(HTML("<table><thead><tr><th>kind</th><th>value</th></tr></thead><tbody><tr><td>html</td><td>42</td></tr></tbody></table>"))\n',
+                    'print("Notebook execution is live.")\n',
+                ],
+            },
+        ],
+        metadata: {
+            kernelspec: {
+                display_name: 'Python 3',
+                language: 'python',
+                name: 'python3',
+            },
+            language_info: {
+                name: 'python',
+            },
+        },
+        nbformat: 4,
+        nbformat_minor: 5,
+    };
+
+    await fs.mkdir(path.dirname(notebookPath), { recursive: true });
+    await fs.writeFile(notebookPath, JSON.stringify(notebook, null, 2));
+
+    const handle = await openJupyterLabWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        await page.getByText('from IPython.display import HTML, Markdown, display').click();
+        await page.getByRole('button', { name: 'Run', exact: true }).click();
+
+        await page.waitForFunction(() => document.body.textContent?.includes('Notebook execution is live.'));
+        await page.waitForFunction(() => {
+            return Array.from(document.querySelectorAll('table td')).some((cell) => cell.textContent === '42');
+        });
+
+        const textContent = await page.locator('body').textContent();
+        assert.match(textContent, /Notebook Demo/);
+        assert.match(textContent, /\[1\]:/);
+        assert.match(textContent, /Notebook execution is live\./);
+        assert.match(textContent, /Live output/);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('jupyterlab preview trusts iframe-backed html only after the notebook is trusted', async () => {
+    const notebookPath = path.join(extensionRoot, '..', 'tmp', `jupyterlab-trust-${Date.now()}.ipynb`);
+    await stopWorkspaceDaemon(path.resolve(extensionRoot, '..'));
+    const notebook = {
+        cells: [
+            {
+                cell_type: 'code',
+                execution_count: 1,
+                id: `jupyterlab-trust-cell-${Date.now()}`,
+                metadata: {},
+                outputs: [
+                    {
+                        output_type: 'display_data',
+                        data: {
+                            'text/plain': '<iframe fallback>',
+                            'text/html': '<iframe srcdoc="<p>trusted iframe payload</p>" sandbox="allow-same-origin"></iframe>',
+                        },
+                        metadata: {},
+                    },
+                ],
+                source: ['"trusted iframe demo"\n'],
+            },
+        ],
+        metadata: {
+            kernelspec: {
+                display_name: 'Python 3',
+                language: 'python',
+                name: 'python3',
+            },
+            language_info: {
+                name: 'python',
+            },
+        },
+        nbformat: 4,
+        nbformat_minor: 5,
+    };
+
+    await fs.mkdir(path.dirname(notebookPath), { recursive: true });
+    await fs.writeFile(notebookPath, JSON.stringify(notebook, null, 2));
+
+    const handle = await openJupyterLabWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        assert.equal(await page.locator('.jp-OutputArea-output iframe').count(), 0);
+
+        await page.getByRole('button', { name: 'Trust' }).click();
+
+        await page.waitForFunction(() => document.body.textContent?.includes('Trusted'));
+        await page.waitForFunction(() => document.querySelectorAll('.jp-OutputArea-output iframe').length === 1);
+
+        const iframeText = await page.locator('.jp-OutputArea-output iframe').evaluate(async (node) => {
+            if (!(node instanceof HTMLIFrameElement)) {
+                return '';
+            }
+            await new Promise((resolve) => {
+                if (node.contentDocument?.readyState === 'complete') {
+                    resolve();
+                    return;
+                }
+                node.addEventListener('load', () => resolve(), { once: true });
+            });
+            return node.contentDocument?.body?.textContent ?? '';
+        });
+
+        assert.match(iframeText, /trusted iframe payload/);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('jupyterlab preview renders saved ipywidget outputs from notebook metadata', async () => {
+    const sourceNotebookPath = '/Users/giladrubin/python_workspace/mafat_hebrew_retrieval/notebooks/old/Finetune_rerank_sentense_BGE.ipynb';
+    const notebookPath = path.join(extensionRoot, '..', 'tmp', `jupyterlab-widget-${Date.now()}.ipynb`);
+    const sourceNotebook = JSON.parse(await fs.readFile(sourceNotebookPath, 'utf8'));
+    const fixture = collectWidgetFixture(sourceNotebook);
+    const notebook = {
+        cells: [fixture.cell],
+        metadata: fixture.metadata,
+        nbformat: 4,
+        nbformat_minor: 5,
+    };
+
+    await fs.mkdir(path.dirname(notebookPath), { recursive: true });
+    await fs.writeFile(notebookPath, JSON.stringify(notebook, null, 2));
+
+    const handle = await openJupyterLabWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        await page.waitForFunction(() => {
+            return document.body.textContent?.includes('config.json:')
+                && document.body.textContent?.includes('0.00/799');
+        }, { timeout: 60_000 });
+
+        const textContent = await page.locator('body').textContent();
+        assert.match(textContent, /config\.json:/);
+        assert.match(textContent, /0\.00\/799/);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('jupyterlab preview keeps the console clean and supports command-mode insert, arrow navigation, and Shift+Enter execution', async () => {
+    const notebookPath = path.join(extensionRoot, '..', 'tmp', `jupyterlab-shortcuts-${Date.now()}.ipynb`);
+    const marker = `Inserted smoke ${Date.now()}`;
+    const notebook = {
+        cells: [
+            {
+                cell_type: 'code',
+                execution_count: null,
+                id: `jupyterlab-shortcuts-${Date.now()}`,
+                metadata: {},
+                outputs: [],
+                source: ['print("seed cell")\n'],
+            },
+        ],
+        metadata: {
+            kernelspec: {
+                display_name: 'Python 3',
+                language: 'python',
+                name: 'python3',
+            },
+            language_info: {
+                name: 'python',
+            },
+        },
+        nbformat: 4,
+        nbformat_minor: 5,
+    };
+
+    await fs.mkdir(path.dirname(notebookPath), { recursive: true });
+    await fs.writeFile(notebookPath, JSON.stringify(notebook, null, 2));
+
+    const consoleMessages = [];
+    const handle = await openJupyterLabWorkspaceNotebookPage(notebookPath);
+    handle.page.on('console', (message) => {
+        consoleMessages.push({ type: message.type(), text: message.text() });
+    });
+    handle.page.on('pageerror', (error) => {
+        consoleMessages.push({ type: 'pageerror', text: String(error.stack || error) });
+    });
+
+    try {
+        const { page } = handle;
+        await page.locator('.jp-CodeCell .cm-content').first().click();
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('b');
+        await page.waitForFunction(() => document.querySelectorAll('.jp-Cell').length === 2);
+
+        await page.keyboard.type(`print(${JSON.stringify(marker)})`);
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('ArrowUp');
+        await page.waitForFunction(() => {
+            const activeCell = document.querySelector('.jp-Cell.jp-mod-active');
+            return activeCell?.textContent?.includes('seed cell') ?? false;
+        });
+        await page.keyboard.press('ArrowDown');
+        await page.waitForFunction((expectedMarker) => {
+            const activeCell = document.querySelector('.jp-Cell.jp-mod-active');
+            return activeCell?.textContent?.includes(expectedMarker) ?? false;
+        }, marker);
+        await page.keyboard.press('Shift+Enter');
+        await page.waitForFunction((expectedMarker) => {
+            return document.body.textContent?.includes(expectedMarker) ?? false;
+        }, marker);
+
+        const notebookText = await page.locator('body').textContent();
+        assert.match(notebookText, /seed cell/);
+        assert.match(notebookText, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        assert.equal(await page.locator('.jp-Cell').count(), 2);
+        assert.doesNotMatch(notebookText, /\bSaved\b/);
+
+        const noisyMessages = consoleMessages.filter((message) => {
+            return message.type === 'pageerror'
+                || /Invalid access: Add Yjs type to a document before reading data\./.test(message.text)
+                || /Failed to load resource/.test(message.text);
+        });
+        assert.deepEqual(noisyMessages, []);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('jupyterlab preview enables CodeMirror completion popups for python code', async () => {
+    const notebookPath = path.join(extensionRoot, '..', 'tmp', `jupyterlab-completion-${Date.now()}.ipynb`);
+    await writeNotebook(notebookPath, ['']);
+
+    const handle = await openJupyterLabWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        const firstEditor = page.locator('.jp-CodeCell .cm-content').first();
+        await firstEditor.click();
+        await page.keyboard.type('imp');
+        await page.keyboard.press('Control+Space');
+
+        await page.waitForSelector('.cm-tooltip-autocomplete');
+        const completionText = await page.locator('.cm-tooltip-autocomplete').textContent();
+        assert.match(completionText, /import/);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('jupyterlab preview selects the next code cell in command mode after Shift+Enter and preserves continued execution', async () => {
+    const notebookPath = path.join(extensionRoot, '..', 'tmp', `jupyterlab-shift-enter-${Date.now()}.ipynb`);
+    const notebook = {
+        cells: [
+            {
+                cell_type: 'markdown',
+                id: `jupyterlab-shift-enter-md-${Date.now()}`,
+                metadata: {},
+                source: ['# Shift Enter Regression\n', '\n', 'Reproduces the repeated Shift+Enter workflow.\n'],
+            },
+            {
+                cell_type: 'code',
+                execution_count: null,
+                id: `jupyterlab-shift-enter-code-${Date.now()}`,
+                metadata: {},
+                outputs: [],
+                source: [],
+            },
+        ],
+        metadata: {
+            kernelspec: {
+                display_name: 'Python 3',
+                language: 'python',
+                name: 'python3',
+            },
+            language_info: {
+                name: 'python',
+            },
+        },
+        nbformat: 4,
+        nbformat_minor: 5,
+    };
+
+    await fs.mkdir(path.dirname(notebookPath), { recursive: true });
+    await fs.writeFile(notebookPath, JSON.stringify(notebook, null, 2));
+
+    const consoleMessages = [];
+    const handle = await openJupyterLabWorkspaceNotebookPage(notebookPath);
+    handle.page.on('console', (message) => {
+        consoleMessages.push({ type: message.type(), text: message.text() });
+    });
+    handle.page.on('pageerror', (error) => {
+        consoleMessages.push({ type: 'pageerror', text: String(error.stack || error) });
+    });
+
+    try {
+        const { page } = handle;
+
+        const firstEditor = page.locator('.jp-CodeCell .cm-content').first();
+        await firstEditor.click();
+        await page.keyboard.type('a=5');
+        await page.keyboard.press('Shift+Enter');
+
+        await page.waitForFunction(() => {
+            return document.querySelectorAll('.jp-CodeCell').length >= 2;
+        });
+
+        await page.waitForFunction(() => {
+            const activeCell = document.querySelector('.jp-Cell.jp-mod-active');
+            return activeCell instanceof HTMLElement
+                && activeCell.classList.contains('jp-CodeCell')
+                && (activeCell.textContent?.includes('[ ]:') ?? false);
+        });
+        await page.waitForFunction(() => {
+            const notebook = document.querySelector('.agent-repl-jupyterlab-notebook');
+            const active = document.activeElement;
+            return notebook?.classList.contains('jp-mod-commandMode')
+                && !notebook?.classList.contains('jp-mod-editMode')
+                && active instanceof HTMLElement
+                && !active.closest('[role="textbox"]');
+        });
+
+        const secondEditor = page.locator('.jp-CodeCell .cm-content').nth(1);
+        await page.keyboard.press('Enter');
+        await secondEditor.click();
+        await page.keyboard.insertText('a');
+        await page.keyboard.press('Shift+Enter');
+
+        await page.waitForFunction(() => {
+            return Array.from(document.querySelectorAll('.jp-OutputArea-output')).some((node) => {
+                return (node.textContent || '').trim() === '5';
+            });
+        });
+
+        const savedNotebook = await waitForNotebook(notebookPath, (currentNotebook) => {
+            const cells = currentNotebook.cells ?? [];
+            return cells.length >= 4
+                && normalizeNotebookSource(cells[1]?.source) === 'a=5'
+                && normalizeNotebookSource(cells[2]?.source) === 'a'
+                && JSON.stringify(cells[2]?.outputs ?? []).includes('"5"');
+        });
+
+        assert.equal(normalizeNotebookSource(savedNotebook.cells[1].source), 'a=5');
+        assert.equal(normalizeNotebookSource(savedNotebook.cells[2].source), 'a');
+        assert.equal(savedNotebook.cells[3].cell_type, 'code');
+        assert.equal(normalizeNotebookSource(savedNotebook.cells[3].source), '');
+        assert.match(await page.locator('body').textContent(), /\[.*\]:\s*5/);
+
+        const noisyMessages = consoleMessages.filter((message) => {
+            return message.type === 'warning'
+                || message.type === 'error'
+                || message.type === 'pageerror'
+                || /Failed to load resource/.test(message.text);
+        });
+        assert.deepEqual(noisyMessages, []);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('jupyterlab preview selects all cells from command mode with cmd/ctrl-a', async () => {
+    const notebookPath = path.join(extensionRoot, '..', 'tmp', `jupyterlab-select-all-${Date.now()}.ipynb`);
+    await writeNotebook(notebookPath, ['alpha = 1', 'beta = 2', 'gamma = 3']);
+
+    const handle = await openJupyterLabWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        await page.locator('.jp-CodeCell .cm-content').first().click();
+        await page.keyboard.press('Escape');
+        await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+
+        await page.waitForFunction(() => {
+            return document.querySelectorAll('.jp-Cell.jp-mod-selected').length === document.querySelectorAll('.jp-Cell').length;
+        });
+
+        const selectionState = await page.evaluate(() => {
+            const notebook = document.querySelector('.agent-repl-jupyterlab-notebook');
+            return {
+                selectedCount: document.querySelectorAll('.jp-Cell.jp-mod-selected').length,
+                totalCount: document.querySelectorAll('.jp-Cell').length,
+                commandMode: notebook?.classList.contains('jp-mod-commandMode') ?? false,
+            };
+        });
+
+        assert.equal(selectionState.selectedCount, 3);
+        assert.equal(selectionState.totalCount, 3);
+        assert.equal(selectionState.commandMode, true);
+    } finally {
+        await closePageHandle(handle);
+        await fs.unlink(notebookPath).catch(() => {});
+    }
+});
+
+test('jupyterlab preview undoes the last structural insert with z in command mode', async () => {
+    const notebookPath = path.join(extensionRoot, '..', 'tmp', `jupyterlab-undo-${Date.now()}.ipynb`);
+    await writeNotebook(notebookPath, ['alpha = 1', 'beta = 2']);
+
+    const handle = await openJupyterLabWorkspaceNotebookPage(notebookPath);
+    try {
+        const { page } = handle;
+
+        await page.locator('.jp-CodeCell .cm-content').first().click();
+        await page.keyboard.press('Escape');
+        await waitForJupyterLabCommandMode(page);
+        await focusJupyterLabNotebook(page);
+        await page.keyboard.press('b');
+
+        await page.waitForFunction(() => document.querySelectorAll('.jp-CodeCell').length === 3);
+        await page.waitForFunction(() => {
+            const debug = window.__agentReplJupyterLab;
+            return Boolean(debug)
+                && debug.getPendingCommandCount() === 0
+                && debug.getUndoDepth() > 0;
+        });
+        await waitForNotebook(notebookPath, (currentNotebook) => (currentNotebook.cells ?? []).length === 3, 30_000);
+
+        await page.keyboard.press('Escape');
+        await waitForJupyterLabCommandMode(page);
+        await focusJupyterLabNotebook(page);
+        await page.evaluate(() => {
+            const debug = window.__agentReplJupyterLab;
+            if (!debug) {
+                throw new Error('JupyterLab preview debug bridge was not available for undo verification');
+            }
+            void debug.executeCommand('agent-repl:notebook-undo');
+        });
+
+        await page.waitForFunction(() => {
+            const debug = window.__agentReplJupyterLab;
+            return document.querySelectorAll('.jp-CodeCell').length === 2
+                && Boolean(debug)
+                && debug.getPendingCommandCount() === 0;
+        });
+        await waitForJupyterLabCommandMode(page);
+
+        const savedNotebook = await waitForNotebook(notebookPath, (currentNotebook) => (currentNotebook.cells ?? []).length === 2, 30_000);
+        assert.equal(savedNotebook.cells.length, 2);
+        assert.equal(normalizeNotebookSource(savedNotebook.cells[0].source).trim(), 'alpha = 1');
+        assert.equal(normalizeNotebookSource(savedNotebook.cells[1].source).trim(), 'beta = 2');
     } finally {
         await closePageHandle(handle);
         await fs.unlink(notebookPath).catch(() => {});

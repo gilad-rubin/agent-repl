@@ -50,6 +50,8 @@ uv run agent-repl core stop --workspace-root /Users/giladrubin/python_workspace/
 uv run agent-repl core start --workspace-root /Users/giladrubin/python_workspace/agent-repl --pretty
 ```
 
+For focused JupyterLab-preview keyboard tests, prefer starting the daemon before opening the page so command-path checks are not measuring daemon boot latency.
+
 4. Start preview on a known port:
 
 ```bash
@@ -78,6 +80,12 @@ Example restart-and-run-all repro notebook:
 uv run agent-repl new tmp-browser-runall-verify.ipynb --cells-json '[{"type":"code","source":"import time\nfor i in range(3):\n    print(f\"tick {i + 1}/3\", flush=True)\n    time.sleep(1)\nprint(\"done\", flush=True)"},{"type":"code","source":"print(\"second\")"},{"type":"code","source":"print(\"third\")"}]'
 ```
 
+Example JupyterLab-surface repro notebook:
+
+```bash
+uv run agent-repl new tmp-browser-jupyterlab-verify.ipynb --cells-json '[{"type":"markdown","source":"# Notebook Demo\n\nThe code cell below should run live."},{"type":"code","source":"from IPython.display import HTML, Markdown, display\ndisplay(Markdown(\"## Live output\"))\ndisplay(HTML(\"<table><thead><tr><th>kind</th><th>value</th></tr></thead><tbody><tr><td>html</td><td>42</td></tr></tbody></table>\"))\nprint(\"Notebook execution is live.\")"}]'
+```
+
 ## Manual QA Checklist
 
 Open preview:
@@ -102,6 +110,20 @@ For `Run All` or `Restart and Run All`, verify:
 - later code cells stay `Queued` until their turn
 - cells do not all sit in `Queued` until the entire batch finishes
 - completed cells flip individually as the batch advances
+
+For the JupyterLab surface preview:
+
+- open `http://127.0.0.1:4176/preview.html?path=tmp-browser-jupyterlab-verify.ipynb&surface=jupyterlab`
+- wait for the shell marker `data-jupyterlab-phase="ready"` before judging notebook behavior; `booting` means the preview host has not finished attaching the notebook yet
+- verify the page reads like a notebook, not a plain text dump
+- verify the markdown cell is rendered, not shown as raw source
+- verify notebook-mode shortcuts behave like a notebook: `Escape` enters command mode, `b` inserts a cell below into edit mode, `Cmd/Ctrl+A` selects all cells, `z` undoes the last structural insert/delete, and `Shift+Enter` runs the active cell
+- focus the code cell and run it with the toolbar `Run` button or `Shift+Enter`
+- verify the execution prompt flips from `[ ]:` to `[1]:`
+- verify the markdown heading, HTML table, and printed text appear inside the same code cell output area
+- if the notebook includes saved ipywidget metadata, verify the widget text renders as visible output instead of a raw `application/vnd.jupyter.widget-view+json` payload
+- if the notebook includes trusted iframe-backed HTML, verify the iframe appears only after the notebook is explicitly trusted
+- verify the browser console stays clean: no repeated Yjs premature-access warnings and no favicon/resource 404s
 
 ## What “Intermediate Output” Should Look Like
 
@@ -133,6 +155,7 @@ Important:
 - use `waitUntil: 'domcontentloaded'`, not `networkidle`
 - the preview page polls continuously, so `networkidle` can hang or mislead
 - wait for explicit selectors such as `[data-cell-id]`
+- for the JupyterLab path, prefer waiting on `[data-jupyterlab-phase="ready"]` and fail fast if `[data-jupyterlab-phase="error"]` appears
 
 Minimal pattern:
 

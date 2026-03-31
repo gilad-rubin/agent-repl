@@ -191,6 +191,12 @@ class NotebookWriteService:
             "mode": "headless",
         }, HTTPStatus.OK
 
+    def trust(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._run_locked_mutation(
+            path,
+            lambda real_path, relative_path: self.state._headless_notebook_trust(real_path, relative_path),
+        )
+
     def project_visible(
         self,
         path: str,

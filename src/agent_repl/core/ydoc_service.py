@@ -31,10 +31,16 @@ class YDocService:
         self._awareness: dict[str, pycrdt.Awareness] = {}
         self._owner_threads: dict[str, int] = {}
         self._pending_disposals: dict[int, list[tuple[YNotebook | None, pycrdt.Awareness | None]]] = {}
+        self._versions: dict[str, int] = {}
         # Bidirectional cell_id <-> index mapping per path
         self._id_to_index: dict[str, dict[str, int]] = {}
         self._index_to_id: dict[str, dict[int, str]] = {}
         self._lock = threading.Lock()
+
+    def _touch_version(self, path: str) -> int:
+        next_version = self._versions.get(path, 0) + 1
+        self._versions[path] = next_version
+        return next_version
 
     def _flush_thread_disposals(self) -> None:
         """Drop any queued YDoc objects owned by the current thread."""
@@ -74,6 +80,7 @@ class YDocService:
                 idx_to_id[index] = cell_id
         self._id_to_index[path] = id_to_idx
         self._index_to_id[path] = idx_to_id
+        self._touch_version(path)
         return ynb
 
     def has_cells(self, path: str) -> bool:
@@ -117,6 +124,17 @@ class YDocService:
             return []
         return json.loads(str(ynb.ycells))
 
+    def get_version(self, path: str) -> int:
+        """Return the monotonic shared-model version for a notebook path."""
+        return self._versions.get(path, 0)
+
+    def get_snapshot(self, path: str) -> dict[str, Any]:
+        """Return the current YDoc-backed cells plus a monotonic version."""
+        return {
+            "document_version": self.get_version(path),
+            "cells": self.get_cells(path),
+        }
+
     def set_cell_source(
         self, path: str, index: int | None = None, source: str = "", *, cell_id: str | None = None,
     ) -> bool:
@@ -133,6 +151,25 @@ class YDocService:
         cell = cells[resolved]
         cell["source"] = source
         ynb.set_cell(resolved, cell)
+        self._touch_version(path)
+        return True
+
+    def replace_cell(
+        self, path: str, cell_data: dict[str, Any], index: int | None = None, *, cell_id: str | None = None,
+    ) -> bool:
+        """Replace the full cell payload at an index via CRDT mutation."""
+        ynb = self._documents.get(path)
+        if ynb is None:
+            return False
+        resolved = self._resolve_index(path, index=index, cell_id=cell_id)
+        if resolved is None:
+            return False
+        cells = json.loads(str(ynb.ycells))
+        if resolved < 0 or resolved >= len(cells):
+            return False
+        ynb.set_cell(resolved, cell_data)
+        self._rebuild_id_map(path)
+        self._touch_version(path)
         return True
 
     def append_cell(self, path: str, cell_data: dict[str, Any]) -> bool:
@@ -141,6 +178,42 @@ class YDocService:
         if ynb is None:
             return False
         ynb.append_cell(cell_data)
+        self._touch_version(path)
+        return True
+
+    def change_cell_type(
+        self,
+        path: str,
+        *,
+        cell_type: str,
+        source: str | None = None,
+        index: int | None = None,
+        cell_id: str | None = None,
+    ) -> bool:
+        """Change a cell's type while preserving its stable identity metadata."""
+        ynb = self._documents.get(path)
+        if ynb is None:
+            return False
+        resolved = self._resolve_index(path, index=index, cell_id=cell_id)
+        if resolved is None:
+            return False
+        cells = json.loads(str(ynb.ycells))
+        if resolved < 0 or resolved >= len(cells):
+            return False
+        cell = dict(cells[resolved])
+        next_type = cell_type if cell_type in {"code", "markdown", "raw"} else "markdown"
+        cell["cell_type"] = next_type
+        if source is not None:
+            cell["source"] = source
+        if next_type == "code":
+            cell["outputs"] = []
+            cell["execution_count"] = None
+        else:
+            cell.pop("outputs", None)
+            cell.pop("execution_count", None)
+        ynb.set_cell(resolved, cell)
+        self._rebuild_id_map(path)
+        self._touch_version(path)
         return True
 
     def insert_cell(
@@ -167,6 +240,7 @@ class YDocService:
             ynb.append_cell(cell_data)
             ynb.ycells.move(cell_count, index)
         self._rebuild_id_map(path)
+        self._touch_version(path)
         return True
 
     def remove_cell(
@@ -183,6 +257,7 @@ class YDocService:
             return False
         ynb.ycells.pop(resolved)
         self._rebuild_id_map(path)
+        self._touch_version(path)
         return True
 
     def move_cell(
@@ -206,6 +281,7 @@ class YDocService:
             return True
         ynb.ycells.move(resolved_from, resolved_to)
         self._rebuild_id_map(path)
+        self._touch_version(path)
         return True
 
     def get_update(self, path: str) -> bytes | None:
@@ -219,6 +295,7 @@ class YDocService:
         """Apply a remote YDoc update."""
         ynb = self.get_or_create(path)
         ynb.ydoc.apply_update(update)
+        self._touch_version(path)
         return True
 
     def set_presence(

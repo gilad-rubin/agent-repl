@@ -29,6 +29,53 @@ class TestNotebookHttpRoutes(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json(), {"error": "Missing path"})
 
+    def test_dispatches_shared_model_route(self):
+        state = mock.MagicMock()
+        state.notebook_shared_model.return_value = (
+            {
+                "path": "nb.ipynb",
+                "document_version": 3,
+                "cells": [],
+                "notebook_metadata": {"kernelspec": {"name": "python3"}},
+                "notebook_trusted": False,
+                "trusted_code_cells": 0,
+                "total_code_cells": 1,
+            },
+            HTTPStatus.OK,
+        )
+        client = _make_client(state)
+
+        resp = client.post("/api/notebooks/shared-model", json={"path": "nb.ipynb"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.json(),
+            {
+                "path": "nb.ipynb",
+                "document_version": 3,
+                "cells": [],
+                "notebook_metadata": {"kernelspec": {"name": "python3"}},
+                "notebook_trusted": False,
+                "trusted_code_cells": 0,
+                "total_code_cells": 1,
+            },
+        )
+        state.notebook_shared_model.assert_called_once_with("nb.ipynb")
+
+    def test_dispatches_trust_route(self):
+        state = mock.MagicMock()
+        state.notebook_trust.return_value = (
+            {"status": "ok", "path": "nb.ipynb", "notebook_trusted": True},
+            HTTPStatus.OK,
+        )
+        client = _make_client(state)
+
+        resp = client.post("/api/notebooks/trust", json={"path": "nb.ipynb"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "ok", "path": "nb.ipynb", "notebook_trusted": True})
+        state.notebook_trust.assert_called_once_with("nb.ipynb")
+
     def test_dispatches_execute_visible_cell_route(self):
         state = mock.MagicMock()
         state.notebook_execute_visible_cell.return_value = ({"status": "ok"}, HTTPStatus.OK)

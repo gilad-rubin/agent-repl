@@ -26,6 +26,23 @@ class TestYDocServiceBasics(unittest.TestCase):
         self.assertEqual(cells[0]["source"], "x = 1")
         self.assertEqual(cells[1]["source"], "# Hello")
 
+    def test_snapshot_exposes_cells_and_monotonic_version(self):
+        svc = YDocService()
+        svc.load_from_nbformat("demo.ipynb", {
+            "cells": [
+                {"cell_type": "code", "source": "x = 1", "metadata": {}, "outputs": []},
+            ],
+        })
+
+        first = svc.get_snapshot("demo.ipynb")
+        self.assertEqual(first["document_version"], 1)
+        self.assertEqual(first["cells"][0]["source"], "x = 1")
+
+        svc.set_cell_source("demo.ipynb", 0, "x = 2")
+        second = svc.get_snapshot("demo.ipynb")
+        self.assertEqual(second["document_version"], 2)
+        self.assertEqual(second["cells"][0]["source"], "x = 2")
+
 
 class TestYDocServiceEditing(unittest.TestCase):
     def setUp(self):
@@ -49,8 +66,25 @@ class TestYDocServiceEditing(unittest.TestCase):
         self.assertEqual(len(cells), 2)
         self.assertEqual(cells[1]["source"], "y = 2")
 
+    def test_replace_cell(self):
+        self.assertTrue(self.svc.replace_cell("nb.ipynb", {
+            "cell_type": "markdown",
+            "source": "# changed",
+            "metadata": {"custom": {"agent-repl": {"cell_id": "reused-id"}}},
+        }, 0))
+        cells = self.svc.get_cells("nb.ipynb")
+        self.assertEqual(cells[0]["cell_type"], "markdown")
+        self.assertEqual(cells[0]["source"], "# changed")
+
     def test_set_cell_source_out_of_range(self):
         self.assertFalse(self.svc.set_cell_source("nb.ipynb", 99, "nope"))
+
+    def test_change_cell_type(self):
+        self.assertTrue(self.svc.change_cell_type("nb.ipynb", cell_type="markdown", index=0, source="# heading"))
+        cells = self.svc.get_cells("nb.ipynb")
+        self.assertEqual(cells[0]["cell_type"], "markdown")
+        self.assertEqual(cells[0]["source"], "# heading")
+        self.assertNotIn("outputs", cells[0])
 
 
 class TestYDocServiceInsert(unittest.TestCase):
@@ -211,6 +245,31 @@ class TestYDocServiceCellIdMapping(unittest.TestCase):
         self.assertTrue(self.svc.set_cell_source("nb.ipynb", cell_id="id-b", source="modified"))
         cells = self.svc.get_cells("nb.ipynb")
         self.assertEqual(cells[1]["source"], "modified")
+
+    def test_change_cell_type_by_cell_id_preserves_id_mapping(self):
+        self.assertTrue(self.svc.change_cell_type("nb.ipynb", cell_id="id-b", cell_type="markdown", source="# heading"))
+        cells = self.svc.get_cells("nb.ipynb")
+        self.assertEqual(cells[1]["cell_type"], "markdown")
+        self.assertEqual(cells[1]["source"], "# heading")
+        self.assertEqual(self.svc.index_for_cell_id("nb.ipynb", "id-b"), 1)
+
+    def test_change_cell_type_to_code_clears_outputs(self):
+        svc = YDocService()
+        svc.load_from_nbformat("nb3.ipynb", {
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "source": "# markdown",
+                    "metadata": {"custom": {"agent-repl": {"cell_id": "id-md"}}},
+                },
+            ],
+        })
+        self.assertTrue(svc.change_cell_type("nb3.ipynb", cell_id="id-md", cell_type="code", source="print(1)"))
+        cells = svc.get_cells("nb3.ipynb")
+        self.assertEqual(cells[0]["cell_type"], "code")
+        self.assertEqual(cells[0]["source"], "print(1)")
+        self.assertEqual(cells[0]["outputs"], [])
+        self.assertIsNone(cells[0]["execution_count"])
 
     def test_remove_cell_by_cell_id(self):
         self.assertTrue(self.svc.remove_cell("nb.ipynb", cell_id="id-b"))

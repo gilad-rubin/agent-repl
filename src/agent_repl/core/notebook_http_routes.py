@@ -55,12 +55,26 @@ def routes(state: Any) -> list[Route]:
             return JSONResponse(req[1], status_code=req[0].value)
         return await respond_from_threadpool(state.notebook_contents, req.path)
 
+    async def notebooks_shared_model(request: Request) -> JSONResponse:
+        payload = await parse_body(request)
+        req = parse_request(payload, NotebookPathRequest)
+        if isinstance(req, tuple):
+            return JSONResponse(req[1], status_code=req[0].value)
+        return await respond_from_threadpool(state.notebook_shared_model, req.path)
+
     async def notebooks_status(request: Request) -> JSONResponse:
         payload = await parse_body(request)
         req = parse_request(payload, NotebookPathRequest)
         if isinstance(req, tuple):
             return JSONResponse(req[1], status_code=req[0].value)
         return await respond_from_threadpool(state.notebook_status, req.path)
+
+    async def notebooks_trust(request: Request) -> JSONResponse:
+        payload = await parse_body(request)
+        req = parse_request(payload, NotebookPathRequest)
+        if isinstance(req, tuple):
+            return JSONResponse(req[1], status_code=req[0].value)
+        return await respond_from_threadpool(state.notebook_trust, req.path)
 
     async def notebooks_create(request: Request) -> JSONResponse:
         payload = await parse_body(request)
@@ -290,7 +304,9 @@ def routes(state: Any) -> list[Route]:
 
     return [
         Route("/api/notebooks/contents", notebooks_contents, methods=["POST"]),
+        Route("/api/notebooks/shared-model", notebooks_shared_model, methods=["POST"]),
         Route("/api/notebooks/status", notebooks_status, methods=["POST"]),
+        Route("/api/notebooks/trust", notebooks_trust, methods=["POST"]),
         Route("/api/notebooks/create", notebooks_create, methods=["POST"]),
         Route("/api/notebooks/edit", notebooks_edit, methods=["POST"]),
         Route("/api/notebooks/select-kernel", notebooks_select_kernel, methods=["POST"]),

@@ -20,6 +20,7 @@
 - [JupyterLab-Powered Notebook Surface](/Users/giladrubin/python_workspace/agent-repl/dev/design/jupyterlab-surface.md) - proposed path to stop owning the notebook UI while preserving runtime-first authority
 - [Architecture Modernization Plan](/Users/giladrubin/python_workspace/agent-repl/dev/architecture-modernization-plan.md) - recommended path to reduce bespoke infrastructure while preserving current CLI, VS Code, and browser behavior
 - [Architecture Modernization Rollout](/Users/giladrubin/python_workspace/agent-repl/dev/implementation-chain/architecture-modernization-rollout.md) - implementation slices with HLD, acceptance criteria, and test gates for the modernization chain
+- [JupyterLab Surface Rollout](/Users/giladrubin/python_workspace/agent-repl-jupyterlab-surface/dev/implementation-chain/jupyterlab-surface-rollout.md) - phased plan for moving the notebook surface onto JupyterLab and YDoc-backed projection seams without giving up daemon authority
 - [Behavior Locks](/Users/giladrubin/python_workspace/agent-repl/dev/behavior-locks/README.md) - preserved product behaviors and their regression-test anchors so modernization does not silently erase interaction decisions
 
 ## Historical Notes

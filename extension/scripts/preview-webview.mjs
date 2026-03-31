@@ -30,6 +30,7 @@ const standaloneApiRoutes = [
   '/api/standalone/workspace-tree',
   '/api/standalone/lsp/sync',
   '/api/standalone/notebook/contents',
+  '/api/standalone/notebook/shared-model',
   '/api/standalone/notebook/edit',
   '/api/standalone/notebook/execute-cell',
   '/api/standalone/notebook/interrupt',
@@ -39,6 +40,7 @@ const standaloneApiRoutes = [
   '/api/standalone/notebook/restart-and-run-all',
   '/api/standalone/notebook/runtime',
   '/api/standalone/notebook/status',
+  '/api/standalone/notebook/trust',
   '/api/standalone/notebook/activity',
   '/api/standalone/notebook/execute-cell-async',
   '/api/standalone/notebook/execute-all-async',
@@ -108,6 +110,14 @@ function safePathname(urlPath) {
 }
 
 const server = createServer(async (request, response) => {
+  if ((request.url || '').startsWith('/favicon.ico')) {
+    response.writeHead(204, {
+      'Cache-Control': 'no-store',
+    });
+    response.end();
+    return;
+  }
+
   if ((request.url || '').startsWith('/api/standalone/health')) {
     response.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',

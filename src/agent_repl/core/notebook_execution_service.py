@@ -87,12 +87,23 @@ class NotebookExecutionService:
                         )
                         continue
                     if msg_type == "stream":
-                        output_payload = nbformat.v4.new_output(
-                            output_type="stream",
-                            name=content.get("name", "stdout"),
-                            text=content.get("text", ""),
-                        )
-                        outputs.append(output_payload)
+                        stream_name = content.get("name", "stdout")
+                        stream_text = content.get("text", "")
+                        if (
+                            outputs
+                            and getattr(outputs[-1], "output_type", None) == "stream"
+                            and getattr(outputs[-1], "name", None) == stream_name
+                            and not str(getattr(outputs[-1], "text", "")).endswith("\n")
+                        ):
+                            outputs[-1].text = f"{getattr(outputs[-1], 'text', '')}{stream_text}"
+                            output_payload = outputs[-1]
+                        else:
+                            output_payload = nbformat.v4.new_output(
+                                output_type="stream",
+                                name=stream_name,
+                                text=stream_text,
+                            )
+                            outputs.append(output_payload)
                         self._append_output_event(
                             relative_path=relative_path,
                             detail=f"Stream output for cell {cell_index + 1}",
@@ -361,7 +372,7 @@ class NotebookExecutionService:
                     kernel_generation=runtime.kernel_generation,
                     status="error" if error_text else "ok",
                 )
-                self.state._save_notebook(real_path, latest_notebook)
+                self.state._save_notebook(real_path, latest_notebook, sign=True)
                 self.state._append_activity_event(
                     path=relative_path,
                     event_type="cell-outputs-updated",

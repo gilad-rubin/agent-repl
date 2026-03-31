@@ -64,10 +64,12 @@ export function buildWebviewHtml(
   const previewOrigin = previewAssets ? ` ${previewAssets.origin}` : '';
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" translate="no" class="notranslate">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Language" content="en">
+<meta name="google" content="notranslate">
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'none';
     font-src ${webview.cspSource};
@@ -82,8 +84,8 @@ export function buildWebviewHtml(
 </style>
 <link id="agent-repl-canvas-css" rel="stylesheet" href="${canvasCss}">
 </head>
-<body data-nonce="${nonce}">
-  <div id="root"></div>
+<body data-nonce="${nonce}" translate="no" class="notranslate">
+  <div id="root" translate="no" class="notranslate"></div>
   <script nonce="${nonce}">
   (() => {
     const localAssets = ${JSON.stringify(localAssets)};

@@ -10,7 +10,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; }
-::selection { background: rgba(135,195,255,0.24); }
+::selection { background: rgba(217, 119, 6, 0.18); }
 
 /* ── Warm light overrides on Carbon tokens ── */
 
@@ -41,16 +41,16 @@ body { margin: 0; }
 
 .cds--g90, .cds--g100,
 [data-carbon-theme="g90"], [data-carbon-theme="g100"] {
-  --cds-background: #121314 !important;
-  --cds-layer: #191A1B !important;
-  --cds-layer-accent: #242526 !important;
-  --cds-border-subtle: #2e2e2e !important;
+  --cds-background: #111315 !important;
+  --cds-layer: #17191c !important;
+  --cds-layer-accent: #202327 !important;
+  --cds-border-subtle: #2b3036 !important;
   --cds-border-interactive: #d97706 !important;
   --cds-focus: #d97706 !important;
   --cds-interactive: #d97706 !important;
-  --cds-text-primary: #d8dee9 !important;
-  --cds-text-secondary: #b0b8c4 !important;
-  --cds-text-helper: #505050 !important;
+  --cds-text-primary: #ebe5db !important;
+  --cds-text-secondary: #c1b7aa !important;
+  --cds-text-helper: #8a8175 !important;
   --cds-button-primary: #d97706 !important;
   --cds-button-primary-hover: #b45309 !important;
   --cds-button-primary-active: #92400e !important;
@@ -344,4 +344,529 @@ body { margin: 0; }
 .rich-output td {
   color: var(--cds-text-secondary);
   vertical-align: top;
+}
+
+/* ── JupyterLab prototype surface ── */
+#root {
+  min-height: 100vh;
+}
+
+.jp-LabShell.agent-repl-jupyterlab-shell {
+  --jp-layout-color0: var(--cds-background);
+  --jp-layout-color1: var(--cds-layer);
+  --jp-layout-color2: var(--cds-layer-accent);
+  --jp-layout-color3: color-mix(in srgb, var(--cds-layer-accent) 78%, #ffffff);
+  --jp-border-color1: rgba(28, 25, 23, 0.12);
+  --jp-border-color2: rgba(28, 25, 23, 0.08);
+  --jp-border-color3: rgba(28, 25, 23, 0.06);
+  --jp-ui-font-color1: var(--cds-text-primary);
+  --jp-ui-font-color2: var(--cds-text-secondary);
+  --jp-ui-font-color3: var(--cds-text-helper);
+  --jp-ui-font-family: "IBM Plex Sans", system-ui, sans-serif;
+  --jp-content-font-family: "IBM Plex Sans", system-ui, sans-serif;
+  --jp-code-font-family: "IBM Plex Mono", "SF Mono", Monaco, Menlo, Consolas, monospace;
+  --jp-brand-color1: var(--cds-interactive);
+  --jp-brand-color2: color-mix(in srgb, var(--cds-interactive) 72%, white);
+  --jp-accent-color0: rgba(217, 119, 6, 0.08);
+  --jp-accent-color1: rgba(217, 119, 6, 0.14);
+  --jp-accent-color2: rgba(180, 83, 9, 0.2);
+  --jp-editor-selected-background: rgba(217, 119, 6, 0.16);
+  --jp-editor-selected-focused-background: rgba(217, 119, 6, 0.22);
+  --jp-cell-editor-border-color: rgba(28, 25, 23, 0.08);
+  --jp-cell-editor-active-border-color: color-mix(in srgb, var(--cds-interactive) 58%, white);
+  --jp-cell-editor-background: var(--cds-layer);
+  --jp-cell-prompt-width: 56px;
+  --jp-rendermime-table-row-hover-background: rgba(217, 119, 6, 0.06);
+  min-height: 100vh;
+  background: var(--cds-background);
+  color: var(--jp-ui-font-color1);
+  font-family: var(--jp-ui-font-family);
+}
+
+.agent-repl-jupyterlab-shell {
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-repl-jupyterlab-chrome {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: color-mix(in srgb, var(--cds-background) 96%, transparent);
+  border-bottom: 1px solid var(--cds-border-subtle);
+}
+
+.agent-repl-jupyterlab-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 12px 18px 10px;
+  flex-wrap: wrap;
+}
+
+.agent-repl-jupyterlab-toolbarButton {
+  border: 1px solid var(--cds-border-subtle);
+  border-radius: 6px;
+  background: var(--cds-layer);
+  color: var(--cds-text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  min-height: 30px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.agent-repl-jupyterlab-toolbarButton:hover {
+  background: color-mix(in srgb, var(--cds-layer-accent) 88%, #ffffff);
+  border-color: rgba(180, 83, 9, 0.28);
+}
+
+.agent-repl-jupyterlab-toolbarButton:focus-visible {
+  outline: none;
+  border-color: var(--cds-border-interactive);
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.14);
+}
+
+.agent-repl-jupyterlab-toolbarSpacer {
+  flex: 1;
+}
+
+.agent-repl-jupyterlab-runtime,
+.agent-repl-jupyterlab-path,
+.agent-repl-jupyterlab-trust,
+.agent-repl-jupyterlab-toolbarStatus {
+  font-size: 13px;
+}
+
+.agent-repl-jupyterlab-runtime {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--cds-layer);
+  border: 1px solid var(--cds-border-subtle);
+  color: var(--cds-text-secondary);
+}
+
+.agent-repl-jupyterlab-trust {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--cds-layer);
+  border: 1px solid var(--cds-border-subtle);
+  color: var(--cds-text-secondary);
+}
+
+.agent-repl-jupyterlab-trust--trusted {
+  color: #166534;
+  font-weight: 600;
+  background: rgba(22, 163, 74, 0.08);
+  border-color: rgba(22, 163, 74, 0.16);
+}
+
+.agent-repl-jupyterlab-path {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 18px 10px;
+  color: var(--cds-text-secondary);
+  font-size: 12px;
+}
+
+.agent-repl-jupyterlab-toolbarStatus {
+  max-width: 1224px;
+  margin: 0 auto 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--cds-layer);
+  border: 1px solid rgba(217, 119, 6, 0.14);
+  color: var(--cds-text-secondary);
+}
+
+.agent-repl-jupyterlab-notebookFrame {
+  flex: 1;
+  padding: 16px 18px 28px;
+}
+
+.agent-repl-jupyterlab-preview-root {
+  min-height: calc(100vh - 120px);
+  background: var(--cds-layer);
+  border: 1px solid var(--cds-border-subtle);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.agent-repl-jupyterlab-surfaceMount {
+  width: 100%;
+}
+
+.agent-repl-jupyterlab-notebook {
+  background: transparent;
+  padding: 14px 0 40px;
+  width: 100%;
+}
+
+.agent-repl-jupyterlab-notebook .jp-Cell {
+  width: 100%;
+  max-width: none;
+  margin: 0 0 8px;
+  padding: 10px 12px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  transition:
+    border-color 160ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease;
+  position: relative;
+}
+
+.agent-repl-jupyterlab-notebook .jp-Cell::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 160ms ease;
+}
+
+.agent-repl-jupyterlab-notebook .jp-Cell:hover {
+  background: color-mix(in srgb, var(--cds-layer-accent) 92%, transparent);
+}
+
+.agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-active {
+  border-color: rgba(217, 119, 6, 0.28);
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.08);
+  background: color-mix(in srgb, var(--cds-layer) 94%, transparent);
+}
+
+.agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-active::before {
+  background: linear-gradient(180deg, #d97706, #f59e0b);
+}
+
+.agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-selected:not(.jp-mod-active) {
+  border-color: rgba(217, 119, 6, 0.16);
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.05);
+}
+
+.agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-selected:not(.jp-mod-active)::before {
+  background: rgba(217, 119, 6, 0.3);
+}
+
+.agent-repl-jupyterlab-notebook .jp-MarkdownCell.jp-mod-rendered {
+  background: color-mix(in srgb, var(--cds-layer-accent) 72%, transparent);
+}
+
+.agent-repl-jupyterlab-notebook .jp-Cell-inputWrapper,
+.agent-repl-jupyterlab-notebook .jp-Cell-outputWrapper {
+  background: transparent;
+}
+
+.agent-repl-jupyterlab-notebook .jp-InputPrompt,
+.agent-repl-jupyterlab-notebook .jp-OutputPrompt {
+  min-width: 52px;
+  color: var(--cds-text-helper);
+  font-family: "IBM Plex Mono", "SF Mono", Monaco, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.agent-repl-jupyterlab-notebook .jp-InputArea,
+.agent-repl-jupyterlab-notebook .jp-OutputArea-child {
+  border-radius: 6px;
+}
+
+.agent-repl-jupyterlab-notebook .jp-InputArea-editor {
+  border: 1px solid rgba(28, 25, 23, 0.07);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--cds-layer-accent) 35%, #ffffff);
+}
+
+.agent-repl-jupyterlab-notebook .jp-InputArea-editor:focus-within {
+  border-color: rgba(217, 119, 6, 0.3);
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.08);
+}
+
+.agent-repl-jupyterlab-notebook .cm-editor,
+.agent-repl-jupyterlab-notebook .cm-scroller,
+.agent-repl-jupyterlab-notebook .cm-content {
+  font-family: "IBM Plex Mono", "SF Mono", Monaco, Menlo, Consolas, monospace !important;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.agent-repl-jupyterlab-notebook .cm-focused {
+  outline: none !important;
+}
+
+.agent-repl-jupyterlab-notebook .cm-activeLine,
+.agent-repl-jupyterlab-notebook .cm-line.cm-activeLine {
+  background: rgba(217, 119, 6, 0.08) !important;
+}
+
+.agent-repl-jupyterlab-notebook .cm-selectionBackground,
+.agent-repl-jupyterlab-notebook .cm-focused .cm-selectionBackground,
+.agent-repl-jupyterlab-notebook .cm-editor ::selection {
+  background: rgba(217, 119, 6, 0.18) !important;
+}
+
+.agent-repl-jupyterlab-notebook .cm-gutters {
+  border-right: 1px solid rgba(28, 25, 23, 0.05);
+  color: var(--cds-text-helper);
+  background: color-mix(in srgb, var(--cds-layer-accent) 74%, transparent) !important;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon {
+  color: var(--cds-text-primary);
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h1,
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h2,
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h3 {
+  letter-spacing: -0.03em;
+  color: #1c1917;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h1 {
+  font-size: 1.7rem;
+  margin-bottom: 0.55em;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h2 {
+  font-size: 1.3rem;
+  margin-top: 1.15em;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon blockquote {
+  margin: 1em 0;
+  padding: 0.7em 0.9em;
+  border-left: 4px solid rgba(217, 119, 6, 0.35);
+  background: rgba(255, 247, 237, 0.42);
+  color: var(--cds-text-secondary);
+  border-radius: 0 6px 6px 0;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon p,
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon ul,
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon ol {
+  color: var(--cds-text-secondary);
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon pre {
+  border-radius: 6px;
+  border: 1px solid rgba(28, 25, 23, 0.08);
+  background: var(--cds-layer-accent);
+  padding: 12px 14px;
+  overflow: auto;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon code {
+  font-family: "IBM Plex Mono", "SF Mono", Monaco, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.agent-repl-jupyterlab-notebook .jp-OutputArea-output {
+  border-top: 1px solid rgba(28, 25, 23, 0.06);
+  margin-top: 10px;
+  padding-top: 10px;
+  width: 100%;
+}
+
+.agent-repl-jupyterlab-notebook .jp-OutputArea-child {
+  background: color-mix(in srgb, var(--cds-layer) 92%, #ffffff);
+  border: 1px solid rgba(28, 25, 23, 0.06);
+  padding: 8px 10px;
+  border-radius: 6px;
+  width: 100%;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon table {
+  border-collapse: collapse;
+  width: 100%;
+  background: var(--cds-layer);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+[data-carbon-theme="g100"] .jp-LabShell.agent-repl-jupyterlab-shell,
+[data-carbon-theme="g90"] .jp-LabShell.agent-repl-jupyterlab-shell {
+  --jp-layout-color3: color-mix(in srgb, var(--cds-layer-accent) 92%, #2b3036);
+  --jp-border-color1: rgba(235, 229, 219, 0.12);
+  --jp-border-color2: rgba(235, 229, 219, 0.08);
+  --jp-border-color3: rgba(235, 229, 219, 0.05);
+  --jp-cell-editor-border-color: rgba(235, 229, 219, 0.08);
+  --jp-cell-editor-active-border-color: rgba(217, 119, 6, 0.5);
+  --jp-rendermime-table-row-hover-background: rgba(217, 119, 6, 0.08);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-preview-root,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-preview-root {
+  background: #15181b;
+  border-color: #272b31;
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-Cell:hover,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-Cell:hover {
+  background: rgba(217, 119, 6, 0.05);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-active,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-active {
+  background: rgba(217, 119, 6, 0.06);
+  border-color: rgba(217, 119, 6, 0.34);
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.12);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-selected:not(.jp-mod-active),
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-selected:not(.jp-mod-active) {
+  border-color: rgba(217, 119, 6, 0.22);
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.08);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-MarkdownCell.jp-mod-rendered,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-MarkdownCell.jp-mod-rendered {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h1,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h1,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h2,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h2,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h3,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon h3 {
+  color: var(--cds-text-primary);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon blockquote,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon blockquote {
+  background: rgba(217, 119, 6, 0.08);
+  color: var(--cds-text-secondary);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon pre,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon pre,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-InputArea-editor,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-InputArea-editor {
+  background: #1b1f23;
+  border-color: rgba(235, 229, 219, 0.08);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-InputArea-editor:focus-within,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-InputArea-editor:focus-within {
+  border-color: rgba(217, 119, 6, 0.42);
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-gutters,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-gutters {
+  border-right-color: rgba(235, 229, 219, 0.06);
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-activeLine,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-activeLine,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-line.cm-activeLine,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-line.cm-activeLine {
+  background: rgba(217, 119, 6, 0.1) !important;
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-OutputArea-child,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-OutputArea-child {
+  border-color: rgba(235, 229, 219, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon table,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon table {
+  background: #181c20;
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon th,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon th {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon th,
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon td {
+  border: 1px solid rgba(28, 25, 23, 0.08);
+  padding: 10px 14px;
+}
+
+.agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon th {
+  background: rgba(245, 245, 244, 0.92);
+  color: var(--cds-text-primary);
+  font-weight: 600;
+}
+
+.agent-repl-jupyterlab-notebook .jp-Notebook-footer {
+  display: none;
+}
+
+.agent-repl-jupyterlab-preview-state {
+  min-height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  color: var(--cds-text-secondary);
+}
+
+.agent-repl-jupyterlab-preview-state:not(.agent-repl-jupyterlab-preview-state--error) {
+  background: var(--cds-layer);
+  border: 1px solid rgba(28, 25, 23, 0.06);
+  border-radius: 8px;
+  max-width: 540px;
+  margin: 20px auto 0;
+}
+
+.agent-repl-jupyterlab-preview-state--error {
+  color: var(--cds-support-error);
+}
+
+@media (max-width: 960px) {
+  .agent-repl-jupyterlab-toolbar {
+    padding: 12px 14px 10px;
+  }
+
+  .agent-repl-jupyterlab-path,
+  .agent-repl-jupyterlab-toolbarStatus {
+    margin-left: 14px;
+    margin-right: 14px;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .agent-repl-jupyterlab-notebookFrame {
+    padding: 12px 10px 22px;
+  }
+
+  .agent-repl-jupyterlab-preview-root {
+    border-radius: 6px;
+  }
+
+  .agent-repl-jupyterlab-notebook .jp-Cell {
+    margin-bottom: 8px;
+    padding: 10px;
+    border-radius: 6px;
+  }
 }

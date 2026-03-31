@@ -295,6 +295,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
       preferred_kernel?: { id: string; label: string };
     }>('/api/standalone/kernels', {
       client_id: clientId,
+      path: currentNotebookPath,
     });
     dispatch({
       type: 'kernels',
@@ -456,7 +457,10 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
       }, 500);
       if (touchTimer == null) {
         touchTimer = window.setInterval(() => {
-          void postJson('/api/standalone/session-touch', { client_id: clientId }).catch(() => undefined);
+          void postJson('/api/standalone/session-touch', {
+            client_id: clientId,
+            path: currentNotebookPath,
+          }).catch(() => undefined);
         }, 15_000);
       }
     });

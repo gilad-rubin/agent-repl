@@ -36,6 +36,7 @@ import {
 import { InterfaceKit } from 'interface-kit/react';
 import { PageFeedbackToolbarCSS } from 'agentation';
 import { CodeMirrorCell, CodeMirrorCellHandle } from './codemirror-cell';
+import { JupyterLabPreviewApp } from './jupyterlab-preview';
 import { createStandaloneHost, readStandaloneConfig } from './standalone-host';
 import { deriveCellStatusKind, type CellStatusKind } from '../src/shared/cellStatus';
 import {
@@ -1195,6 +1196,10 @@ const hostApi: HostApi = vscode ?? standaloneHost ?? createPreviewHost();
 const isBrowserCanvas = !vscode;
 const showInterfaceKit = isBrowserCanvas && (standaloneConfig?.features.interfaceKit ?? true);
 const showAgentation = isBrowserCanvas && (standaloneConfig?.features.agentation ?? true);
+const requestedSurface = isBrowserCanvas
+  ? (new URLSearchParams(window.location.search).get('surface')?.trim().toLowerCase() ?? '')
+  : '';
+const useJupyterLabPreviewSurface = isBrowserCanvas && requestedSurface === 'jupyterlab';
 
 marked.use({
   gfm: true,
@@ -4909,6 +4914,7 @@ function App() {
 
   const browserShell = isBrowserCanvas ? (
     <div
+      translate="no"
       data-browser-shell="true"
       style={{
         display: 'flex',
@@ -5081,6 +5087,10 @@ createRoot(rootElement).render(
   <>
     {showInterfaceKit ? <InterfaceKit /> : null}
     {showAgentation ? <PageFeedbackToolbarCSS copyToClipboard /> : null}
-    <App />
+    {useJupyterLabPreviewSurface ? (
+      <JupyterLabPreviewApp notebookPath={standaloneConfig?.notebookPath ?? null} />
+    ) : (
+      <App />
+    )}
   </>
 );

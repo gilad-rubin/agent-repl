@@ -1,13 +1,13 @@
 """Minimal workspace-scoped HTTP daemon for the core daemon."""
 from __future__ import annotations
 
-import hashlib
 import json
 import hashlib
 import os
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -28,6 +28,7 @@ from agent_repl.core.execution_ledger_service import ExecutionLedgerService
 from agent_repl.core.notebook_execution_service import NotebookExecutionService
 from agent_repl.core.notebook_mutation_service import NotebookMutationService
 from agent_repl.core.notebook_read_service import NotebookReadService
+from agent_repl.core.notebook_trust_service import NotebookTrustService
 from agent_repl.core.notebook_write_service import NotebookWriteService
 from agent_repl.core.ydoc_service import YDocService
 from agent_repl.recovery import runtime_busy_recovery
@@ -340,6 +341,7 @@ class CoreState:
     _notebook_execution_service: NotebookExecutionService = field(init=False, repr=False)
     _notebook_mutation_service: NotebookMutationService = field(init=False, repr=False)
     _notebook_read_service: NotebookReadService = field(init=False, repr=False)
+    _notebook_trust_service: NotebookTrustService = field(init=False, repr=False)
     _notebook_write_service: NotebookWriteService = field(init=False, repr=False)
     _ydoc_service: YDocService = field(init=False, repr=False)
     _db: Any = field(default=None, init=False, repr=False)
@@ -368,6 +370,9 @@ class CoreState:
         self._notebook_execution_service = NotebookExecutionService(self)
         self._notebook_mutation_service = NotebookMutationService(self)
         self._notebook_read_service = NotebookReadService(self)
+        self._notebook_trust_service = NotebookTrustService(
+            db_file=os.getenv("AGENT_REPL_NOTEBOOK_TRUST_DB"),
+        )
         self._notebook_write_service = NotebookWriteService(self)
         self._ydoc_service = YDocService()
         self._recompute_counts()
@@ -698,6 +703,12 @@ class CoreState:
 
     def notebook_contents(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         return self._notebook_read_service.contents(path)
+
+    def notebook_shared_model(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._notebook_read_service.shared_model(path)
+
+    def notebook_trust(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._notebook_write_service.trust(path)
 
     def notebook_status(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         return self._notebook_read_service.status(path)
@@ -1123,11 +1134,83 @@ class CoreState:
             if not resolved:
                 raise RuntimeError(f"Explicit kernel '{kernel_id}' is not an executable path")
             return os.path.abspath(resolved)
+        return self._resolve_default_python_path()
+
+    def _default_kernel_candidates(self) -> list[str]:
         workspace_python = os.path.join(self.workspace_root, ".venv", "bin", "python")
+        candidates = [workspace_python]
+        candidates.extend(
+            record.environment
+            for record in self.runtime_records.values()
+            if record.environment
+        )
+        candidates.extend([
+            sys.executable,
+            shutil.which("python3"),
+            shutil.which("python"),
+            "/opt/miniconda3/bin/python3",
+        ])
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            resolved = shutil.which(candidate) if not os.path.exists(candidate) else candidate
+            if not resolved:
+                continue
+            canonical = os.path.abspath(resolved)
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            ordered.append(canonical)
+        return ordered
+
+    def _kernel_install_hint(self, python_path: str) -> str:
+        canonical = os.path.abspath(python_path)
+        try:
+            pip_probe = subprocess.run(
+                [canonical, "-m", "pip", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:
+            pip_probe = None
+        if pip_probe is not None and pip_probe.returncode == 0:
+            return f"{canonical} -m pip install ipykernel"
+        return f"uv pip install --python {canonical} ipykernel"
+
+    def _is_kernel_capable_python(self, python_path: str) -> bool:
+        canonical = os.path.abspath(python_path)
+        if canonical in self._validated_kernel_pythons:
+            return True
+        try:
+            probe = subprocess.run(
+                [canonical, "-c", "import ipykernel"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:
+            return False
+        if probe.returncode != 0:
+            return False
+        self._validated_kernel_pythons.add(canonical)
+        return True
+
+    def _resolve_default_python_path(self) -> str:
+        workspace_python = os.path.join(self.workspace_root, ".venv", "bin", "python")
+        for candidate in self._default_kernel_candidates():
+            if self._is_kernel_capable_python(candidate):
+                return candidate
         if os.path.exists(workspace_python):
-            return os.path.abspath(workspace_python)
+            raise RuntimeError(
+                f"Workspace kernel '{os.path.abspath(workspace_python)}' is missing ipykernel. "
+                f"Install it with: {self._kernel_install_hint(workspace_python)} — or pass --kernel <path> to use a different environment."
+            )
         raise RuntimeError(
-            "No workspace .venv kernel was detected for this workspace. Re-run with --kernel <python-path>."
+            "No kernel-capable Python was detected for this workspace. "
+            "Create a workspace .venv with ipykernel or pass --kernel <python-path>."
         )
 
     def _resolve_notebook_python_path(self, relative_path: str, kernel_id: str | None) -> str:
@@ -1143,21 +1226,13 @@ class CoreState:
     def _ensure_kernel_capable_python(self, python_path: str, *, source_hint: str | None = None) -> None:
         # Use the path as-is (preserving symlinks) for both caching and probing.
         canonical = os.path.abspath(python_path)
-        if canonical in self._validated_kernel_pythons:
+        if self._is_kernel_capable_python(canonical):
             return
-        probe = subprocess.run(
-            [canonical, "-c", "import ipykernel"],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        hint = source_hint or canonical
+        raise RuntimeError(
+            f"Kernel executable '{hint}' is not kernel-capable (ipykernel not installed). "
+            f"Install it with: {self._kernel_install_hint(canonical)} — or pass --kernel <path> to use a different environment."
         )
-        if probe.returncode != 0:
-            hint = source_hint or canonical
-            raise RuntimeError(
-                f"Kernel executable '{hint}' is not kernel-capable (ipykernel not installed). "
-                f"Install it with: {canonical} -m pip install ipykernel — or pass --kernel <path> to use a different environment."
-            )
-        self._validated_kernel_pythons.add(canonical)
 
     def _ensure_headless_runtime(self, real_path: str, kernel_id: str | None = None) -> HeadlessNotebookRuntime:
         relative_path = os.path.relpath(real_path, self.workspace_root)
@@ -1214,7 +1289,7 @@ class CoreState:
             display_name=f"agent-repl ({Path(python_path).name})",
             language="python",
         )
-        manager.start_kernel()
+        manager.start_kernel(cwd=self.workspace_root)
         client = manager.client()
         client.start_channels()
         client.wait_for_ready(timeout=60)
@@ -1311,7 +1386,7 @@ class CoreState:
             self._sync_notebook_to_ydoc(relative_path, notebook)
         return notebook, created or changed
 
-    def _save_notebook(self, real_path: str, notebook: Any) -> None:
+    def _save_notebook(self, real_path: str, notebook: Any, *, sign: bool = False) -> None:
         Path(real_path).parent.mkdir(parents=True, exist_ok=True)
         directory = str(Path(real_path).parent)
         fd, tmp_path = tempfile.mkstemp(
@@ -1329,14 +1404,14 @@ class CoreState:
             except OSError:
                 pass
             raise
+        if sign:
+            self._notebook_trust_service.sign(notebook)
         # Keep YDoc shadow in sync after every save
         relative_path = os.path.relpath(real_path, self.workspace_root)
         self._sync_notebook_to_ydoc(relative_path, notebook)
 
     def _sync_notebook_to_ydoc(self, relative_path: str, notebook: Any) -> None:
         """Sync an nbformat notebook into the YDoc shadow."""
-        if threading.get_ident() != self._owner_thread_id:
-            return
         cells = [dict(cell) for cell in notebook.cells]
         self._ydoc_service.close(relative_path)
         self._ydoc_service.load_from_nbformat(relative_path, {"cells": cells})
@@ -1466,6 +1541,31 @@ class CoreState:
         candidate = agent_repl.get("cell_id")
         return candidate if isinstance(candidate, str) and candidate else None
 
+    def _ydoc_cell_payload(
+        self,
+        cell: dict[str, Any],
+        index: int,
+        code_display_number: int,
+        *,
+        trusted: bool | None = None,
+    ) -> dict[str, Any]:
+        is_code = cell.get("cell_type") == "code"
+        metadata = json.loads(json.dumps(cell.get("metadata") or {})) if isinstance(cell.get("metadata"), dict) else {}
+        outputs = self._canonical_outputs(cell.get("outputs", [])) if is_code else []
+        execution_count = cell.get("execution_count") if is_code else None
+        source = cell.get("source", "")
+        return {
+            "index": index,
+            "display_number": code_display_number if is_code else None,
+            "cell_id": self._incoming_cell_id({"metadata": metadata}) or f"ydoc-cell-{index}",
+            "cell_type": "code" if is_code else "markdown",
+            "source": source if isinstance(source, str) else "",
+            "outputs": outputs,
+            "execution_count": execution_count if isinstance(execution_count, int) or execution_count is None else None,
+            "metadata": metadata,
+            "trusted": trusted if is_code else None,
+        }
+
     def _materialize_visible_cell(self, payload: dict[str, Any], existing_by_id: dict[str, Any]) -> Any:
         cell_type = "code" if payload.get("cell_type") == "code" else "markdown"
         source = payload.get("source", "")
@@ -1500,6 +1600,46 @@ class CoreState:
         notebook, _changed = self._load_notebook(real_path)
         cells = self._notebook_cells_payload(notebook)
         return {"path": relative_path, "cells": cells}
+
+    def _headless_notebook_shared_model(self, real_path: str, relative_path: str) -> dict[str, Any]:
+        notebook, _ = self._load_notebook(real_path)
+        trust_snapshot = self._notebook_trust_service.trust_snapshot_for_path(real_path)
+        snapshot = self._ydoc_service.get_snapshot(relative_path)
+        notebook_metadata = (
+            json.loads(json.dumps(getattr(notebook, "metadata", {}) or {}))
+            if getattr(notebook, "metadata", None) is not None
+            else {}
+        )
+        normalized_cells: list[dict[str, Any]] = []
+        code_index = 0
+        for index, cell in enumerate(snapshot["cells"]):
+            if cell.get("cell_type") == "code":
+                code_index += 1
+            cell_trust = None
+            if index < len(trust_snapshot["cell_trust_by_index"]):
+                cell_trust = trust_snapshot["cell_trust_by_index"][index]
+            normalized_cells.append(self._ydoc_cell_payload(cell, index, code_index, trusted=cell_trust))
+        return {
+            "path": relative_path,
+            "document_version": snapshot["document_version"],
+            "cells": normalized_cells,
+            "notebook_metadata": notebook_metadata,
+            "notebook_trusted": trust_snapshot["notebook_trusted"],
+            "trusted_code_cells": trust_snapshot["trusted_code_cells"],
+            "total_code_cells": trust_snapshot["total_code_cells"],
+        }
+
+    def _headless_notebook_trust(self, real_path: str, relative_path: str) -> dict[str, Any]:
+        notebook, _changed = self._load_notebook(real_path)
+        self._save_notebook(real_path, notebook, sign=True)
+        trust_snapshot = self._notebook_trust_service.trust_snapshot_for_path(real_path)
+        return {
+            "status": "ok",
+            "path": relative_path,
+            "notebook_trusted": trust_snapshot["notebook_trusted"],
+            "trusted_code_cells": trust_snapshot["trusted_code_cells"],
+            "total_code_cells": trust_snapshot["total_code_cells"],
+        }
 
     def _headless_notebook_status(self, real_path: str, relative_path: str) -> dict[str, Any]:
         runtime = self.headless_runtimes.get(real_path)

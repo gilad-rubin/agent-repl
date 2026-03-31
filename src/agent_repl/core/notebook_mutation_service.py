@@ -189,7 +189,20 @@ class NotebookMutationService:
                 index = self.state._normalize_insert_index(notebook, op.get("at_index", -1))
                 cell_type = op.get("cell_type", "code")
                 source = op.get("source", "")
+                metadata = nbformat.from_dict(op.get("metadata", {}) if isinstance(op.get("metadata"), dict) else {})
+                stable_cell_id = op.get("cell_id") if isinstance(op.get("cell_id"), str) and op.get("cell_id") else None
                 cell = nbformat.v4.new_code_cell(source=source) if cell_type == "code" else nbformat.v4.new_markdown_cell(source=source)
+                cell.metadata = metadata
+                if stable_cell_id:
+                    custom = dict(cell.metadata.get("custom", {}) or {})
+                    agent_repl = dict(custom.get("agent-repl", {}) or {})
+                    agent_repl["cell_id"] = stable_cell_id
+                    custom["agent-repl"] = agent_repl
+                    cell.metadata["custom"] = custom
+                if cell_type == "code":
+                    cell.outputs = [nbformat.from_dict(output) for output in self.state._canonical_outputs(op.get("outputs", []))]
+                    execution_count = op.get("execution_count")
+                    cell.execution_count = execution_count if isinstance(execution_count, int) or execution_count is None else None
                 # Insert into nbformat first to assign cell identity
                 notebook.cells.insert(index, cell)
                 for position, current in enumerate(notebook.cells):
@@ -281,6 +294,55 @@ class NotebookMutationService:
                     runtime_id=runtime_id,
                     cell_id=self.state._cell_id(cell, to_index),
                     cell_index=to_index,
+                )
+                changed = True
+            elif command == "change-cell-type":
+                index = self.state._find_cell_index(notebook, cell_id=op.get("cell_id"), cell_index=op.get("cell_index"))
+                previous_cell = notebook.cells[index]
+                stable_cell_id = self.state._cell_id(previous_cell, index)
+                next_type = op.get("cell_type", "code")
+                source = op.get("source", getattr(previous_cell, "source", ""))
+                self.state._assert_structure_not_leased(
+                    relative_path=relative_path,
+                    owner_session_id=owner_session_id,
+                    operation="change-cell-type",
+                )
+                self.state._assert_cell_not_leased(
+                    relative_path=relative_path,
+                    cell_id=stable_cell_id,
+                    owner_session_id=owner_session_id,
+                    operation="change-cell-type",
+                )
+                if next_type == "code":
+                    replacement = nbformat.v4.new_code_cell(source=source)
+                    replacement.outputs = []
+                    replacement.execution_count = None
+                elif next_type == "raw":
+                    replacement = nbformat.v4.new_raw_cell(source=source)
+                else:
+                    replacement = nbformat.v4.new_markdown_cell(source=source)
+                replacement.metadata = dict(getattr(previous_cell, "metadata", {}) or {})
+                notebook.cells[index] = replacement
+                self.state._ensure_cell_identity(replacement, index)
+                self.state._clear_cell_runtime_provenance(replacement)
+                ydoc.change_cell_type(
+                    relative_path,
+                    index=index,
+                    cell_type=next_type,
+                    source=source,
+                    cell_id=stable_cell_id,
+                )
+                results.append({"op": "change-cell-type", "changed": True, "cell_id": stable_cell_id, "cell_count": len(notebook.cells)})
+                self.state._append_activity_event(
+                    path=relative_path,
+                    event_type="cell-type-updated",
+                    detail=f"Changed cell {index + 1} to {next_type}",
+                    actor=actor,
+                    session_id=owner_session_id,
+                    runtime_id=runtime_id,
+                    cell_id=stable_cell_id,
+                    cell_index=index,
+                    data={"cell": self.state._cell_payload(replacement, index)},
                 )
                 changed = True
             elif command == "clear-outputs":

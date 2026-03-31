@@ -72,6 +72,7 @@ class CoreClient(JsonApiClient):
                 "--runtime-dir",
                 runtime_dir,
             ],
+            cwd=workspace_root,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

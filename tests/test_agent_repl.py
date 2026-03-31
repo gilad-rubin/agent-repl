@@ -762,6 +762,34 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(ydoc_cells[0]["source"], "b = 2")
             self.assertEqual(ydoc_cells[2]["source"], "a = 10")
 
+    def test_notebook_edit_change_cell_type_updates_notebook_and_ydoc_shadow(self):
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            self.state.notebook_create(
+                "notebooks/change-cell-type.ipynb",
+                cells=[
+                    {"type": "code", "source": "value = 1\nvalue"},
+                    {"type": "markdown", "source": "# heading"},
+                ],
+                kernel_id=_python_with_ipykernel(),
+            )
+
+            body, status = self.state.notebook_edit(
+                "notebooks/change-cell-type.ipynb",
+                [{"op": "change-cell-type", "cell_index": 0, "cell_type": "markdown", "source": "# converted"}],
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["results"][0]["op"], "change-cell-type")
+        contents_body, contents_status = self.state.notebook_contents("notebooks/change-cell-type.ipynb")
+        self.assertEqual(contents_status, 200)
+        self.assertEqual(contents_body["cells"][0]["cell_type"], "markdown")
+        self.assertEqual(contents_body["cells"][0]["source"], "# converted")
+        self.assertEqual(contents_body["cells"][0]["outputs"], [])
+
+        ydoc_cells = self.state._ydoc_service.get_cells("notebooks/change-cell-type.ipynb")
+        self.assertEqual(ydoc_cells[0]["cell_type"], "markdown")
+        self.assertEqual(ydoc_cells[0]["source"], "# converted")
+
     def test_notebook_insert_execute_clamps_out_of_range_index_for_blank_headless_notebook(self):
         with mock.patch.object(self.state, "_projection_client", return_value=None):
             create_body, create_status = self.state.notebook_create(
@@ -2014,6 +2042,78 @@ class TestCoreState(unittest.TestCase):
             self.assertEqual(len(deleted_body["cells"]), 2)
             self.assertNotIn(code_cell_id, [cell["cell_id"] for cell in deleted_body["cells"]])
 
+    def test_headless_change_cell_type_updates_structure(self):
+        notebook_path = "notebooks/headless-change-cell-type.ipynb"
+        kernel_python = _python_with_ipykernel()
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "markdown", "source": "# Title"},
+                    {"type": "code", "source": "x = 1\nx"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            contents_body, contents_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(contents_status, 200)
+            code_cell_id = contents_body["cells"][1]["cell_id"]
+
+            change_body, change_status = self.state.notebook_edit(
+                notebook_path,
+                [{"op": "change-cell-type", "cell_id": code_cell_id, "cell_type": "markdown", "source": "x = 1\nx"}],
+            )
+            self.assertEqual(change_status, 200)
+            self.assertTrue(change_body["results"][0]["changed"])
+
+            changed_body, changed_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(changed_status, 200)
+            self.assertEqual(changed_body["cells"][1]["cell_id"], code_cell_id)
+            self.assertEqual(changed_body["cells"][1]["cell_type"], "markdown")
+            self.assertEqual(changed_body["cells"][1]["source"], "x = 1\nx")
+            self.assertEqual(changed_body["cells"][1]["outputs"], [])
+            self.assertIsNone(changed_body["cells"][1]["execution_count"])
+
+    def test_headless_insert_preserves_requested_cell_id(self):
+        notebook_path = "notebooks/headless-insert-cell-id.ipynb"
+        kernel_python = _python_with_ipykernel()
+        requested_cell_id = "inserted-cell-id"
+
+        with mock.patch.object(self.state, "_projection_client", return_value=None):
+            create_body, create_status = self.state.notebook_create(
+                notebook_path,
+                cells=[
+                    {"type": "code", "source": "seed = 1"},
+                ],
+                kernel_id=kernel_python,
+            )
+            self.assertEqual(create_status, 200)
+            self.assertTrue(create_body["ready"])
+
+            insert_body, insert_status = self.state.notebook_edit(
+                notebook_path,
+                [{
+                    "op": "insert",
+                    "cell_type": "code",
+                    "cell_id": requested_cell_id,
+                    "source": "",
+                    "at_index": 1,
+                    "metadata": {"custom": {"agent-repl": {"cell_id": requested_cell_id}}},
+                    "outputs": [],
+                    "execution_count": None,
+                }],
+            )
+            self.assertEqual(insert_status, 200)
+            self.assertTrue(insert_body["results"][0]["changed"])
+            self.assertEqual(insert_body["results"][0]["cell_id"], requested_cell_id)
+
+            inserted_body, inserted_status = self.state.notebook_contents(notebook_path)
+            self.assertEqual(inserted_status, 200)
+            self.assertEqual(inserted_body["cells"][1]["cell_id"], requested_cell_id)
+
     def test_headless_delete_can_remove_a_running_cell_without_resurrecting_it(self):
         notebook_path = "notebooks/headless-delete-running.ipynb"
         kernel_python = _python_with_ipykernel()
@@ -2685,11 +2785,45 @@ class TestCoreState(unittest.TestCase):
 
     def test_kernel_capable_error_message_includes_install_hint(self):
         with mock.patch("agent_repl.core.server.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(returncode=1, stderr="No module named 'ipykernel'", stdout="")
+            mock_run.side_effect = [
+                mock.Mock(returncode=1, stderr="No module named 'ipykernel'", stdout=""),
+                mock.Mock(returncode=0, stderr="", stdout="pip 24.0"),
+            ]
             # Clear validation cache
             self.state._validated_kernel_pythons.clear()
             with self.assertRaisesRegex(RuntimeError, "pip install ipykernel"):
                 self.state._ensure_kernel_capable_python("/fake/python")
+
+    def test_kernel_capable_error_message_uses_uv_when_pip_is_unavailable(self):
+        with mock.patch("agent_repl.core.server.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                mock.Mock(returncode=1, stderr="No module named 'ipykernel'", stdout=""),
+                mock.Mock(returncode=1, stderr="No module named pip", stdout=""),
+            ]
+            self.state._validated_kernel_pythons.clear()
+            with self.assertRaisesRegex(RuntimeError, r"uv pip install --python /fake/python ipykernel"):
+                self.state._ensure_kernel_capable_python("/fake/python")
+
+    def test_resolve_python_path_falls_back_to_kernel_capable_candidate(self):
+        workspace_python = self.workspace_root / ".venv" / "bin" / "python"
+        workspace_python.parent.mkdir(parents=True)
+        workspace_python.write_text("#!/bin/sh\n")
+        workspace_python.chmod(0o755)
+
+        with (
+            mock.patch.object(self.state, "_default_kernel_candidates", return_value=[
+                os.path.abspath(workspace_python),
+                "/good/python",
+            ]),
+            mock.patch("agent_repl.core.server.subprocess.run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                mock.Mock(returncode=1, stderr="No module named 'ipykernel'", stdout=""),
+                mock.Mock(returncode=0, stderr="", stdout=""),
+            ]
+            resolved = self.state._resolve_python_path(None)
+
+        self.assertEqual(resolved, "/good/python")
 
     def test_cat_does_not_mutate_notebook_on_disk(self):
         notebook_path = "notebooks/demo.ipynb"

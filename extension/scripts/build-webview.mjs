@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,7 +34,7 @@ function syncWebviewFonts() {
   ];
 
   for (const [source, target] of fontSources) {
-    cpSync(source, target);
+    copyFileSync(source, target);
   }
 }
 
@@ -70,6 +70,13 @@ await esbuild.build({
   outfile: join(mediaRoot, 'canvas.js'),
   minify: true,
   logLevel: 'info',
+  loader: {
+    '.eot': 'file',
+    '.svg': 'text',
+    '.ttf': 'file',
+    '.woff': 'file',
+    '.woff2': 'file',
+  },
   plugins: [stripCarbonFonts],
 });
 // esbuild extracts CSS imports (Carbon + styles.css) into canvas.css automatically

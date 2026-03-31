@@ -19,6 +19,12 @@ class NotebookReadService:
         self.state._sync_document_record(real_path, relative_path)
         return payload, HTTPStatus.OK
 
+    def shared_model(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
+        real_path, relative_path = self.state._resolve_document_path(path)
+        payload = self.state._headless_notebook_shared_model(real_path, relative_path)
+        self.state._sync_document_record(real_path, relative_path)
+        return payload, HTTPStatus.OK
+
     def status(self, path: str) -> tuple[dict[str, Any], HTTPStatus]:
         real_path, relative_path = self.state._resolve_document_path(path)
         payload = self.state._headless_notebook_status(real_path, relative_path)
