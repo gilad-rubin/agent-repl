@@ -183,6 +183,7 @@ const server = createServer(async (request, response) => {
     const contentType = contentTypes.get(extname(targetFile)) || 'application/octet-stream';
     response.writeHead(200, {
       'Content-Type': contentType,
+      'Content-Language': 'en',
       'Cache-Control': 'no-store',
     });
     response.end(data);
