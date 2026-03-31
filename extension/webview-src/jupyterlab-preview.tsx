@@ -903,12 +903,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
             };
             codeCellModel.executionCount = nextCell.execution_count ?? null;
             // Update both shared model and output area model for rendering
+            // Use fromJSON directly (replaces all outputs atomically) to avoid flicker from clear+set
             codeCellModel.sharedModel.setOutputs(nextCell.outputs ?? []);
-            const nextOutputs = nextCell.outputs ?? [];
-            codeCellModel.outputs.clear();
-            if (nextOutputs.length > 0) {
-              codeCellModel.outputs.fromJSON(nextOutputs);
-            }
+            codeCellModel.outputs.fromJSON(nextCell.outputs ?? []);
             codeCellModel.trusted = nextCell.trusted === true;
           }
         }
@@ -2133,19 +2130,23 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       // Inject or update status bar
       let bar = widget.node.querySelector('.agent-repl-cell-status') as HTMLElement | null;
 
-      if (isRunning || isQueued) {
-        // Active execution — always show
+      const ensureBar = () => {
         if (!bar) {
           bar = document.createElement('div');
           bar.className = 'agent-repl-cell-status';
           widget.node.appendChild(bar);
         }
+        return bar;
+      };
+
+      if (isRunning || isQueued) {
+        // Active execution — always show
         if (isRunning) {
-          bar.className = 'agent-repl-cell-status agent-repl-cell-status-running';
-          bar.innerHTML = '<span class="agent-repl-cell-status-spinner"></span><span>Running</span>';
+          ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-running';
+          bar!.innerHTML = '<span class="agent-repl-cell-status-spinner"></span><span>Running</span>';
         } else {
-          bar.className = 'agent-repl-cell-status agent-repl-cell-status-queued';
-          bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 4.5H12.5M3.5 8H9.5M3.5 11.5H8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Queued</span>';
+          ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-queued';
+          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 4.5H12.5M3.5 8H9.5M3.5 11.5H8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Queued</span>';
         }
       } else if (kernelRestarted) {
         // Kernel restarted — clear all stale statuses
@@ -2161,21 +2162,11 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         const wasExecuted = executedCellIdsRef.current.has(cellId);
 
         if (hasError) {
-          if (!bar) {
-            bar = document.createElement('div');
-            bar.className = 'agent-repl-cell-status';
-            widget.node.appendChild(bar);
-          }
-          bar.className = 'agent-repl-cell-status agent-repl-cell-status-failed';
-          bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Error</span>';
+          ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-failed';
+          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Error</span>';
         } else if (hasOutput || wasExecuted) {
-          if (!bar) {
-            bar = document.createElement('div');
-            bar.className = 'agent-repl-cell-status';
-            widget.node.appendChild(bar);
-          }
-          bar.className = 'agent-repl-cell-status agent-repl-cell-status-completed';
-          bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Completed</span>';
+          ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-completed';
+          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Completed</span>';
         } else if (bar) {
           bar.remove();
         }
