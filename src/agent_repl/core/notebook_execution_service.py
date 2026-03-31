@@ -702,6 +702,17 @@ class NotebookExecutionService:
         cell_id: str,
         cell_index: int,
     ) -> None:
+        # Write intermediate outputs to the cell so clients can read them mid-execution
+        try:
+            real_path = self.state._resolve_notebook_path(relative_path)
+            notebook, _ = self.state._load_notebook(real_path)
+            idx = self.state._find_cell_index(notebook, cell_id=cell_id)
+            cell = notebook.cells[idx]
+            cell.outputs = list(outputs)
+            cell.execution_count = execution_count
+            self.state._save_notebook(real_path, notebook, sign=False)
+        except Exception:
+            pass  # Best-effort; final write happens after execution completes
         self.state._append_activity_event(
             path=relative_path,
             event_type="cell-output-appended",

@@ -920,6 +920,7 @@ export function createStandaloneServices({
   }
 
   return {
+    _locateDaemon: locateDaemon,
     async handleApiRequest(request, response) {
       const requestPath = new URL(request.url || '/', 'http://127.0.0.1').pathname;
       let payload = {};

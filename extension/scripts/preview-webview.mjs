@@ -2,8 +2,10 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import fs from 'node:fs';
+import http from 'node:http';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { WebSocket as NodeWebSocket } from 'ws';
 
 import { createStandaloneServices } from './standalone-server.mjs';
 
@@ -134,6 +136,32 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  // Proxy /api/ws-nonce to daemon
+  if ((request.url || '').startsWith('/api/ws-nonce')) {
+    try {
+      const daemon = standaloneServices.locateDaemon
+        ? standaloneServices.locateDaemon(workspaceRoot)
+        : standaloneServices._locateDaemon?.(workspaceRoot);
+      if (!daemon) throw new Error('No daemon');
+      const proxyReq = http.request(`${daemon.baseUrl}/api/ws-nonce`, {
+        method: 'POST',
+        headers: { 'Authorization': `token ${daemon.token}`, 'Content-Type': 'application/json' },
+      }, (proxyRes) => {
+        response.writeHead(proxyRes.statusCode || 500, proxyRes.headers);
+        proxyRes.pipe(response);
+      });
+      proxyReq.on('error', () => {
+        response.writeHead(502);
+        response.end('Daemon unreachable');
+      });
+      proxyReq.end();
+    } catch {
+      response.writeHead(502);
+      response.end('Daemon unreachable');
+    }
+    return;
+  }
+
   if ((request.url || '').startsWith('/api/standalone/')) {
     const handled = await standaloneServices.handleApiRequest(request, response);
     if (handled) {
@@ -178,6 +206,45 @@ try {
   console.warn('[preview] recursive watch unavailable; rebuild manually with npm run build:webview');
   console.warn(error);
 }
+
+// WebSocket proxy: forward /ws to daemon using ws library
+import { WebSocketServer } from 'ws';
+const wss = new WebSocketServer({ noServer: true });
+server.on('upgrade', (request, socket, head) => {
+  if (!(request.url || '').startsWith('/ws')) {
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(request, socket, head, (clientWs) => {
+    try {
+      const daemon = standaloneServices._locateDaemon?.(workspaceRoot);
+      if (!daemon) {
+        clientWs.close(4502, 'No daemon');
+        return;
+      }
+      const daemonWsUrl = daemon.baseUrl.replace('http://', 'ws://') + request.url;
+      const upstream = new NodeWebSocket(daemonWsUrl);
+      upstream.on('open', () => {
+        clientWs.on('message', (data) => {
+          if (upstream.readyState === NodeWebSocket.OPEN) {
+            upstream.send(data);
+          }
+        });
+        upstream.on('message', (data) => {
+          if (clientWs.readyState === clientWs.OPEN) {
+            clientWs.send(data);
+          }
+        });
+        clientWs.on('close', () => upstream.close());
+        upstream.on('close', () => clientWs.close());
+      });
+      upstream.on('error', () => clientWs.close(4502, 'Upstream error'));
+      clientWs.on('error', () => upstream.close());
+    } catch {
+      clientWs.close(4500, 'Proxy error');
+    }
+  });
+});
 
 server.listen(port, host, () => {
   console.log(`[preview] workspace root ${workspaceRoot}`);
