@@ -89,6 +89,9 @@ class NotebookExecutionService:
                     if msg_type == "stream":
                         stream_name = content.get("name", "stdout")
                         stream_text = content.get("text", "")
+                        # Raw IOPub output for client streaming (uncoalesced)
+                        raw_iopub = {"output_type": "stream", "name": stream_name, "text": stream_text}
+                        # Coalesced version for .ipynb persistence
                         if (
                             outputs
                             and getattr(outputs[-1], "output_type", None) == "stream"
@@ -116,6 +119,8 @@ class NotebookExecutionService:
                             owner_session_id=owner_session_id,
                             cell_id=cell_id,
                             cell_index=cell_index,
+                            msg_type="stream",
+                            iopub_output=raw_iopub,
                         )
                         continue
                     if msg_type == "execute_result":
@@ -127,6 +132,7 @@ class NotebookExecutionService:
                         )
                         outputs.append(output_payload)
                         execution_count = content.get("execution_count", execution_count)
+                        raw_iopub = {"output_type": "execute_result", "data": content.get("data", {}), "metadata": content.get("metadata", {}), "execution_count": content.get("execution_count")}
                         self._append_output_event(
                             relative_path=relative_path,
                             detail=f"Execution result for cell {cell_index + 1}",
@@ -139,15 +145,23 @@ class NotebookExecutionService:
                             owner_session_id=owner_session_id,
                             cell_id=cell_id,
                             cell_index=cell_index,
+                            msg_type="execute_result",
+                            iopub_output=raw_iopub,
                         )
                         continue
                     if msg_type == "display_data":
+                        display_id = content.get("transient", {}).get("display_id")
                         output_payload = nbformat.v4.new_output(
                             output_type="display_data",
                             data=content.get("data", {}),
                             metadata=content.get("metadata", {}),
                         )
+                        if display_id:
+                            output_payload["transient"] = {"display_id": display_id}
                         outputs.append(output_payload)
+                        raw_iopub = {"output_type": "display_data", "data": content.get("data", {}), "metadata": content.get("metadata", {})}
+                        if display_id:
+                            raw_iopub["transient"] = {"display_id": display_id}
                         self._append_output_event(
                             relative_path=relative_path,
                             detail=f"Display output for cell {cell_index + 1}",
@@ -160,6 +174,51 @@ class NotebookExecutionService:
                             owner_session_id=owner_session_id,
                             cell_id=cell_id,
                             cell_index=cell_index,
+                            msg_type="display_data",
+                            iopub_output=raw_iopub,
+                            display_id=display_id,
+                        )
+                        continue
+                    if msg_type == "update_display_data":
+                        display_id = content.get("transient", {}).get("display_id")
+                        if display_id:
+                            raw_iopub = {"output_type": "display_data", "data": content.get("data", {}), "metadata": content.get("metadata", {}), "transient": {"display_id": display_id}}
+                            # Update existing output with matching display_id
+                            for out in outputs:
+                                if getattr(out, "transient", {}).get("display_id") == display_id or (isinstance(out, dict) and out.get("transient", {}).get("display_id") == display_id):
+                                    out["data"] = content.get("data", {})
+                                    out["metadata"] = content.get("metadata", {})
+                            self._append_output_event(
+                                relative_path=relative_path,
+                                detail=f"Updated display for cell {cell_index + 1}",
+                                output_payload=raw_iopub,
+                                outputs=outputs,
+                                execution_count=execution_count,
+                                source=source,
+                                runtime=runtime,
+                                actor=actor,
+                                owner_session_id=owner_session_id,
+                                cell_id=cell_id,
+                                cell_index=cell_index,
+                                msg_type="update_display_data",
+                                iopub_output=raw_iopub,
+                                display_id=display_id,
+                            )
+                        continue
+                    if msg_type == "clear_output":
+                        wait = content.get("wait", False)
+                        if not wait:
+                            outputs.clear()
+                        self.state._append_activity_event(
+                            path=relative_path,
+                            event_type="cell-outputs-cleared",
+                            detail=f"Cleared outputs for cell {cell_index + 1}",
+                            actor=actor,
+                            session_id=owner_session_id,
+                            runtime_id=runtime.runtime_id,
+                            cell_id=cell_id,
+                            cell_index=cell_index,
+                            data={"msg_type": "clear_output", "wait": wait, "cell_id": cell_id},
                         )
                         continue
                     if msg_type == "error":
@@ -171,6 +230,7 @@ class NotebookExecutionService:
                         )
                         outputs.append(output_payload)
                         error_text = content.get("evalue") or content.get("ename") or "Execution failed"
+                        raw_iopub = {"output_type": "error", "ename": content.get("ename"), "evalue": content.get("evalue"), "traceback": content.get("traceback", [])}
                         self._append_output_event(
                             relative_path=relative_path,
                             detail=f"Error output for cell {cell_index + 1}",
@@ -183,6 +243,8 @@ class NotebookExecutionService:
                             owner_session_id=owner_session_id,
                             cell_id=cell_id,
                             cell_index=cell_index,
+                            msg_type="error",
+                            iopub_output=raw_iopub,
                         )
                 runtime.client.get_shell_msg(timeout=60)
                 self.state._execution_ledger_service.finish_notebook_execution(
@@ -701,18 +763,10 @@ class NotebookExecutionService:
         owner_session_id: str | None,
         cell_id: str,
         cell_index: int,
+        msg_type: str | None = None,
+        iopub_output: dict[str, Any] | None = None,
+        display_id: str | None = None,
     ) -> None:
-        # Write intermediate outputs to the cell so clients can read them mid-execution
-        try:
-            real_path = self.state._resolve_notebook_path(relative_path)
-            notebook, _ = self.state._load_notebook(real_path)
-            idx = self.state._find_cell_index(notebook, cell_id=cell_id)
-            cell = notebook.cells[idx]
-            cell.outputs = list(outputs)
-            cell.execution_count = execution_count
-            self.state._save_notebook(real_path, notebook, sign=False)
-        except Exception:
-            pass  # Best-effort; final write happens after execution completes
         self.state._append_activity_event(
             path=relative_path,
             event_type="cell-output-appended",
@@ -723,6 +777,9 @@ class NotebookExecutionService:
             cell_id=cell_id,
             cell_index=cell_index,
             data={
+                "msg_type": msg_type,
+                "iopub_output": iopub_output,
+                "display_id": display_id,
                 "output": json.loads(json.dumps(output_payload)),
                 "cell": {
                     "index": cell_index,

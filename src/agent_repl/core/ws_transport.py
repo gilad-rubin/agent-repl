@@ -42,6 +42,8 @@ class WebSocketTransport:
         self._max_event_log = 500
         # active connections keyed by id(ws)
         self._connections: dict[int, _Connection] = {}
+        # ASGI event loop reference for cross-thread scheduling
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------
     # Nonce management
@@ -76,6 +78,8 @@ class WebSocketTransport:
 
     async def accept(self, ws: WebSocket, *, last_cursor: int | None = None) -> None:
         """Accept a WebSocket connection and send the hello frame."""
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
         await ws.accept()
         conn = _Connection(ws=ws, last_cursor=last_cursor or 0)
         self._connections[id(ws)] = conn
@@ -166,9 +170,9 @@ class WebSocketTransport:
         """Push an activity event to all connections subscribed to the event's path."""
         cursor = self._next_cursor()
         envelope = {
-            "type": "activity",
-            "cursor": cursor,
             **event_payload,
+            "envelope_type": "activity",
+            "cursor": cursor,
         }
         self._event_log[cursor] = envelope
         path = event_payload.get("path", "")
@@ -231,8 +235,11 @@ class WebSocketTransport:
             loop = asyncio.get_running_loop()
             loop.create_task(coro)
         except RuntimeError:
-            # No running loop — silently discard (e.g. in tests or sync-only contexts)
-            coro.close()
+            # No running loop on this thread — schedule on the ASGI event loop
+            if self._loop is not None:
+                self._loop.call_soon_threadsafe(lambda c=coro: self._loop.create_task(c))
+            else:
+                coro.close()
 
     # ------------------------------------------------------------------
     # Introspection

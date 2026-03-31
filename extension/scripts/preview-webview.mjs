@@ -225,14 +225,19 @@ server.on('upgrade', (request, socket, head) => {
       const daemonWsUrl = daemon.baseUrl.replace('http://', 'ws://') + request.url;
       const upstream = new NodeWebSocket(daemonWsUrl);
       upstream.on('open', () => {
+        console.log('[ws-proxy] upstream connected to daemon');
         clientWs.on('message', (data) => {
+          const str = typeof data === 'string' ? data : data.toString();
+          console.log('[ws-proxy] client→daemon:', str.substring(0, 80));
           if (upstream.readyState === NodeWebSocket.OPEN) {
-            upstream.send(data);
+            upstream.send(str);
           }
         });
-        upstream.on('message', (data) => {
+        upstream.on('message', (data, isBinary) => {
+          const str = typeof data === 'string' ? data : data.toString();
+          console.log('[ws-proxy] daemon→client:', str.substring(0, 80));
           if (clientWs.readyState === clientWs.OPEN) {
-            clientWs.send(data);
+            clientWs.send(str, { binary: false });
           }
         });
         clientWs.on('close', () => upstream.close());

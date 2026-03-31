@@ -675,6 +675,17 @@ function shouldRouteNotebookEvent(
     && (target === document.body || target === document.documentElement);
 }
 
+function findCellIndexById(model: NotebookModel, cellId: string): number {
+  for (let i = 0; i < model.cells.length; i++) {
+    const cellModel = model.cells.get(i);
+    const id = typeof (cellModel.sharedModel as any).getId === 'function'
+      ? (cellModel.sharedModel as any).getId()
+      : (cellModel as any).id ?? '';
+    if (id === cellId) return i;
+  }
+  return -1;
+}
+
 export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const kernelMenuRef = useRef<HTMLDivElement | null>(null);
@@ -682,6 +693,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
   const modelRef = useRef<NotebookModel | null>(null);
   const lastSyncedCellsRef = useRef<NotebookCell[]>([]);
   const autoSaveTimerRef = useRef<number | null>(null);
+  const displayIdMapRef = useRef<Map<string, Map<string, number[]>>>(new Map());
   const toolbarStatusTimerRef = useRef<number | null>(null);
   const applyingRemoteRef = useRef(false);
   const applyingNotebookActionRef = useRef(false);
@@ -986,6 +998,69 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     appliedNotebookMetadataSignatureRef.current = nextNotebookMetadataSignature;
     setTrustSnapshot(nextTrust);
   }, [applyRemoteCells, fetchSharedModelSnapshot, currentNotebookPath]);
+
+  const clearCellOutputs = useCallback((cellId: string) => {
+    const model = modelRef.current;
+    if (!model) return;
+    const idx = findCellIndexById(model, cellId);
+    if (idx < 0) return;
+    const cellModel = model.cells.get(idx);
+    if (!cellModel || cellModel.type !== 'code') return;
+    const codeModel = cellModel as unknown as { outputs: { clear: (wait?: boolean) => void }; executionCount: number | null };
+    codeModel.outputs.clear();
+    codeModel.executionCount = null;
+    displayIdMapRef.current.delete(cellId);
+  }, []);
+
+  const applyIOPubMessage = useCallback((msg: any) => {
+    const model = modelRef.current;
+    if (!model) return;
+    const cellId: string = msg.cell_id;
+    const msgType: string | undefined = msg.data?.msg_type;
+    const iopubOutput = msg.data?.iopub_output;
+    const displayId: string | undefined = msg.data?.display_id;
+    if (!cellId || !msgType || !iopubOutput) return;
+
+    const idx = findCellIndexById(model, cellId);
+    if (idx < 0) return;
+    const cellModel = model.cells.get(idx);
+    if (!cellModel || cellModel.type !== 'code') return;
+    const codeModel = cellModel as unknown as {
+      outputs: { add: (output: any) => void; set: (index: number, output: any) => void; clear: (wait?: boolean) => void; length: number };
+    };
+
+    switch (msgType) {
+      case 'stream':
+      case 'execute_result':
+      case 'display_data':
+      case 'error':
+        codeModel.outputs.add(iopubOutput);
+        if (displayId && msgType === 'display_data') {
+          let cellMap = displayIdMapRef.current.get(cellId);
+          if (!cellMap) { cellMap = new Map(); displayIdMapRef.current.set(cellId, cellMap); }
+          const targets = cellMap.get(displayId) || [];
+          targets.push(codeModel.outputs.length - 1);
+          cellMap.set(displayId, targets);
+        }
+        break;
+      case 'update_display_data': {
+        if (!displayId) break;
+        const cellMap = displayIdMapRef.current.get(cellId);
+        const targets = cellMap?.get(displayId);
+        if (targets) {
+          const output = { ...iopubOutput, output_type: 'display_data' };
+          for (const index of targets) {
+            codeModel.outputs.set(index, output);
+          }
+        }
+        break;
+      }
+      case 'clear_output':
+        codeModel.outputs.clear(msg.data?.wait ?? false);
+        displayIdMapRef.current.delete(cellId);
+        break;
+    }
+  }, []);
 
   const trustNotebook = useCallback(async () => {
     if (!currentNotebookPath) {
@@ -2183,15 +2258,33 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       createSocket: (url: string) => new WebSocket(url) as any,
       fetchFn: window.fetch.bind(window),
       onMessage: (msg: any) => {
+        const msgType = msg.type;
+
+        // Streaming IOPub: apply incrementally, don't reload full notebook
+        if (msgType === 'cell-output-appended' && msg.data?.iopub_output) {
+          applyIOPubMessage(msg);
+          void loadRuntime();
+          return;
+        }
+        if (msgType === 'cell-outputs-cleared') {
+          clearCellOutputs(msg.cell_id || msg.data?.cell_id);
+          void loadRuntime();
+          return;
+        }
+        if (msgType === 'execution-started' && msg.cell_id) {
+          clearCellOutputs(msg.cell_id);
+          void loadRuntime();
+          return;
+        }
+
+        // Non-streaming events: full refresh for reconciliation
         const events: Array<{ type: string }> = msg ? [msg] : [];
-        const isExecutionEvent = msg.type === 'execution-started'
-          || msg.type === 'execution-finished'
-          || msg.type === 'cell-output-appended'
-          || msg.type === 'cell-outputs-updated';
+        const isExecutionEvent = msgType === 'execution-finished'
+          || msgType === 'cell-outputs-updated';
         if (msg.runtime || isExecutionEvent) {
           void loadRuntime();
         }
-        if (shouldReloadStandaloneNotebookContents(events)) {
+        if (isExecutionEvent || shouldReloadStandaloneNotebookContents(events)) {
           void loadContents();
         }
         if (pendingExecutionRef.current && !runtimeBusyRef.current) {
