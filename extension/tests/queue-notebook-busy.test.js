@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const path = require('node:path');
 
-function loadQueueModule(vscode, resolverOverrides = {}) {
+function loadQueueModule(vscode, overrides = {}) {
     const modulePath = path.resolve(__dirname, '../out/execution/queue.js');
     const originalLoad = Module._load;
     Module._load = function patchedLoad(request, parent, isMain) {
@@ -26,10 +26,15 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
         }
         if (request === '../notebook/resolver') {
             return {
-                resolveNotebook: resolverOverrides.resolveNotebook,
-                ensureNotebookEditor: async () => ({}),
-                captureEditorFocus: () => ({ kind: 'none' }),
-                restoreEditorFocus: async () => {},
+                resolveNotebook: overrides.resolveNotebook ?? (() => overrides.doc),
+            };
+        }
+        if (request === '../session') {
+            return {
+                discoverDaemon: () => overrides.daemon ?? { url: 'http://127.0.0.1:9999', token: 'tok' },
+                daemonPost: overrides.daemonPost ?? (async () => ({ status: 'ok' })),
+                workspaceRootForPath: () => '/workspace',
+                sessionIdForWorkspaceState: () => undefined,
             };
         }
         return originalLoad.call(this, request, parent, isMain);
@@ -44,108 +49,80 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
 }
 
 test('status is tracked per notebook path rather than by global busy state', { concurrency: false }, async () => {
-    let onChange;
     const docs = new Map([
-        ['/tmp/a.ipynb', { uri: { fsPath: '/tmp/a.ipynb' }, cellAt: () => ({ document: { getText: () => 'print(1)' } }) }],
-        ['/tmp/b.ipynb', { uri: { fsPath: '/tmp/b.ipynb' }, cellAt: () => ({ document: { getText: () => 'print(2)' } }) }],
+        ['/workspace/a.ipynb', { uri: { fsPath: '/workspace/a.ipynb' }, cellAt: () => ({ document: { getText: () => 'print(1)' } }) }],
+        ['/workspace/b.ipynb', { uri: { fsPath: '/workspace/b.ipynb' }, cellAt: () => ({ document: { getText: () => 'print(2)' } }) }],
     ]);
+
+    let resolveA;
+    const aBlocker = new Promise((r) => { resolveA = r; });
 
     const queue = loadQueueModule(
         {
-            workspace: {
-                onDidChangeNotebookDocument(callback) {
-                    onChange = callback;
-                    return { dispose() {} };
-                },
-                getConfiguration: () => ({
-                    get: (_name, fallback) => fallback,
-                }),
-            },
-            extensions: {
-                getExtension: () => undefined,
-            },
+            workspace: { getConfiguration: () => ({ get: (_n, fb) => fb }) },
+            extensions: { getExtension: () => undefined },
         },
         {
             resolveNotebook: (targetPath) => docs.get(targetPath),
+            daemonPost: async (_daemon, _endpoint, body) => {
+                // Block execution of notebook A to simulate busy state.
+                if (body.path === 'a.ipynb') {
+                    await aBlocker;
+                }
+                return { status: 'ok' };
+            },
         },
     );
 
     queue.resetExecutionState();
-    queue.initExecutionMonitor();
 
-    onChange({
-        notebook: { uri: { fsPath: '/tmp/a.ipynb' } },
-        cellChanges: [{
-            cell: {
-                index: 0,
-                document: { getText: () => 'print(1)' },
-            },
-            executionSummary: { timing: { startTime: 1 } },
-        }],
-    });
+    // Start execution on A (will block, marking A as busy).
+    const aPromise = queue.startExecution('/workspace/a.ipynb', { cell_id: 'cell-1' }, 20);
 
-    const status = await queue.getStatus('/tmp/b.ipynb');
-    assert.equal(status.busy, false);
-    assert.equal(status.kernel_state, 'idle');
+    // B should not be busy.
+    const bStatus = await queue.getStatus('/workspace/b.ipynb');
+    assert.equal(bStatus.busy, false);
+    assert.equal(bStatus.kernel_state, 'idle');
+
+    resolveA();
+    await aPromise;
 });
 
-test('shared-kernel queue reports human-owned running work when an agent execution is queued', { concurrency: false }, async () => {
-    let onChange;
+test('shared-kernel queue reports daemon-routed running work', { concurrency: false }, async () => {
     const doc = {
-        uri: { fsPath: '/tmp/a.ipynb' },
+        uri: { fsPath: '/workspace/a.ipynb' },
         cellAt: () => ({ document: { getText: () => 'print(1)' } }),
     };
 
+    let resolveExec;
+    const execBlocker = new Promise((r) => { resolveExec = r; });
+
     const queue = loadQueueModule(
         {
-            workspace: {
-                onDidChangeNotebookDocument(callback) {
-                    onChange = callback;
-                    return { dispose() {} };
-                },
-                getConfiguration: () => ({
-                    get: (_name, fallback) => fallback,
-                }),
-            },
-            extensions: {
-                getExtension: (id) => {
-                    if (id !== 'ms-toolsai.jupyter') {
-                        return undefined;
-                    }
-                    return {
-                        isActive: true,
-                        exports: {
-                            kernels: {
-                                getKernel: async () => ({ status: 'busy' }),
-                            },
-                        },
-                    };
-                },
-            },
+            workspace: { getConfiguration: () => ({ get: (_n, fb) => fb }) },
+            extensions: { getExtension: () => undefined },
         },
         {
-            resolveNotebook: () => doc,
+            doc,
+            daemonPost: async () => {
+                await execBlocker;
+                return { status: 'ok' };
+            },
         },
     );
 
     queue.resetExecutionState();
-    queue.initExecutionMonitor();
 
-    onChange({
-        notebook: { uri: { fsPath: '/tmp/a.ipynb' } },
-        cellChanges: [{
-            cell: {
-                index: 0,
-                document: { getText: () => 'print(1)' },
-            },
-            executionSummary: { timing: { startTime: 1 } },
-        }],
-    });
+    // Start an execution (will be marked running immediately).
+    const result = await queue.startExecution('/workspace/a.ipynb', { cell_id: 'cell-1' }, 20);
+    assert.equal(result.status, 'started');
 
-    const result = await queue.startExecution('/tmp/a.ipynb', { cell_id: 'cell-1' }, 20);
-    assert.equal(result.status, 'queued');
-    assert.equal(result.kernel_state, 'busy');
-    assert.equal(result.currently_running.length, 1);
-    assert.equal(result.currently_running[0].owner, 'human');
-    assert.equal(result.currently_running[0].cell_id, 'cell-1');
+    // Status should show busy.
+    const status = await queue.getStatus('/workspace/a.ipynb');
+    assert.equal(status.busy, true);
+    assert.equal(status.running.length, 1);
+    assert.equal(status.running[0].cell_id, 'cell-1');
+
+    resolveExec();
+    await new Promise((r) => setTimeout(r, 50));
 });

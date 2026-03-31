@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const path = require('node:path');
 
-function loadQueueModule(vscode, resolverOverrides = {}) {
+function loadQueueModule(vscode, overrides = {}) {
     const modulePath = path.resolve(__dirname, '../out/execution/queue.js');
     const originalLoad = Module._load;
     Module._load = function patchedLoad(request, parent, isMain) {
@@ -26,11 +26,16 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
         }
         if (request === '../notebook/resolver') {
             return {
-                resolveNotebook: () => resolverOverrides.doc,
-                ensureNotebookEditor: async () => ({}),
-                captureEditorFocus: () => ({ kind: 'none' }),
-                restoreEditorFocus: async () => {},
-                ...resolverOverrides,
+                resolveNotebook: () => overrides.doc,
+                ...overrides.resolver,
+            };
+        }
+        if (request === '../session') {
+            return {
+                discoverDaemon: () => overrides.daemon ?? { url: 'http://127.0.0.1:9999', token: 'tok' },
+                daemonPost: overrides.daemonPost ?? (async () => ({ status: 'ok' })),
+                workspaceRootForPath: () => '/workspace',
+                sessionIdForWorkspaceState: () => undefined,
             };
         }
         return originalLoad.call(this, request, parent, isMain);
@@ -44,63 +49,34 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
     }
 }
 
-test('executeCell still reports success when focus restore fails after notebook-command execution', async () => {
-    const cell = {
-        document: { getText: () => 'print(1)' },
-        executionSummary: null,
-    };
+test('executeCell routes through daemon HTTP and returns the result', async () => {
     const doc = {
-        uri: { fsPath: '/tmp/demo.ipynb' },
-        cellAt: () => cell,
+        uri: { fsPath: '/workspace/demo.ipynb' },
+        cellAt: () => ({
+            document: { getText: () => 'print(1)' },
+            executionSummary: null,
+        }),
     };
 
-    let executed = false;
+    let daemonCalls = [];
     const queue = loadQueueModule(
         {
-            NotebookRange: class NotebookRange {
-                constructor(start, end) {
-                    this.start = start;
-                    this.end = end;
-                }
-            },
-            workspace: {
-                getConfiguration: () => ({
-                    get: (_name, fallback) => fallback,
-                }),
-            },
-            window: {
-                showNotebookDocument: async () => {},
-            },
-            commands: {
-                executeCommand: async (command) => {
-                    assert.equal(command, 'notebook.cell.execute');
-                    executed = true;
-                    cell.executionSummary = { success: true, executionOrder: 1 };
-                },
-            },
-            extensions: {
-                getExtension: () => undefined,
-            },
+            workspace: { getConfiguration: () => ({ get: (_n, fb) => fb }) },
+            extensions: { getExtension: () => undefined },
         },
         {
             doc,
-            resolveNotebook: () => doc,
-            ensureNotebookEditor: async () => ({}),
-            captureEditorFocus: () => ({
-                kind: 'text',
-                document: { uri: { scheme: 'file' } },
-                selection: { anchor: 0, active: 0 },
-                viewColumn: 1,
-            }),
-            restoreEditorFocus: async () => {
-                throw new Error('focus restore failed');
+            daemonPost: async (_daemon, endpoint, body) => {
+                daemonCalls.push({ endpoint, body });
+                return { status: 'ok', outputs: [], execution_count: 1 };
             },
         },
     );
 
-    const result = await queue.executeCell('/tmp/demo.ipynb', { cell_id: 'cell-1' }, 20);
-    assert.equal(executed, true);
+    const result = await queue.executeCell('/workspace/demo.ipynb', { cell_id: 'cell-1' }, 20);
     assert.equal(result.status, 'ok');
-    assert.equal(result.execution_mode, 'notebook-command');
-    assert.equal(result.focus_restore_warning, 'focus restore failed');
+    assert.equal(result.execution_mode, 'daemon');
+    assert.equal(daemonCalls.length, 1);
+    assert.equal(daemonCalls[0].endpoint, '/api/notebooks/execute-cell');
+    assert.equal(daemonCalls[0].body.wait, true);
 });

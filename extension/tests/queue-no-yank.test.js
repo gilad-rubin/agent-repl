@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const path = require('node:path');
 
-function loadQueueModule(vscode, resolverOverrides = {}) {
+function loadQueueModule(vscode, overrides = {}) {
     const modulePath = path.resolve(__dirname, '../out/execution/queue.js');
     const originalLoad = Module._load;
     Module._load = function patchedLoad(request, parent, isMain) {
@@ -26,11 +26,15 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
         }
         if (request === '../notebook/resolver') {
             return {
-                resolveNotebook: () => resolverOverrides.doc,
-                ensureNotebookEditor: async () => ({}),
-                captureEditorFocus: () => ({ kind: 'none' }),
-                restoreEditorFocus: async () => {},
-                ...resolverOverrides,
+                resolveNotebook: () => overrides.doc,
+            };
+        }
+        if (request === '../session') {
+            return {
+                discoverDaemon: () => overrides.daemon ?? { url: 'http://127.0.0.1:9999', token: 'tok' },
+                daemonPost: overrides.daemonPost ?? (async () => ({ status: 'ok' })),
+                workspaceRootForPath: () => '/workspace',
+                sessionIdForWorkspaceState: () => undefined,
             };
         }
         return originalLoad.call(this, request, parent, isMain);
@@ -44,146 +48,42 @@ function loadQueueModule(vscode, resolverOverrides = {}) {
     }
 }
 
-test('no-yank execution passes a cancellation token to the Jupyter kernel API', async () => {
-    let saveCalls = 0;
-    const cell = {
-        kind: 2,
-        metadata: {},
-        outputs: [],
-        executionSummary: null,
-        document: {
-            getText: () => 'print(21)',
-            languageId: 'python',
-        },
-    };
+test('daemon-routed execution does not use VS Code notebook commands', async () => {
     const doc = {
-        uri: { fsPath: '/tmp/demo.ipynb' },
-        cellAt: () => cell,
+        uri: { fsPath: '/workspace/demo.ipynb' },
+        cellAt: () => ({
+            document: { getText: () => 'print(21)' },
+            outputs: [],
+            executionSummary: null,
+        }),
         cellCount: 1,
-        isUntitled: false,
-        async save() {
-            saveCalls += 1;
-            return true;
-        },
     };
 
-    class NotebookCellData {
-        constructor(kind, source, languageId) {
-            this.kind = kind;
-            this.source = source;
-            this.languageId = languageId;
-            this.outputs = [];
-            this.metadata = {};
-            this.executionSummary = undefined;
-        }
-    }
-
-    class WorkspaceEdit {
-        constructor() {
-            this.ops = [];
-        }
-
-        set(_uri, edits) {
-            this.ops.push(...edits);
-        }
-    }
-
+    let notebookCommandCalled = false;
     const vscode = {
-        NotebookCellData,
-        WorkspaceEdit,
-        NotebookCellOutput: class NotebookCellOutput {
-            constructor(items, metadata = {}) {
-                this.items = items;
-                this.metadata = metadata;
-            }
-        },
-        NotebookCellOutputItem: {
-            error(error) {
-                return { mime: 'application/x.notebook.error', data: Buffer.from(error.message) };
-            },
-        },
-        NotebookEdit: {
-            replaceCells(range, cells) {
-                return { type: 'replaceCells', range, cells };
-            },
-            updateCellMetadata(index, metadata) {
-                return { type: 'updateCellMetadata', index, metadata };
-            },
-        },
-        NotebookRange: class NotebookRange {
-            constructor(start, end) {
-                this.start = start;
-                this.end = end;
-            }
-        },
-        CancellationTokenSource: class CancellationTokenSource {
-            constructor() {
-                this.token = {
-                    isCancellationRequested: false,
-                    onCancellationRequested: () => ({ dispose() {} }),
-                };
-            }
-            dispose() {}
-        },
         workspace: {
-            getConfiguration: () => ({
-                get: (_name, fallback) => fallback,
-            }),
-            async applyEdit(edit) {
-                for (const op of edit.ops) {
-                    if (op.type === 'replaceCells') {
-                        const replacement = op.cells[0];
-                        cell.outputs = replacement.outputs;
-                        cell.metadata = replacement.metadata;
-                        cell.executionSummary = replacement.executionSummary ?? null;
-                    } else if (op.type === 'updateCellMetadata') {
-                        cell.metadata = op.metadata;
-                    }
-                }
-                return true;
-            },
-        },
-        window: {
-            showNotebookDocument: async () => {},
+            getConfiguration: () => ({ get: (_name, fallback) => fallback }),
         },
         commands: {
             executeCommand: async () => {
-                throw new Error('should not fall back to notebook command');
+                notebookCommandCalled = true;
+                throw new Error('should not call notebook.cell.execute');
             },
         },
-        extensions: {
-            getExtension: () => ({
-                isActive: true,
-                exports: {
-                    kernels: {
-                        async getKernel() {
-                            return {
-                                status: 'idle',
-                                async *executeCode(source, token) {
-                                    assert.equal(source, 'print(21)');
-                                    assert.equal(typeof token?.onCancellationRequested, 'function');
-                                    yield {
-                                        items: [{ mime: 'text/plain', data: Buffer.from('21') }],
-                                        metadata: {},
-                                    };
-                                },
-                            };
-                        },
-                    },
-                },
-            }),
-        },
+        extensions: { getExtension: () => undefined },
     };
 
-    const queue = loadQueueModule(vscode, { doc });
+    const queue = loadQueueModule(vscode, {
+        doc,
+        daemonPost: async (_daemon, endpoint, body) => {
+            assert.equal(endpoint, '/api/notebooks/execute-cell');
+            return { status: 'ok', outputs: [], execution_count: 1 };
+        },
+    });
     queue.resetExecutionState();
-    queue.resetJupyterApiCache();
 
-    const result = await queue.executeCell('/tmp/demo.ipynb', { cell_id: 'cell-1' }, 20);
-    await new Promise(resolve => setTimeout(resolve, 80));
-
+    const result = await queue.executeCell('/workspace/demo.ipynb', { cell_id: 'cell-1' }, 20);
     assert.equal(result.status, 'ok');
-    assert.equal(result.execution_mode, 'jupyter-kernel-api');
-    assert.equal(result.execution_preference, 'no-yank');
-    assert.equal(saveCalls > 0, true);
+    assert.equal(result.execution_mode, 'daemon');
+    assert.equal(notebookCommandCalled, false, 'should not use native VS Code execution');
 });

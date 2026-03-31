@@ -1,14 +1,13 @@
 import * as vscode from 'vscode';
 import { resolveCell, getCellId } from '../notebook/identity';
 import { AGENT_REPL_OUTPUT_METADATA_KEY, JupyterOutput, toJupyter, stripForAgent, toVSCode } from '../notebook/outputs';
-import { resolveNotebook, ensureNotebookEditor, captureEditorFocus, restoreEditorFocus } from '../notebook/resolver';
+import { resolveNotebook } from '../notebook/resolver';
 import { logNotebookDiagnostic } from '../debug';
+import { discoverDaemon, daemonPost, workspaceRootForPath, sessionIdForWorkspaceState } from '../session';
 
 function queueDebug(path: string, event: string, data: Record<string, unknown> = {}): void {
     const queue = queues.get(path) ?? [];
     const snapshot = {
-        executingCells: [...executingCells.entries()].map(([k, v]) => ({ key: k, cellId: v.cellId, preview: v.sourcePreview })),
-        kernelState,
         queueEntries: queue.map(e => ({ id: e.id, cellId: e.cellId, status: e.status, preview: e.sourcePreview })),
         ...data,
     };
@@ -16,7 +15,6 @@ function queueDebug(path: string, event: string, data: Record<string, unknown> =
 }
 
 let executionCounter = 0;
-type ExecutionMode = 'no-yank' | 'native';
 
 interface QueueEntry {
     id: string;
@@ -40,52 +38,21 @@ interface PreparedExecutionContext {
     preview: string;
     execId: string;
     queue: QueueEntry[];
-    running: Array<{
-        cell_id: string;
-        cell_index: number;
-        source_preview: string;
-        owner: 'human' | 'agent';
-    }>;
     busy: boolean;
 }
 
 // Per-notebook queues
 const queues = new Map<string, QueueEntry[]>();
-type CompletionReason = 'completed' | 'canceled' | 'timeout';
-const completionCallbacks = new Map<string, (reason: CompletionReason) => void>();
 
-// Kernel state tracking via notebook cell execution lifecycle
-interface ExecutingCell {
-    fsPath: string;
-    cellIndex: number;
-    cellId: string;
-    sourcePreview: string;
-}
-
-// Tracks all currently executing cells across all notebooks
-const executingCells = new Map<string, ExecutingCell>();
-let kernelState: 'idle' | 'busy' = 'idle';
-const pendingNotebookSaves = new Map<string, ReturnType<typeof setTimeout>>();
-
-function cellKey(fsPath: string, index: number): string {
-    return `${fsPath}:${index}`;
-}
-
-function matchesCellKeyPath(key: string, fsPath?: string): boolean {
-    return !fsPath || key.startsWith(`${fsPath}:`);
-}
-
-function updateKernelState(): void {
-    kernelState = executingCells.size > 0 ? 'busy' : 'idle';
-}
-
-function hasExecutingCell(path: string): boolean {
-    for (const info of executingCells.values()) {
-        if (info.fsPath === path) {
-            return true;
-        }
-    }
-    return false;
+/**
+ * Initialize execution monitoring.
+ * With daemon-routed execution, the daemon pushes state via WebSocket.
+ * This monitor is kept as a no-op disposable for extension.ts compatibility.
+ */
+export function initExecutionMonitor(): vscode.Disposable {
+    // Daemon-routed execution tracks state via WebSocket events.
+    // Return a no-op disposable for extension.ts compatibility.
+    return { dispose() {} } as vscode.Disposable;
 }
 
 export function executionSummaryIndicatesCompletion(
@@ -100,102 +67,12 @@ export function executionSummaryIndicatesCompletion(
         summary.executionOrder !== initialExecutionOrder;
 }
 
-/** Initialize execution monitoring: completion detection + kernel state tracking. */
-export function initExecutionMonitor(): vscode.Disposable {
-    return vscode.workspace.onDidChangeNotebookDocument(e => {
-        for (const change of e.cellChanges) {
-            // executionSummary is undefined if it didn't change, or the new value
-            if (change.executionSummary === undefined) { continue; }
-
-            const fsPath = e.notebook.uri.fsPath;
-            const key = cellKey(fsPath, change.cell.index);
-            const summary = change.executionSummary;
-
-            if (executionSummaryIndicatesCompletion(summary)) {
-                // Execution completed
-                const wasTracked = executingCells.has(key);
-                executingCells.delete(key);
-                updateKernelState();
-
-                const cb = completionCallbacks.get(key);
-                queueDebug(fsPath, 'monitor:completed', {
-                    cellKey: key,
-                    wasTracked,
-                    hasCallback: !!cb,
-                    summary: {
-                        success: summary?.success,
-                        executionOrder: summary?.executionOrder,
-                        endTime: summary?.timing?.endTime,
-                    },
-                });
-
-                if (cb) {
-                    completionCallbacks.delete(key);
-                    cb('completed');
-                } else {
-                    processNext(fsPath);
-                }
-            } else if (summary) {
-                // Execution started (summary set/cleared without endTime)
-                const cellId = getCellId(change.cell);
-                if (!cellId) {
-                    queueDebug(fsPath, 'monitor:missing-cell-id', {
-                        cellKey: key,
-                        cellIndex: change.cell.index,
-                    });
-                    continue;
-                }
-                const sourcePreview = change.cell.document.getText().split('\n')[0].slice(0, 80);
-                executingCells.set(key, {
-                    fsPath,
-                    cellIndex: change.cell.index,
-                    cellId,
-                    sourcePreview,
-                });
-                updateKernelState();
-
-                queueDebug(fsPath, 'monitor:started', {
-                    cellKey: key,
-                    cellId,
-                    sourcePreview,
-                    summary: {
-                        success: summary?.success,
-                        executionOrder: summary?.executionOrder,
-                        endTime: summary?.timing?.endTime,
-                    },
-                });
-            }
-        }
-    });
-}
-
-/** Get current kernel state. */
-export function getKernelState(): string {
-    return kernelState;
-}
-
-/** Reset execution tracking state. Call on kernel restart to avoid orphaned "busy" state. */
+/** Reset execution tracking state. */
 export function resetExecutionState(
     fsPath?: string,
     reason: string = 'Execution canceled due to kernel restart'
 ): void {
-    queueDebug(fsPath ?? 'global', 'resetExecutionState', {
-        reason,
-        executingCellCount: executingCells.size,
-        completionCallbackCount: completionCallbacks.size,
-    });
-
-    for (const key of [...executingCells.keys()]) {
-        if (matchesCellKeyPath(key, fsPath)) {
-            executingCells.delete(key);
-        }
-    }
-
-    for (const [key, callback] of [...completionCallbacks.entries()]) {
-        if (!matchesCellKeyPath(key, fsPath)) { continue; }
-        completionCallbacks.delete(key);
-        callback('canceled');
-    }
+    queueDebug(fsPath ?? 'global', 'resetExecutionState', { reason });
 
     for (const [path, queue] of queues.entries()) {
         if (fsPath && path !== fsPath) { continue; }
@@ -211,186 +88,42 @@ export function resetExecutionState(
         }
     }
 
-    updateKernelState();
-
     const targetPaths = fsPath ? [fsPath] : [...queues.keys()];
     for (const path of targetPaths) {
         processNext(path);
     }
 }
 
-function scheduleNotebookSave(doc: vscode.NotebookDocument): void {
-    const fsPath = doc.uri.fsPath;
-    if ((doc as { isUntitled?: boolean }).isUntitled || typeof (doc as { save?: () => Thenable<boolean> | Promise<boolean> }).save !== 'function') {
-        return;
-    }
-
-    const existing = pendingNotebookSaves.get(fsPath);
-    if (existing) {
-        clearTimeout(existing);
-    }
-
-    const handle = setTimeout(() => {
-        pendingNotebookSaves.delete(fsPath);
-        Promise.resolve((doc as { save: () => Thenable<boolean> | Promise<boolean> }).save()).catch((err: any) => {
-            console.warn('agent-repl: failed to save notebook after background update', err);
-        });
-    }, 50);
-
-    pendingNotebookSaves.set(fsPath, handle);
-}
-
 function isNotebookBusy(path: string): boolean {
     const queue = queues.get(path) ?? [];
-    return hasExecutingCell(path) || queue.some(e => e.status === 'running');
-}
-
-function describeRunningExecutions(
-    path: string,
-    doc: vscode.NotebookDocument,
-    queue: QueueEntry[]
-): Array<{
-    cell_id: string;
-    cell_index: number;
-    source_preview: string;
-    owner: 'human' | 'agent';
-}> {
-    const fsPath = doc.uri.fsPath;
-    const agentRunningIds = new Set(
-        queue.filter(entry => entry.status === 'running').map(entry => entry.cellId)
-    );
-
-    const running: Array<{
-        cell_id: string;
-        cell_index: number;
-        source_preview: string;
-        owner: 'human' | 'agent';
-    }> = [];
-
-    for (const info of executingCells.values()) {
-        if (info.fsPath !== fsPath) { continue; }
-        running.push({
-            cell_id: info.cellId,
-            cell_index: info.cellIndex,
-            source_preview: info.sourcePreview,
-            owner: agentRunningIds.has(info.cellId) ? 'agent' : 'human',
-        });
-    }
-
-    for (const entry of queue.filter(item => item.status === 'running')) {
-        if (running.some(item => item.cell_id === entry.cellId)) { continue; }
-        try {
-            const cellIndex = resolveCell(doc, { cell_id: entry.cellId });
-            running.push({
-                cell_id: entry.cellId,
-                cell_index: cellIndex,
-                source_preview: entry.sourcePreview,
-                owner: 'agent',
-            });
-        } catch {
-            // Ignore cells that disappeared while queued/running.
-        }
-    }
-
-    return running;
+    return queue.some(e => e.status === 'running');
 }
 
 /**
- * Check the real kernel status via Jupyter APIs.
- * If our tracking says busy but the kernel is actually idle/dead,
- * clear the stale state so execution can proceed.
- * Also expires queue entries that have been running for too long
- * (e.g. completion tracking failed on code-server).
- */
-async function reconcileKernelState(path: string): Promise<void> {
-    const queue = queues.get(path);
-    const hasRunningQueueEntry = queue?.some(entry => entry.status === 'running') ?? false;
-
-    if (queue?.some(entry =>
-        entry.status === 'running' &&
-        entry.startedAt &&
-        Date.now() - entry.startedAt.getTime() > 300_000
-    )) {
-        queueDebug(path, 'reconcile:expired');
-        resetExecutionState(path, 'Execution tracking expired');
-        return;
-    }
-
-    if (!hasExecutingCell(path) && !hasRunningQueueEntry) {
-        queueDebug(path, 'reconcile:skip-nothing-running');
-        return;
-    }
-
-    try {
-        const doc = resolveNotebook(path);
-        const realStatus = await queryKernelStatus(doc);
-
-        queueDebug(path, 'reconcile:kernel-check', {
-            realStatus,
-            hasExecutingCell: hasExecutingCell(path),
-            hasRunningQueueEntry,
-        });
-
-        if (realStatus !== 'busy' && realStatus !== 'starting') {
-            queueDebug(path, 'reconcile:reset-stale', { realStatus });
-            resetExecutionState(path, 'Execution tracking reset after kernel became idle');
-        }
-    } catch (err: any) {
-        queueDebug(path, 'reconcile:error', { error: err?.message ?? String(err) });
-    }
-}
-
-async function queryKernelStatus(doc: vscode.NotebookDocument): Promise<string> {
-    const privateKernel = await getPrivateJupyterKernel(doc);
-    if (privateKernel?.status) { return privateKernel.status; }
-
-    const kernel = await getJupyterKernel(doc);
-    if (kernel?.status) { return kernel.status; }
-
-    // Can't reach kernel at all — likely dead or restarted
-    return 'unknown';
-}
-
-/**
- * Execute a cell. If nothing is running, executes immediately and holds until done.
- * If something is running, queues and returns immediately with queue info.
+ * Execute a cell via daemon HTTP. If the daemon reports a queue,
+ * the cell is queued locally for status tracking.
  */
 export async function executeCell(
     path: string,
     selector: { cell_id?: string; cell_index?: number },
     maxQueue: number
 ): Promise<any> {
-    const execution = await prepareExecutionContext(path, selector);
+    const execution = prepareExecutionContext(path, selector);
 
     queueDebug(path, 'executeCell:entry', {
         execId: execution.execId,
         cellId: execution.cellId,
         cellIndex: execution.cellIndex,
-        preview: execution.preview,
-        runningCount: execution.running.length,
-        busy: execution.busy,
-        hasExecutingCell: hasExecutingCell(path),
     });
 
-    if (execution.running.length === 0 && !execution.busy) {
-        queueDebug(path, 'executeCell:immediate', { execId: execution.execId, cellId: execution.cellId });
-        return runCell(path, execution);
-    }
-
     if (queuedEntryCount(execution.queue) >= maxQueue) {
-        queueDebug(path, 'executeCell:queue-full', { execId: execution.execId, cellId: execution.cellId, maxQueue });
         throw Object.assign(new Error(`Queue full (max ${maxQueue})`), { statusCode: 429 });
     }
 
-    queueDebug(path, 'executeCell:queued', { execId: execution.execId, cellId: execution.cellId, running: execution.running });
-
-    return new Promise((resolve) => {
-        execution.queue.push(createQueueEntry(execution, { resolve }));
-        resolve(buildQueuedExecutionResult(path, execution));
-    });
+    return runCellViaDaemon(path, execution);
 }
 
-/** Start execution without waiting for completion so callers can poll explicitly. */
+/** Start execution without waiting for completion. */
 export async function startExecution(
     path: string,
     selector: { cell_id?: string; cell_index?: number },
@@ -420,17 +153,17 @@ export function getExecution(executionId: string): any {
 
 /** Get execution status for a notebook. */
 export async function getStatus(path: string): Promise<any> {
-    await reconcileKernelState(path);
-    const doc = resolveNotebook(path);
     const queue = queues.get(path) ?? [];
-
-    const running = describeRunningExecutions(path, doc, queue);
-
     return {
         path,
         kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
         busy: isNotebookBusy(path),
-        running,
+        running: queue.filter(e => e.status === 'running').map(e => ({
+            cell_id: e.cellId,
+            cell_index: -1,
+            source_preview: e.sourcePreview,
+            owner: 'agent' as const,
+        })),
         queued: buildQueuedStatus(queue),
     };
 }
@@ -456,7 +189,6 @@ export async function insertAndExecute(
     const edit = new vscode.WorkspaceEdit();
     edit.set(doc.uri, [vscode.NotebookEdit.insertCells(index, [cellData])]);
     await vscode.workspace.applyEdit(edit);
-    scheduleNotebookSave(doc);
 
     const result = await enqueueExecution(path, { cell_index: index }, maxQueue);
     return { ...result, operation: 'insert-execute', cell_id: cellId, cell_index: index };
@@ -489,14 +221,32 @@ export async function startNotebookExecutionAll(path: string, maxQueue: number):
 
 // --- Internal ---
 
-/** Run a cell using a new queue entry (called from executeCell for immediate execution). */
-async function runCell(
+async function runCellViaDaemon(
     path: string,
     execution: PreparedExecutionContext,
 ): Promise<any> {
     const entry = createQueueEntry(execution, { status: 'running', startedAt: new Date() });
     execution.queue.push(entry);
-    return runCellEntry(path, execution.doc, execution.cellIndex, entry);
+
+    try {
+        const daemonResult = await postExecuteCell(execution.doc, execution.cellId, execution.cellIndex);
+        const status = daemonResult?.status ?? 'ok';
+        entry.status = status === 'error' ? 'error' : 'completed';
+        entry.result = {
+            ...daemonResult,
+            execution_id: entry.id,
+            cell_id: entry.cellId,
+            cell_index: execution.cellIndex,
+            execution_mode: 'daemon',
+        };
+        processNext(path);
+        return entry.result;
+    } catch (err: any) {
+        entry.status = 'error';
+        entry.result = { status: 'error', execution_id: entry.id, cell_id: entry.cellId, error: err.message };
+        processNext(path);
+        throw err;
+    }
 }
 
 async function enqueueExecution(
@@ -509,21 +259,18 @@ async function enqueueExecution(
         forceQueue?: boolean;
     },
 ): Promise<any> {
-    const execution = await prepareExecutionContext(path, selector);
+    const execution = prepareExecutionContext(path, selector);
 
     queueDebug(path, 'enqueue:entry', {
         execId: execution.execId,
         cellId: execution.cellId,
         cellIndex: execution.cellIndex,
-        preview: execution.preview,
-        runningCount: execution.running.length,
         busy: execution.busy,
-        hasExecutingCell: hasExecutingCell(path),
         forceQueue: options?.forceQueue ?? false,
         batchId: options?.batchId,
     });
 
-    if (!options?.forceQueue && execution.running.length === 0 && !execution.busy) {
+    if (!options?.forceQueue && !execution.busy) {
         queueDebug(path, 'enqueue:immediate-start', { execId: execution.execId, cellId: execution.cellId });
         const entry = createQueueEntry(execution, {
             batchId: options?.batchId,
@@ -532,7 +279,9 @@ async function enqueueExecution(
             startedAt: new Date(),
         });
         execution.queue.push(entry);
-        runCellEntry(path, execution.doc, execution.cellIndex, entry)
+
+        // Fire and forget — daemon handles execution.
+        runDaemonEntry(path, execution.doc, entry, execution.cellIndex)
             .then(() => {})
             .catch(() => {});
 
@@ -546,11 +295,10 @@ async function enqueueExecution(
     }
 
     if (queuedEntryCount(execution.queue) >= maxQueue) {
-        queueDebug(path, 'enqueue:queue-full', { execId: execution.execId, cellId: execution.cellId, maxQueue });
         throw Object.assign(new Error(`Queue full (max ${maxQueue})`), { statusCode: 429 });
     }
 
-    queueDebug(path, 'enqueue:queued', { execId: execution.execId, cellId: execution.cellId, running: execution.running });
+    queueDebug(path, 'enqueue:queued', { execId: execution.execId, cellId: execution.cellId });
 
     execution.queue.push(createQueueEntry(execution, {
         batchId: options?.batchId,
@@ -560,11 +308,10 @@ async function enqueueExecution(
     return buildQueuedExecutionResult(path, execution);
 }
 
-async function prepareExecutionContext(
+function prepareExecutionContext(
     path: string,
     selector: { cell_id?: string; cell_index?: number },
-): Promise<PreparedExecutionContext> {
-    await reconcileKernelState(path);
+): PreparedExecutionContext {
     const doc = resolveNotebook(path);
     const cellIndex = resolveCell(doc, selector);
     const cell = doc.cellAt(cellIndex);
@@ -576,9 +323,8 @@ async function prepareExecutionContext(
     const execId = `exec-${++executionCounter}`;
     const queue = queues.get(path) ?? [];
     queues.set(path, queue);
-    const running = describeRunningExecutions(path, doc, queue);
     const busy = isNotebookBusy(path);
-    return { doc, cellIndex, cellId, preview, execId, queue, running, busy };
+    return { doc, cellIndex, cellId, preview, execId, queue, busy };
 }
 
 function createQueueEntry(
@@ -626,688 +372,56 @@ function buildQueuedExecutionResult(path: string, execution: PreparedExecutionCo
         cell_index: execution.cellIndex,
         position: queuedEntryCount(execution.queue),
         kernel_state: isNotebookBusy(path) ? 'busy' : 'idle',
-        currently_running: execution.running,
-        message: kernelState === 'busy'
-            ? 'Kernel is busy (human or agent execution in progress). Queued.'
-            : `Queued after ${execution.running.length} running cell(s)`,
+        message: `Queued after running cell(s)`,
     };
 }
 
-/** Run a cell using an existing queue entry (called from processNext for queued cells). */
-async function runCellEntry(
+// -- Daemon HTTP execution --------------------------------------------------
+
+async function postExecuteCell(
+    doc: vscode.NotebookDocument,
+    cellId: string,
+    cellIndex: number,
+): Promise<any> {
+    const fsPath = doc.uri.fsPath;
+    const workspaceRoot = workspaceRootForPath(fsPath);
+    if (!workspaceRoot) {
+        throw new Error(`No workspace root found for ${fsPath}`);
+    }
+    const daemon = discoverDaemon(workspaceRoot);
+    if (!daemon) {
+        throw new Error('Daemon not found');
+    }
+    const notebookPath = require('path').relative(workspaceRoot, fsPath);
+    return daemonPost(daemon, '/api/notebooks/execute-cell', {
+        path: notebookPath,
+        cell_id: cellId,
+        cell_index: cellIndex,
+        wait: true,
+    });
+}
+
+async function runDaemonEntry(
     path: string,
     doc: vscode.NotebookDocument,
+    entry: QueueEntry,
     cellIndex: number,
-    entry: QueueEntry
-): Promise<any> {
-    queueDebug(path, 'runCellEntry:start', {
-        execId: entry.id,
-        cellId: entry.cellId,
-        cellIndex,
-        entryStatus: entry.status,
-    });
-
+): Promise<void> {
     try {
-        const executionPreference = getExecutionMode();
-        if (executionPreference === 'native') {
-            queueDebug(path, 'runCellEntry:native-mode', { execId: entry.id });
-            return await runCellViaNotebookCommand(path, doc, cellIndex, entry, {
-                executionPreference,
-            });
-        }
-
-        queueDebug(path, 'runCellEntry:trying-kernel-api', { execId: entry.id });
-        const directAttempt = await runCellViaJupyterKernelApi(doc, cellIndex, entry);
-        if (directAttempt.result) {
-            directAttempt.result.execution_preference = executionPreference;
-            entry.status = executionResultIndicatesError(directAttempt.result) ? 'error' : 'completed';
-            entry.result = directAttempt.result;
-            queueDebug(path, 'runCellEntry:kernel-api-done', {
-                execId: entry.id,
-                status: entry.status,
-            });
-            processNext(path);
-            return directAttempt.result;
-        }
-
-        queueDebug(path, 'runCellEntry:fallback-to-command', {
-            execId: entry.id,
-            fallbackReason: directAttempt.fallbackReason,
-        });
-        return await runCellViaNotebookCommand(path, doc, cellIndex, entry, {
-            executionPreference,
-            fallbackReason: directAttempt.fallbackReason,
-        });
+        const daemonResult = await postExecuteCell(doc, entry.cellId, cellIndex);
+        const status = daemonResult?.status ?? 'ok';
+        entry.status = status === 'error' ? 'error' : 'completed';
+        entry.result = {
+            ...daemonResult,
+            execution_id: entry.id,
+            cell_id: entry.cellId,
+            execution_mode: 'daemon',
+        };
     } catch (err: any) {
         entry.status = 'error';
-        entry.result = { status: 'error', execution_id: entry.id, error: err.message };
-        queueDebug(path, 'runCellEntry:error', {
-            execId: entry.id,
-            error: err.message,
-        });
-        processNext(path);
-        throw err;
+        entry.result = { status: 'error', execution_id: entry.id, cell_id: entry.cellId, error: err.message };
     }
-}
-
-async function runCellViaNotebookCommand(
-    path: string,
-    doc: vscode.NotebookDocument,
-    cellIndex: number,
-    entry: QueueEntry,
-    options: {
-        executionPreference: ExecutionMode;
-        fallbackReason?: string;
-    }
-): Promise<any> {
-    const selection = [new vscode.NotebookRange(cellIndex, cellIndex + 1)];
-    const completionPromise = waitForCompletion(doc, cellIndex);
-    let restoreFocusWarning: string | undefined;
-
-    if (options.executionPreference === 'native') {
-        await vscode.window.showNotebookDocument(doc, {
-            preserveFocus: false,
-            preview: false,
-            selections: selection,
-        });
-        await vscode.commands.executeCommand('notebook.cell.execute', {
-            ranges: [{ start: cellIndex, end: cellIndex + 1 }],
-            document: doc.uri
-        });
-    } else {
-        const focus = captureEditorFocus();
-        try {
-            await ensureNotebookEditor(doc, {
-                preserveFocus: true,
-                preview: false,
-                selections: selection,
-            });
-            await vscode.commands.executeCommand('notebook.cell.execute', {
-                ranges: [{ start: cellIndex, end: cellIndex + 1 }],
-                document: doc.uri
-            });
-        } finally {
-            try {
-                await restoreEditorFocus(focus);
-            } catch (err: any) {
-                // Focus restoration is best-effort and should never mask a successful execution.
-                restoreFocusWarning = err?.message ?? String(err);
-                console.warn('agent-repl: failed to restore editor focus', err);
-            }
-        }
-    }
-
-    const completion = await completionPromise;
-    if (completion !== 'completed') {
-        throw new Error(
-            completion === 'timeout'
-                ? 'Execution tracking timed out'
-                : 'Execution canceled due to kernel restart'
-        );
-    }
-
-    const cell = doc.cellAt(cellIndex);
-    const outputs = toJupyter(cell);
-    const stripped = stripForAgent(outputs);
-    const execCount = cell.executionSummary?.executionOrder ?? null;
-    const success = cell.executionSummary?.success !== false && !hasErrorOutput(stripped);
-    const errorMessage = success ? undefined : getFirstErrorMessage(stripped) ?? 'Execution failed';
-
-    const result = {
-        status: success ? 'ok' : 'error',
-        execution_id: entry.id,
-        cell_id: entry.cellId,
-        cell_index: cellIndex,
-        outputs: stripped,
-        execution_count: execCount,
-        execution_mode: 'notebook-command',
-        execution_preference: options.executionPreference,
-        execution_fallback_reason: options.fallbackReason ?? null,
-        ...(errorMessage ? { error: errorMessage } : {}),
-        ...(restoreFocusWarning ? { focus_restore_warning: restoreFocusWarning } : {}),
-    };
-
-    entry.status = success ? 'completed' : 'error';
-    entry.result = result;
     processNext(path);
-    return result;
-}
-
-async function runCellViaJupyterKernelApi(
-    doc: vscode.NotebookDocument,
-    cellIndex: number,
-    entry: QueueEntry
-): Promise<{ result?: any; fallbackReason?: string }> {
-    if (kernelApiDisabled) {
-        return { fallbackReason: 'kernel-api-disabled' };
-    }
-
-    const privateResult = await runCellViaPrivateJupyterSession(doc, cellIndex, entry);
-    if (privateResult.result || privateResult.fallbackReason !== 'no-private-jupyter-session') {
-        return privateResult;
-    }
-
-    const kernel = await getJupyterKernel(doc);
-    if (!kernel || typeof kernel.executeCode !== 'function') {
-        return { fallbackReason: 'no-private-jupyter-session; no-jupyter-kernel-api' };
-    }
-
-    let outputs: vscode.NotebookCellOutput[] = [];
-    let started = false;
-    const startTime = Date.now();
-    const cancellation = new vscode.CancellationTokenSource();
-
-    try {
-        await replaceCellState(doc, cellIndex, outputs, 'running', {
-            success: undefined,
-            timing: { startTime, endTime: startTime },
-        });
-        const source = doc.cellAt(cellIndex).document.getText();
-
-        for await (const output of kernel.executeCode(source, cancellation.token)) {
-            started = true;
-            if (!isNotebookOutput(output)) { continue; }
-            outputs = applyNotebookOutput(outputs, output);
-            await replaceCellState(doc, cellIndex, outputs, 'running', {
-                success: undefined,
-                timing: { startTime, endTime: Date.now() },
-            });
-        }
-
-        await replaceCellState(doc, cellIndex, outputs, undefined, {
-            success: true,
-            timing: { startTime, endTime: Date.now() },
-        });
-        const cell = doc.cellAt(cellIndex);
-        return {
-            result: {
-                status: 'ok',
-                execution_id: entry.id,
-                cell_id: entry.cellId,
-                cell_index: cellIndex,
-                outputs: stripForAgent(toJupyter(cell)),
-                execution_count: cell.executionSummary?.executionOrder ?? null,
-                execution_mode: 'jupyter-kernel-api',
-            }
-        };
-    } catch (err: any) {
-        if (!started) {
-            // Kernel API returned an object but execution failed before producing
-            // any output — the API is broken (e.g. access denied on code-server).
-            // Disable it for the rest of the session so we fall back cleanly.
-            kernelApiDisabled = true;
-            await clearAgentRunState(doc, cellIndex);
-            return { fallbackReason: err?.message ?? String(err) };
-        }
-
-        const errorOutput = new vscode.NotebookCellOutput([
-            vscode.NotebookCellOutputItem.error(
-                err instanceof Error ? err : new Error(err?.message ?? String(err))
-            )
-        ]);
-        outputs = [...outputs, errorOutput];
-        await replaceCellState(doc, cellIndex, outputs, 'error');
-        throw err;
-    } finally {
-        cancellation.dispose();
-        await clearAgentRunState(doc, cellIndex);
-    }
-}
-
-async function runCellViaPrivateJupyterSession(
-    doc: vscode.NotebookDocument,
-    cellIndex: number,
-    entry: QueueEntry
-): Promise<{ result?: any; fallbackReason?: string }> {
-    const kernel = await getPrivateJupyterKernel(doc);
-    if (!kernel || typeof kernel.requestExecute !== 'function') {
-        return { fallbackReason: 'no-private-jupyter-session' };
-    }
-
-    const startTime = Date.now();
-    const source = doc.cellAt(cellIndex).document.getText();
-    let rawOutputs: JupyterOutput[] = [];
-    let clearOutputPending = false;
-    let executionCount: number | null = null;
-    let success = true;
-
-    try {
-        await replaceCellState(doc, cellIndex, [], 'running', {
-            success: undefined,
-            timing: { startTime, endTime: startTime },
-        });
-
-        const future = kernel.requestExecute({
-            code: source.replace(/\r\n/g, '\n'),
-            silent: false,
-            stop_on_error: false,
-            allow_stdin: false,
-            store_history: true,
-        });
-
-        future.onIOPub = async (msg: any) => {
-            const output = iopubMessageToJupyterOutput(msg);
-            if (!output) { return; }
-            if (output.output_type === 'clear_output') {
-                clearOutputPending = output.wait === true;
-                if (!clearOutputPending) {
-                    rawOutputs = [];
-                }
-            } else {
-                if (clearOutputPending) {
-                    rawOutputs = [];
-                    clearOutputPending = false;
-                }
-                rawOutputs = applyJupyterOutput(rawOutputs, output);
-            }
-            if (output.execution_count != null) {
-                executionCount = output.execution_count;
-            }
-            if (output.output_type === 'error') {
-                success = false;
-            }
-            await replaceCellState(
-                doc,
-                cellIndex,
-                rawOutputs.map(toVSCode),
-                success ? 'running' : 'error',
-                {
-                    executionOrder: executionCount ?? undefined,
-                    success: undefined,
-                    timing: { startTime, endTime: Date.now() },
-                }
-            );
-        };
-
-        future.onReply = (msg: any) => {
-            const replyCount = msg?.content?.execution_count;
-            if (typeof replyCount === 'number') {
-                executionCount = replyCount;
-            }
-            if (msg?.content?.status === 'error') {
-                success = false;
-            }
-        };
-
-        await future.done;
-        if (typeof future.dispose === 'function') {
-            future.dispose();
-        }
-        if (clearOutputPending) {
-            rawOutputs = [];
-            clearOutputPending = false;
-        }
-
-        await replaceCellState(
-            doc,
-            cellIndex,
-            rawOutputs.map(toVSCode),
-            success ? undefined : 'error',
-            {
-                executionOrder: executionCount ?? undefined,
-                success,
-                timing: { startTime, endTime: Date.now() },
-            }
-        );
-
-        return {
-            result: {
-                status: success ? 'ok' : 'error',
-                execution_id: entry.id,
-                cell_id: entry.cellId,
-                cell_index: cellIndex,
-                outputs: stripForAgent(rawOutputs),
-                execution_count: executionCount,
-                execution_mode: 'jupyter-private-session',
-            }
-        };
-    } catch (err: any) {
-        const message = err?.message ?? String(err);
-        if (rawOutputs.length === 0) {
-            kernelApiDisabled = true;
-            await clearAgentRunState(doc, cellIndex);
-            return { fallbackReason: message };
-        }
-        if (clearOutputPending) {
-            rawOutputs = [];
-            clearOutputPending = false;
-        }
-
-        rawOutputs.push({
-            output_type: 'error',
-            ename: err?.name ?? 'Error',
-            evalue: message,
-            traceback: [],
-        });
-        await replaceCellState(
-            doc,
-            cellIndex,
-            rawOutputs.map(toVSCode),
-            'error',
-            {
-                executionOrder: executionCount ?? undefined,
-                success: false,
-                timing: { startTime, endTime: Date.now() },
-            }
-        );
-        throw err;
-    } finally {
-        await clearAgentRunState(doc, cellIndex);
-    }
-}
-
-// Cache Jupyter API objects so we only trigger the access check once per session.
-// The Jupyter extension identifies callers via stack inspection and shows a warning
-// popup for unrecognized publishers on every getKernelService() / kernels.getKernel()
-// call when the publisher isn't in their allowlist.
-// When kernel API access fails at execution time (e.g. on code-server where our
-// publisher isn't allowlisted), we disable the API for the rest of the session to
-// avoid broken kernel objects that leave execution state stuck.
-let cachedJupyterApi: any | undefined;
-let cachedKernelService: any | undefined;
-let kernelApiDisabled = false;
-
-export async function getJupyterApi(): Promise<any | undefined> {
-    if (cachedJupyterApi) { return cachedJupyterApi; }
-    const jupyterExt = vscode.extensions.getExtension('ms-toolsai.jupyter');
-    if (!jupyterExt) { return undefined; }
-    cachedJupyterApi = jupyterExt.isActive ? jupyterExt.exports : await jupyterExt.activate();
-    return cachedJupyterApi;
-}
-
-async function getJupyterKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
-    const api = await getJupyterApi();
-    const getKernel = api?.kernels?.getKernel;
-    if (typeof getKernel !== 'function') { return undefined; }
-
-    try {
-        return await getKernel(doc.uri);
-    } catch {
-        return undefined;
-    }
-}
-
-async function getPrivateJupyterKernel(doc: vscode.NotebookDocument): Promise<any | undefined> {
-    if (!cachedKernelService) {
-        const api = await getJupyterApi();
-        const getKernelService = api?.getKernelService;
-        if (typeof getKernelService !== 'function') { return undefined; }
-
-        try {
-            cachedKernelService = await getKernelService();
-        } catch {
-            return undefined;
-        }
-    }
-    if (!cachedKernelService) { return undefined; }
-
-    try {
-        const kernel = await cachedKernelService.getKernel?.(doc.uri);
-        return kernel?.connection?.kernel;
-    } catch {
-        return undefined;
-    }
-}
-
-/** Reset cached Jupyter API references (e.g. after kernel restart). */
-export function resetJupyterApiCache(): void {
-    cachedKernelService = undefined;
-    kernelApiDisabled = false;
-    // Keep cachedJupyterApi — the extension object itself doesn't change.
-}
-
-function getExecutionMode(): ExecutionMode {
-    const config = vscode.workspace.getConfiguration('agent-repl');
-    const value = config.get<string>('executionMode', 'no-yank');
-    return value === 'native' ? 'native' : 'no-yank';
-}
-
-async function replaceCellState(
-    doc: vscode.NotebookDocument,
-    cellIndex: number,
-    outputs: vscode.NotebookCellOutput[],
-    runStatus?: 'running' | 'error',
-    executionSummary?: {
-        executionOrder?: number;
-        success?: boolean;
-        timing?: { startTime: number; endTime: number };
-    }
-): Promise<void> {
-    const cell = doc.cellAt(cellIndex);
-    const data = new vscode.NotebookCellData(cell.kind, cell.document.getText(), cell.document.languageId);
-    data.outputs = outputs;
-    data.metadata = withAgentRunStatus(cell.metadata as Record<string, any> | undefined, runStatus);
-    if (executionSummary) {
-        data.executionSummary = executionSummary as vscode.NotebookCellExecutionSummary;
-    } else if (cell.executionSummary) {
-        data.executionSummary = cell.executionSummary;
-    }
-
-    const edit = new vscode.WorkspaceEdit();
-    edit.set(doc.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(cellIndex, cellIndex + 1), [data])]);
-    await vscode.workspace.applyEdit(edit);
-    scheduleNotebookSave(doc);
-}
-
-async function clearAgentRunState(doc: vscode.NotebookDocument, cellIndex: number): Promise<void> {
-    const cell = doc.cellAt(cellIndex);
-    const metadata = withAgentRunStatus(cell.metadata as Record<string, any> | undefined, undefined);
-    const edit = new vscode.WorkspaceEdit();
-    edit.set(doc.uri, [vscode.NotebookEdit.updateCellMetadata(cellIndex, metadata)]);
-    await vscode.workspace.applyEdit(edit);
-    scheduleNotebookSave(doc);
-}
-
-function withAgentRunStatus(
-    existing: Record<string, any> | undefined,
-    runStatus?: 'running' | 'error'
-): Record<string, any> {
-    const metadata = { ...(existing ?? {}) };
-    const custom = { ...(metadata.custom ?? {}) };
-    const agent = { ...(custom['agent-repl'] ?? {}) };
-
-    if (runStatus) {
-        agent.type = agent.type ?? 'agent-run';
-        agent.run_status = runStatus;
-    } else {
-        delete agent.run_status;
-        if (agent.type === 'agent-run') {
-            delete agent.type;
-        }
-    }
-
-    if (Object.keys(agent).length > 0) {
-        custom['agent-repl'] = agent;
-    } else {
-        delete custom['agent-repl'];
-    }
-
-    if (Object.keys(custom).length > 0) {
-        metadata.custom = custom;
-    } else {
-        delete metadata.custom;
-    }
-
-    return metadata;
-}
-
-function isNotebookOutput(value: any): value is vscode.NotebookCellOutput {
-    return !!value && Array.isArray(value.items);
-}
-
-export function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
-    const type = msg?.header?.msg_type;
-    const content = msg?.content ?? {};
-    if (!type) { return undefined; }
-
-    if (type === 'stream') {
-        return {
-            output_type: 'stream',
-            name: content.name,
-            text: content.text ?? '',
-        };
-    }
-
-    if (type === 'execute_result') {
-        return {
-            output_type: 'execute_result',
-            data: content.data ?? {},
-            metadata: content.metadata ?? {},
-            transient: content.transient ?? {},
-            execution_count: content.execution_count,
-        };
-    }
-
-    if (type === 'display_data') {
-        return {
-            output_type: 'display_data',
-            data: content.data ?? {},
-            metadata: content.metadata ?? {},
-            transient: content.transient ?? {},
-        };
-    }
-
-    if (type === 'update_display_data') {
-        return {
-            output_type: 'update_display_data',
-            data: content.data ?? {},
-            metadata: content.metadata ?? {},
-            transient: content.transient ?? {},
-        };
-    }
-
-    if (type === 'clear_output') {
-        return {
-            output_type: 'clear_output',
-            wait: content.wait === true,
-        };
-    }
-
-    if (type === 'error') {
-        return {
-            output_type: 'error',
-            ename: content.ename,
-            evalue: content.evalue,
-            traceback: Array.isArray(content.traceback) ? content.traceback : [],
-        };
-    }
-
-    return undefined;
-}
-
-export function applyNotebookOutput(
-    outputs: vscode.NotebookCellOutput[],
-    next: vscode.NotebookCellOutput
-): vscode.NotebookCellOutput[] {
-    const displayId = getNotebookDisplayId(next);
-    if (!displayId) {
-        return [...outputs, next];
-    }
-
-    const index = outputs.findIndex(output => getNotebookDisplayId(output) === displayId);
-    if (index === -1) {
-        return [...outputs, next];
-    }
-
-    const updated = outputs.slice();
-    updated[index] = next;
-    return updated;
-}
-
-export function applyJupyterOutput(outputs: JupyterOutput[], next: JupyterOutput): JupyterOutput[] {
-    if (next.output_type !== 'update_display_data') {
-        return [...outputs, next];
-    }
-
-    const displayId = getJupyterDisplayId(next);
-    const normalized: JupyterOutput = {
-        ...next,
-        output_type: 'display_data',
-    };
-    if (!displayId) {
-        return [...outputs, normalized];
-    }
-
-    const index = outputs.findIndex(output => getJupyterDisplayId(output) === displayId);
-    if (index === -1) {
-        return [...outputs, normalized];
-    }
-
-    const existing = outputs[index];
-    const updated = outputs.slice();
-    updated[index] = {
-        ...existing,
-        ...normalized,
-        output_type: existing.output_type === 'execute_result' ? 'execute_result' : normalized.output_type,
-        data: normalized.data ?? existing.data,
-        metadata: normalized.metadata ?? existing.metadata,
-        transient: { ...(existing.transient ?? {}), ...(normalized.transient ?? {}) },
-    };
-    return updated;
-}
-
-function getNotebookDisplayId(output: vscode.NotebookCellOutput | undefined): string | undefined {
-    const transient = output?.metadata?.transient;
-    if (transient && typeof transient === 'object' && typeof transient.display_id === 'string') {
-        return transient.display_id;
-    }
-
-    const internal = output?.metadata?.[AGENT_REPL_OUTPUT_METADATA_KEY];
-    if (internal && typeof internal === 'object' && typeof internal.display_id === 'string') {
-        return internal.display_id;
-    }
-
-    return undefined;
-}
-
-function getJupyterDisplayId(output: JupyterOutput | undefined): string | undefined {
-    return typeof output?.transient?.display_id === 'string'
-        ? output.transient.display_id
-        : undefined;
-}
-
-function waitForCompletion(
-    doc: vscode.NotebookDocument,
-    cellIndex: number,
-    timeoutMs: number = 300_000
-): Promise<CompletionReason> {
-    return new Promise((resolve) => {
-        const key = cellKey(doc.uri.fsPath, cellIndex);
-        const initialExecutionOrder = doc.cellAt(cellIndex).executionSummary?.executionOrder ?? null;
-        let done = false;
-
-        const finish = (reason: CompletionReason) => {
-            if (done) { return; }
-            done = true;
-            clearTimeout(timer);
-            clearInterval(poll);
-            completionCallbacks.delete(key);
-            if (reason !== 'completed') {
-                executingCells.delete(key);
-                updateKernelState();
-            }
-            resolve(reason);
-        };
-
-        const poll = setInterval(() => {
-            try {
-                const cell = doc.cellAt(cellIndex);
-                if (executionSummaryIndicatesCompletion(cell.executionSummary, initialExecutionOrder)) {
-                    finish('completed');
-                }
-            } catch {
-                // The cell may disappear during restart or edits; rely on reset/timeout.
-            }
-        }, 200);
-
-        const timer = setTimeout(() => {
-            // Completion event never fired — clean up and unblock the queue
-            finish('timeout');
-        }, timeoutMs);
-        completionCallbacks.set(key, (reason) => {
-            finish(reason);
-        });
-    });
 }
 
 function processNext(path: string): void {
@@ -1318,7 +432,6 @@ function processNext(path: string): void {
     }
 
     const now = Date.now();
-    const beforeCount = queue.length;
     const active = queue.filter(e =>
         e.status === 'queued' || e.status === 'running' ||
         (e.result && now - e.queuedAt.getTime() < 60_000)
@@ -1330,26 +443,20 @@ function processNext(path: string): void {
     const next = active.find(e => e.status === 'queued');
 
     queueDebug(path, 'processNext', {
-        beforeCount,
         activeCount: active.length,
-        prunedCount: beforeCount - active.length,
         nextExecId: next?.id ?? null,
         nextCellId: next?.cellId ?? null,
-        activeEntries: active.map(e => ({ id: e.id, cellId: e.cellId, status: e.status })),
     });
 
     if (!next) { return; }
 
-    // Mark as running BEFORE calling runCell to prevent re-entry loops
     next.status = 'running';
     next.startedAt = new Date();
-
-    queueDebug(path, 'processNext:starting', { execId: next.id, cellId: next.cellId });
 
     const doc = resolveNotebook(path);
     try {
         const idx = resolveCell(doc, { cell_id: next.cellId });
-        runCellEntry(path, doc, idx, next)
+        runDaemonEntry(path, doc, next, idx)
             .then(() => {})
             .catch(() => {});
     } catch {
@@ -1357,22 +464,6 @@ function processNext(path: string): void {
         next.result = { status: 'error', execution_id: next.id, error: 'Cell no longer exists' };
         queueDebug(path, 'processNext:cell-gone', { execId: next.id, cellId: next.cellId });
     }
-}
-
-function executionResultIndicatesError(result: any): boolean {
-    return result?.status === 'error';
-}
-
-function hasErrorOutput(outputs: any[]): boolean {
-    return outputs.some((output) => output?.output_type === 'error');
-}
-
-function getFirstErrorMessage(outputs: any[]): string | undefined {
-    const errorOutput = outputs.find((output) => output?.output_type === 'error');
-    if (!errorOutput) {
-        return undefined;
-    }
-    return errorOutput.evalue || errorOutput.ename || 'Execution failed';
 }
 
 function pauseQueuedBatchEntries(entries: QueueEntry[]): void {
@@ -1402,4 +493,134 @@ function pauseQueuedBatchEntries(entries: QueueEntry[]): void {
             stopped_by_cell_id: haltedBy.cellId,
         };
     }
+}
+
+// -- Output helpers (kept for shared usage) ---------------------------------
+
+export function iopubMessageToJupyterOutput(msg: any): JupyterOutput | undefined {
+    const type = msg?.header?.msg_type;
+    const content = msg?.content ?? {};
+    if (!type) { return undefined; }
+
+    if (type === 'stream') {
+        return { output_type: 'stream', name: content.name, text: content.text ?? '' };
+    }
+    if (type === 'execute_result') {
+        return {
+            output_type: 'execute_result',
+            data: content.data ?? {},
+            metadata: content.metadata ?? {},
+            transient: content.transient ?? {},
+            execution_count: content.execution_count,
+        };
+    }
+    if (type === 'display_data') {
+        return {
+            output_type: 'display_data',
+            data: content.data ?? {},
+            metadata: content.metadata ?? {},
+            transient: content.transient ?? {},
+        };
+    }
+    if (type === 'update_display_data') {
+        return {
+            output_type: 'update_display_data',
+            data: content.data ?? {},
+            metadata: content.metadata ?? {},
+            transient: content.transient ?? {},
+        };
+    }
+    if (type === 'clear_output') {
+        return { output_type: 'clear_output', wait: content.wait === true };
+    }
+    if (type === 'error') {
+        return {
+            output_type: 'error',
+            ename: content.ename,
+            evalue: content.evalue,
+            traceback: Array.isArray(content.traceback) ? content.traceback : [],
+        };
+    }
+    return undefined;
+}
+
+export function applyNotebookOutput(
+    outputs: vscode.NotebookCellOutput[],
+    next: vscode.NotebookCellOutput
+): vscode.NotebookCellOutput[] {
+    const displayId = getNotebookDisplayId(next);
+    if (!displayId) {
+        return [...outputs, next];
+    }
+    const index = outputs.findIndex(output => getNotebookDisplayId(output) === displayId);
+    if (index === -1) {
+        return [...outputs, next];
+    }
+    const updated = outputs.slice();
+    updated[index] = next;
+    return updated;
+}
+
+export function applyJupyterOutput(outputs: JupyterOutput[], next: JupyterOutput): JupyterOutput[] {
+    if (next.output_type !== 'update_display_data') {
+        return [...outputs, next];
+    }
+
+    const displayId = getJupyterDisplayId(next);
+    const normalized: JupyterOutput = { ...next, output_type: 'display_data' };
+    if (!displayId) {
+        return [...outputs, normalized];
+    }
+
+    const index = outputs.findIndex(output => getJupyterDisplayId(output) === displayId);
+    if (index === -1) {
+        return [...outputs, normalized];
+    }
+
+    const existing = outputs[index];
+    const updated = outputs.slice();
+    updated[index] = {
+        ...existing,
+        ...normalized,
+        output_type: existing.output_type === 'execute_result' ? 'execute_result' : normalized.output_type,
+        data: normalized.data ?? existing.data,
+        metadata: normalized.metadata ?? existing.metadata,
+        transient: { ...(existing.transient ?? {}), ...(normalized.transient ?? {}) },
+    };
+    return updated;
+}
+
+function getNotebookDisplayId(output: vscode.NotebookCellOutput | undefined): string | undefined {
+    const transient = output?.metadata?.transient;
+    if (transient && typeof transient === 'object' && typeof transient.display_id === 'string') {
+        return transient.display_id;
+    }
+    const internal = output?.metadata?.[AGENT_REPL_OUTPUT_METADATA_KEY];
+    if (internal && typeof internal === 'object' && typeof internal.display_id === 'string') {
+        return internal.display_id;
+    }
+    return undefined;
+}
+
+function getJupyterDisplayId(output: JupyterOutput | undefined): string | undefined {
+    return typeof output?.transient?.display_id === 'string'
+        ? output.transient.display_id
+        : undefined;
+}
+
+// -- Jupyter API (kept for kernel selection in routes.ts) -------------------
+
+let cachedJupyterApi: any | undefined;
+
+export async function getJupyterApi(): Promise<any | undefined> {
+    if (cachedJupyterApi) { return cachedJupyterApi; }
+    const jupyterExt = vscode.extensions.getExtension('ms-toolsai.jupyter');
+    if (!jupyterExt) { return undefined; }
+    cachedJupyterApi = jupyterExt.isActive ? jupyterExt.exports : await jupyterExt.activate();
+    return cachedJupyterApi;
+}
+
+export function resetJupyterApiCache(): void {
+    // Only the extension object cache; execution is now daemon-routed.
+    cachedJupyterApi = undefined;
 }

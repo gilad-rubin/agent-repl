@@ -7,7 +7,7 @@ import { resolveNotebook, resolveNotebookUri, resolveOrOpenNotebook, findOpenNot
 import { applyEdits, EditOp } from './notebook/operations';
 import { getCellId, ensureIds, resolveCell, withCellId, newCellId } from './notebook/identity';
 import { toJupyter, stripForAgent } from './notebook/outputs';
-import { executeCell, getExecution, getStatus, insertAndExecute, resetExecutionState, resetJupyterApiCache, getJupyterApi, startExecution, startNotebookExecutionAll } from './execution/queue';
+import { getExecution, getStatus, resetExecutionState, resetJupyterApiCache, getJupyterApi, startExecution, startNotebookExecutionAll, insertAndExecute } from './execution/queue';
 import { isCanvasNotebookOpen, listOpenCanvasNotebookPaths } from './editor/provider';
 
 type KernelRecord = {
