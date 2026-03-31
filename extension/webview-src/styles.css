@@ -837,6 +837,118 @@ body { margin: 0; }
   box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12);
 }
 
+/* Dark mode: output areas */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-OutputArea-output,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-OutputArea-output {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--cds-text-primary);
+}
+
+/* Dark mode: output text, pre blocks, rendered content */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-OutputArea-output pre,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-OutputArea-output pre,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedText pre,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedText pre {
+  background: transparent;
+  color: var(--cds-text-primary);
+  border: none;
+}
+
+/* Dark mode: prompts ([ ]:, [1]:) */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-InputPrompt,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-InputPrompt,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-OutputPrompt,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-OutputPrompt {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+/* Dark mode: gutters */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-gutters,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-gutters {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border-color: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.3);
+}
+
+/* Dark mode: cell left indicator */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-Cell::before,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-Cell::before {
+  background: transparent;
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-active::before,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-Cell.jp-mod-active::before {
+  background: linear-gradient(180deg, #d97706, #f59e0b);
+}
+
+/* Dark mode: tables in output */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon table,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon table {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--cds-text-primary);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon th,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon th {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon td,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon td {
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Dark mode: cell border default */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-Cell,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-Cell {
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Dark mode: status bar icons */
+[data-carbon-theme="g100"] .agent-repl-cell-status,
+[data-carbon-theme="g90"] .agent-repl-cell-status {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Dark mode: active line */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-activeLine,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-activeLine {
+  background: rgba(217, 119, 6, 0.1) !important;
+}
+
+/* Dark mode: selection */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-selectionBackground,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-selectionBackground,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-focused .cm-selectionBackground,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-focused .cm-selectionBackground {
+  background: rgba(217, 119, 6, 0.2) !important;
+}
+
+/* Dark mode: rendered markdown */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon p,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon p,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon ul,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon ul,
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon ol,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon ol {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon code,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedHTMLCommon code {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--cds-text-primary);
+}
+
+/* Dark mode: error output */
+[data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .jp-RenderedText[data-mime-type="application/vnd.jupyter.stderr"] pre,
+[data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .jp-RenderedText[data-mime-type="application/vnd.jupyter.stderr"] pre {
+  background: rgba(225, 29, 72, 0.08);
+  color: #fca5a5;
+}
+
 [data-carbon-theme="g100"] .agent-repl-jupyterlab-notebook .cm-gutters,
 [data-carbon-theme="g90"] .agent-repl-jupyterlab-notebook .cm-gutters {
   border-right-color: rgba(235, 229, 219, 0.06);
