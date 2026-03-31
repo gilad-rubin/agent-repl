@@ -1932,6 +1932,11 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         if (disposed) {
           return;
         }
+        // Activate the first code cell (not markdown) so Shift+Enter runs immediately
+        const firstCodeIndex = notebook.widgets.findIndex(w => w.model.type === 'code');
+        if (firstCodeIndex >= 0) {
+          notebook.activeCellIndex = firstCodeIndex;
+        }
         focusNotebookCommandSelection(notebook);
       });
 
