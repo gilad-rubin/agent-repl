@@ -114,6 +114,33 @@ These commands require the VS Code / Cursor extension: `respond`, `kernels`, `re
 
 `agent-repl editor configure --default-canvas` only writes workspace settings. It does not install the extension for the user.
 
+## Canvas Keyboard Shortcuts
+
+| Shortcut | Mode | Action |
+|---|---|---|
+| Shift+Enter | Any | Run cell and advance |
+| Cmd+Enter | Any | Run cell in place |
+| Alt+Enter | Any | Run cell and insert below |
+| Cmd+S | Any | Save notebook |
+| Escape | Edit | Enter command mode |
+| Enter | Command | Enter edit mode |
+| A | Command | Insert cell above |
+| B | Command | Insert cell below |
+| D, D | Command | Delete selected cells |
+| M | Command | Change cell to markdown |
+| Y | Command | Change cell to code |
+| Z | Command | Undo notebook structure |
+| Shift+Z | Command | Redo notebook structure |
+| Arrow Up / K | Command | Select cell above |
+| Arrow Down / J | Command | Select cell below |
+| Cmd+Shift+ArrowUp | Command | Move cell up |
+| Cmd+Shift+ArrowDown | Command | Move cell down |
+| Cmd+A | Command | Select all cells |
+| Cmd+F | Edit | Search within cell (CodeMirror) |
+| Cmd+Z / Cmd+Shift+Z | Edit | Undo / redo cell source |
+
+The toolbar also provides a **Clear Outputs** button to clear all cell outputs and reset execution indicators.
+
 ## Troubleshooting
 
 - **Need a cell ID:** `agent-repl cat notebook.ipynb --no-outputs`

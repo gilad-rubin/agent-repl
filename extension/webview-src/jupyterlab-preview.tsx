@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { autocompletion } from '@codemirror/autocomplete';
 import { globalCompletion, localCompletionSource } from '@codemirror/lang-python';
+import { search as searchExtension } from '@codemirror/search';
 import { CommandRegistry } from '@lumino/commands';
 import { Widget } from '@lumino/widgets';
 import { Theme } from '@carbon/react';
 import {
   ChevronDown,
   ChevronRight,
+  Erase,
   Folder,
   FolderOpen,
   Notebook as NotebookIcon,
@@ -78,6 +80,7 @@ type NotebookEditOperation = Record<string, unknown>;
 
 type StructureUndoEntry = {
   inverseOperations: NotebookEditOperation[];
+  forwardOperations?: NotebookEditOperation[];
   successLabel: string;
 };
 
@@ -115,6 +118,7 @@ type JupyterLabPreviewDebugWindow = Window & {
     focusNotebook: () => void;
     getPendingCommandCount: () => number;
     getUndoDepth: () => number;
+    getRedoDepth: () => number;
   };
 };
 
@@ -151,6 +155,8 @@ const COMMAND_IDS = {
   runAll: 'agent-repl:notebook-run-all',
   save: 'agent-repl:notebook-save',
   undoNotebook: 'agent-repl:notebook-undo',
+  redoNotebook: 'agent-repl:notebook-redo',
+  clearAllOutputs: 'agent-repl:notebook-clear-all-outputs',
 } as const;
 
 function createToolbarButtonBaseStyle(): React.CSSProperties {
@@ -702,6 +708,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
   const pendingExecutionRef = useRef(false);
   const runtimeBusyRef = useRef(false);
   const structureUndoStackRef = useRef<StructureUndoEntry[]>([]);
+  const structureRedoStackRef = useRef<StructureUndoEntry[]>([]);
   const contentsRequestSeqRef = useRef(0);
   const appliedDocumentVersionRef = useRef(0);
   const appliedTrustSignatureRef = useRef('');
@@ -1013,6 +1020,22 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     displayIdMapRef.current.delete(cellId);
   }, []);
 
+  const clearAllOutputs = useCallback(() => {
+    const model = modelRef.current;
+    if (!model) return;
+    for (let i = 0; i < model.cells.length; i++) {
+      const cellModel = model.cells.get(i);
+      if (!cellModel || cellModel.type !== 'code') continue;
+      const codeModel = cellModel as unknown as { outputs: { clear: (wait?: boolean) => void }; executionCount: number | null };
+      codeModel.outputs.clear();
+      codeModel.executionCount = null;
+    }
+    displayIdMapRef.current.clear();
+    executedCellIdsRef.current.clear();
+    setCellModelVersion((v) => v + 1);
+    showToolbarStatus('Cleared all outputs');
+  }, [showToolbarStatus]);
+
   const applyIOPubMessage = useCallback((msg: any) => {
     const model = modelRef.current;
     if (!model) return;
@@ -1297,8 +1320,10 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     if (options?.recordUndo !== false && options?.inverseOperations && options.inverseOperations.length > 0) {
       structureUndoStackRef.current.push({
         inverseOperations: options.inverseOperations,
+        forwardOperations: operations,
         successLabel,
       });
+      structureRedoStackRef.current = [];
     }
     showToolbarStatus(successLabel);
   }, [loadContents, currentNotebookPath, showToolbarStatus, syncSnapshotFromModel]);
@@ -1346,6 +1371,18 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     }
     const insertedCell = afterCells[insertedIndex];
     const successLabel = position === 'above' ? 'Inserted cell above' : 'Inserted cell below';
+    const forwardOps: NotebookEditOperation[] = [
+      {
+        op: 'insert',
+        at_index: insertedIndex,
+        cell_type: insertedCell.cell_type === 'markdown' ? 'markdown' : 'code',
+        cell_id: insertedCell.cell_id,
+        source: insertedCell.source,
+        metadata: insertedCell.metadata ?? {},
+        outputs: insertedCell.outputs ?? [],
+        execution_count: insertedCell.execution_count ?? null,
+      },
+    ];
     const undoEntry = {
       inverseOperations: [
         {
@@ -1353,22 +1390,13 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           cell_index: insertedIndex,
         },
       ],
+      forwardOperations: forwardOps,
       successLabel,
     } satisfies StructureUndoEntry;
     structureUndoStackRef.current.push(undoEntry);
+    structureRedoStackRef.current = [];
     try {
-      await persistStructureOperations([
-        {
-          op: 'insert',
-          at_index: insertedIndex,
-          cell_type: insertedCell.cell_type === 'markdown' ? 'markdown' : 'code',
-          cell_id: insertedCell.cell_id,
-          source: insertedCell.source,
-          metadata: insertedCell.metadata ?? {},
-          outputs: insertedCell.outputs ?? [],
-          execution_count: insertedCell.execution_count ?? null,
-        },
-      ], successLabel, {
+      await persistStructureOperations(forwardOps, successLabel, {
         recordUndo: false,
       });
     } catch (error) {
@@ -1551,9 +1579,59 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       applyingNotebookActionRef.current = false;
     }
 
+    if (undoEntry.forwardOperations) {
+      structureRedoStackRef.current.push({
+        inverseOperations: undoEntry.inverseOperations,
+        forwardOperations: undoEntry.forwardOperations,
+        successLabel: undoEntry.successLabel,
+      });
+    }
+
     await persistStructureOperations(
       undoEntry.inverseOperations,
       `Undid ${undoEntry.successLabel.toLowerCase()}`,
+      { recordUndo: false },
+    );
+    focusNotebookCommandSelection(notebook);
+  }, [applyRemoteCells, flushAutosave, persistStructureOperations, showToolbarStatus]);
+
+  const redoNotebookStructure = useCallback(async () => {
+    const notebook = notebookRef.current;
+    const model = modelRef.current;
+    if (!notebook || !model) {
+      return;
+    }
+
+    const saved = await flushAutosave();
+    if (!saved) {
+      return;
+    }
+
+    const redoEntry = structureRedoStackRef.current.pop();
+    if (!redoEntry) {
+      showToolbarStatus('Nothing to redo', 1200);
+      focusNotebookCommandSelection(notebook);
+      return;
+    }
+
+    applyingNotebookActionRef.current = true;
+    try {
+      const currentCells = notebookCellsFromWidgets(notebook, model);
+      const nextCells = applyNotebookOperationsToCells(currentCells, redoEntry.forwardOperations!);
+      applyRemoteCells(nextCells);
+    } finally {
+      applyingNotebookActionRef.current = false;
+    }
+
+    structureUndoStackRef.current.push({
+      inverseOperations: redoEntry.inverseOperations,
+      forwardOperations: redoEntry.forwardOperations,
+      successLabel: redoEntry.successLabel,
+    });
+
+    await persistStructureOperations(
+      redoEntry.forwardOperations!,
+      `Redid ${redoEntry.successLabel.toLowerCase()}`,
       { recordUndo: false },
     );
     focusNotebookCommandSelection(notebook);
@@ -1702,6 +1780,14 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         reconfigure: () => null,
       }),
     });
+    extensions.addExtension({
+      name: 'agent-repl-search',
+      default: true,
+      factory: () => ({
+        instance: () => searchExtension(),
+        reconfigure: () => null,
+      }),
+    });
     const editorFactory = new CodeMirrorEditorFactory({ languages, extensions, translator });
     const mimeTypeService = new CodeMirrorMimeTypeService(languages);
     const widgetManager = new HTMLManager();
@@ -1787,6 +1873,8 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     addCommand(COMMAND_IDS.runAll, wrapCommand(() => executeAll()));
     addCommand(COMMAND_IDS.save, wrapCommand(() => flushAutosave({ announce: true })));
     addCommand(COMMAND_IDS.undoNotebook, wrapCommand(() => undoNotebookStructure()));
+    addCommand(COMMAND_IDS.redoNotebook, wrapCommand(() => redoNotebookStructure()));
+    addCommand(COMMAND_IDS.clearAllOutputs, wrapCommand(() => clearAllOutputs()));
 
     const bindCommand = (command: string, keys: string[] | string, selector: string) => {
       commands.addKeyBinding({
@@ -1815,6 +1903,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     bindCommand(COMMAND_IDS.changeToCode, 'Y', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
     bindCommand(COMMAND_IDS.deleteCells, ['D', 'D'], `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
     bindCommand(COMMAND_IDS.undoNotebook, 'Z', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.redoNotebook, 'Shift Z', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
     bindCommand(COMMAND_IDS.moveUp, 'Accel Shift ArrowUp', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
     bindCommand(COMMAND_IDS.moveDown, 'Accel Shift ArrowDown', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
 
@@ -1824,6 +1913,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       focusNotebook: () => focusNotebookCommandSelection(notebook),
       getPendingCommandCount: () => pendingNotebookCommandCountRef.current,
       getUndoDepth: () => structureUndoStackRef.current.length,
+      getRedoDepth: () => structureRedoStackRef.current.length,
     };
 
     const handleModelChanged = () => {
@@ -1953,6 +2043,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           if (normalizedKey === 'z' && !event.shiftKey) {
             return COMMAND_IDS.undoNotebook;
           }
+          if (normalizedKey === 'z' && event.shiftKey) {
+            return COMMAND_IDS.redoNotebook;
+          }
           return null;
         })();
         if (directCommand) {
@@ -1971,6 +2064,18 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       ) {
         event.preventDefault();
         void commands.execute(COMMAND_IDS.undoNotebook);
+        return;
+      }
+      if (
+        notebook.mode === 'command'
+        && normalizedKey === 'z'
+        && event.shiftKey
+        && !event.altKey
+        && !event.ctrlKey
+        && !event.metaKey
+      ) {
+        event.preventDefault();
+        void commands.execute(COMMAND_IDS.redoNotebook);
         return;
       }
       commands.processKeydownEvent(event);
@@ -2069,7 +2174,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       setSurfaceReady(false);
       mountNode.textContent = '';
     };
-  }, [changeSelectedCellType, deleteSelectedCells, executeActiveCell, executeAll, flushAutosave, initialCells, initialDocumentVersion, initialNotebookMetadata, initialTrustSnapshot, insertRelativeCell, moveSelectedCell, scheduleAutosave, undoNotebookStructure]);
+  }, [changeSelectedCellType, clearAllOutputs, deleteSelectedCells, executeActiveCell, executeAll, flushAutosave, initialCells, initialDocumentVersion, initialNotebookMetadata, initialTrustSnapshot, insertRelativeCell, moveSelectedCell, redoNotebookStructure, scheduleAutosave, undoNotebookStructure]);
 
   // Global Cmd+S handler — independent of notebook lifecycle
   useEffect(() => {
@@ -2139,20 +2244,25 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         return bar;
       };
 
+      // Skip empty cells — no status for cells with no source
+      const cellSource = (cellModel.sharedModel as any).getSource?.() ?? '';
+      if (!cellSource.trim()) {
+        if (bar) bar.remove();
+        widget.node.removeAttribute('data-cell-executing');
+        continue;
+      }
+
       if (isRunning || isQueued) {
-        // Active execution — always show
         if (isRunning) {
           ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-running';
-          bar!.innerHTML = '<span class="agent-repl-cell-status-spinner"></span><span>Running</span>';
+          bar!.innerHTML = '<span class="agent-repl-cell-status-spinner"></span>';
         } else {
           ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-queued';
-          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 4.5H12.5M3.5 8H9.5M3.5 11.5H8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Queued</span>';
+          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-dasharray="3 3"/></svg>';
         }
       } else if (kernelRestarted) {
-        // Kernel restarted — clear all stale statuses
         if (bar) bar.remove();
       } else {
-        // No active execution, no restart — show completed/error from outputs or execution history
         const hasError = (cellModel as any).executionCount != null
           && Array.isArray((cellModel.toJSON() as any).outputs)
           && (cellModel.toJSON() as any).outputs.some((o: any) => o.output_type === 'error');
@@ -2163,10 +2273,10 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
 
         if (hasError) {
           ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-failed';
-          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Error</span>';
+          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
         } else if (hasOutput || wasExecuted) {
           ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-completed';
-          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Completed</span>';
+          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
         } else if (bar) {
           bar.remove();
         }
@@ -2188,6 +2298,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       setSurfaceReady(false);
       setToolbarStatus(null);
       structureUndoStackRef.current = [];
+      structureRedoStackRef.current = [];
       contentsRequestSeqRef.current = 0;
       appliedDocumentVersionRef.current = 0;
       appliedTrustSignatureRef.current = '';
@@ -2680,6 +2791,16 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
               >
                 <Restart size={14} />
                 <span>Restart &amp; Run All</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => clearAllOutputs()}
+                aria-label="Clear All Outputs"
+                title="Clear All Outputs"
+                style={tbGhostStrong}
+              >
+                <Erase size={14} />
+                <span>Clear Outputs</span>
               </button>
               <span style={{ width: 1, height: 16, background: 'var(--cds-border-subtle)', margin: '0 8px', flexShrink: 0 }} />
               <div role="group" aria-label="Theme mode" style={tbSegmentGroup}>
