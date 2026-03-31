@@ -1540,13 +1540,13 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       }
     }
 
-    // Fire execution request without blocking — output arrives via WebSocket
-    postJson('/api/standalone/notebook/execute-cell', {
+    // Fire async execution — returns immediately, output arrives via WebSocket
+    postJson('/api/standalone/notebook/execute-cell-async', {
       client_id: PREVIEW_CLIENT_ID,
       path: currentNotebookPath,
       cell_id: activeCell.cell_id,
       cell_index: activeIndex,
-    }).then(() => Promise.all([loadRuntime(), loadContents()])).catch(() => {});
+    }).then(() => loadRuntime()).catch(() => {});
   }, [flushAutosave, insertRelativeCell, loadContents, loadRuntime, currentNotebookPath]);
 
   const executeAll = useCallback(async () => {
@@ -2184,7 +2184,11 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       fetchFn: window.fetch.bind(window),
       onMessage: (msg: any) => {
         const events: Array<{ type: string }> = msg ? [msg] : [];
-        if (msg.runtime) {
+        const isExecutionEvent = msg.type === 'execution-started'
+          || msg.type === 'execution-finished'
+          || msg.type === 'cell-output-appended'
+          || msg.type === 'cell-outputs-updated';
+        if (msg.runtime || isExecutionEvent) {
           void loadRuntime();
         }
         if (shouldReloadStandaloneNotebookContents(events)) {

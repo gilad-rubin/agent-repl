@@ -31,6 +31,9 @@ export function shouldReloadStandaloneNotebookContents(events: ActivityEventLike
     return events.some((event) => (
         event.type === 'cell-source-updated'
         || event.type === 'cell-executed'
+        || event.type === 'cell-output-appended'
+        || event.type === 'cell-outputs-updated'
+        || event.type === 'execution-started'
         || event.type === 'execution-finished'
         || event.type === 'execution'
         || isNotebookStructureReloadEvent(event.type)
