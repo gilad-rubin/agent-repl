@@ -92,6 +92,17 @@ When onboarding a fresh workspace, prefer `agent-repl setup --smoke-test` over m
 - If no `.venv` exists, pass `--kernel` explicitly.
 - `select-kernel` changes the active kernel; subsequent runs use the selected kernel.
 
+## MCP Surface (for agents)
+
+The daemon exposes 6 bundled MCP tools at `/mcp`:
+
+- **`notebook_observe`** — Read notebook state. `aspect`: `cells`, `summary`, `queue`, `search`, `activity`, `projection`.
+- **`notebook_edit`** — Edit notebook structure. `action`: `edit` (with operations array), `create`.
+- **`notebook_execute`** — Run cells. `action`: `cell`, `all`, `insert-and-execute`, `interrupt`, `restart`, `restart-and-run-all`.
+- **`notebook_runtime`** — Manage kernels. `action`: `select-kernel`, `status`, `list-runtimes`, `start`, `stop`, `recover`.
+- **`workspace_files`** — List and open documents. `action`: `list`, `open`.
+- **`checkpoint`** — Snapshot/restore. `action`: `create`, `restore`, `list`, `delete`.
+
 ## Session Ownership
 
 - `ix`, `edit`, `exec`, `run-all`, and `restart-run-all` automatically reuse the active human session when `--session-id` is omitted.
