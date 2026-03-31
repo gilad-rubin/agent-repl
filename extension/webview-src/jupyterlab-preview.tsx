@@ -2299,9 +2299,30 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         if (!bar) {
           bar = document.createElement('div');
           bar.className = 'agent-repl-cell-status';
-          widget.node.appendChild(bar);
+          // Insert between input and output areas (not at the end)
+          const outputWrapper = widget.node.querySelector('.jp-Cell-outputWrapper');
+          if (outputWrapper) {
+            widget.node.insertBefore(bar, outputWrapper);
+          } else {
+            const inputWrapper = widget.node.querySelector('.jp-Cell-inputWrapper');
+            if (inputWrapper && inputWrapper.nextSibling) {
+              widget.node.insertBefore(bar, inputWrapper.nextSibling);
+            } else {
+              widget.node.appendChild(bar);
+            }
+          }
         }
         return bar;
+      };
+
+      const setBarContent = (className: string, html: string) => {
+        const b = ensureBar();
+        if (b.className !== className) b.className = className;
+        // Only update innerHTML if content changed — avoids restarting CSS animations
+        if (b.getAttribute('data-status-html') !== html) {
+          b.innerHTML = html;
+          b.setAttribute('data-status-html', html);
+        }
       };
 
       // Skip empty cells — no status for cells with no source
@@ -2314,11 +2335,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
 
       if (isRunning || isQueued) {
         if (isRunning) {
-          ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-running';
-          bar!.innerHTML = '<span class="agent-repl-cell-status-spinner"></span>';
+          setBarContent('agent-repl-cell-status agent-repl-cell-status-running', '<span class="agent-repl-cell-status-spinner"></span>');
         } else {
-          ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-queued';
-          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-dasharray="3 3"/></svg>';
+          setBarContent('agent-repl-cell-status agent-repl-cell-status-queued', '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-dasharray="3 3"/></svg>');
         }
       } else if (kernelRestarted) {
         if (bar) bar.remove();
@@ -2332,11 +2351,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         const wasExecuted = executedCellIdsRef.current.has(cellId);
 
         if (hasError) {
-          ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-failed';
-          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+          setBarContent('agent-repl-cell-status agent-repl-cell-status-failed', '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>');
         } else if (hasOutput || wasExecuted) {
-          ensureBar().className = 'agent-repl-cell-status agent-repl-cell-status-completed';
-          bar!.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+          setBarContent('agent-repl-cell-status agent-repl-cell-status-completed', '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>');
         } else if (bar) {
           bar.remove();
         }
