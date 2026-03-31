@@ -695,6 +695,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
   const autoSaveTimerRef = useRef<number | null>(null);
   const displayIdMapRef = useRef<Map<string, Map<string, number[]>>>(new Map());
   const [cellModelVersion, setCellModelVersion] = useState(0);
+  const executedCellIdsRef = useRef<Set<string>>(new Set());
   const toolbarStatusTimerRef = useRef<number | null>(null);
   const applyingRemoteRef = useRef(false);
   const applyingNotebookActionRef = useRef(false);
@@ -2100,6 +2101,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     // Detect kernel restart — clear all status bars when generation changes
     const kernelRestarted = runtime.kernel_generation !== lastKernelGenerationRef.current
       && lastKernelGenerationRef.current !== 0;
+    if (kernelRestarted) {
+      executedCellIdsRef.current.clear();
+    }
     lastKernelGenerationRef.current = runtime.kernel_generation;
 
     for (let i = 0; i < notebook.widgets.length; i++) {
@@ -2147,13 +2151,14 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         // Kernel restarted — clear all stale statuses
         if (bar) bar.remove();
       } else {
-        // No active execution, no restart — show completed/error from outputs
+        // No active execution, no restart — show completed/error from outputs or execution history
         const hasError = (cellModel as any).executionCount != null
           && Array.isArray((cellModel.toJSON() as any).outputs)
           && (cellModel.toJSON() as any).outputs.some((o: any) => o.output_type === 'error');
         const hasOutput = (cellModel as any).executionCount != null
           && Array.isArray((cellModel.toJSON() as any).outputs)
           && (cellModel.toJSON() as any).outputs.length > 0;
+        const wasExecuted = executedCellIdsRef.current.has(cellId);
 
         if (hasError) {
           if (!bar) {
@@ -2163,7 +2168,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           }
           bar.className = 'agent-repl-cell-status agent-repl-cell-status-failed';
           bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Error</span>';
-        } else if (hasOutput) {
+        } else if (hasOutput || wasExecuted) {
           if (!bar) {
             bar = document.createElement('div');
             bar.className = 'agent-repl-cell-status';
@@ -2277,8 +2282,13 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         }
         if (msgType === 'execution-started' && msg.cell_id) {
           clearCellOutputs(msg.cell_id);
+          executedCellIdsRef.current.add(msg.cell_id);
+          setCellModelVersion((v) => v + 1);
           void loadRuntime();
           return;
+        }
+        if (msgType === 'execution-finished' && msg.cell_id) {
+          executedCellIdsRef.current.add(msg.cell_id);
         }
 
         // Non-streaming events: full refresh for reconciliation
