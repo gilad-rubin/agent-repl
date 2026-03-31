@@ -389,13 +389,6 @@ type NotebookProjectionState = {
     } | null;
 };
 
-type NotebookActivityState = {
-    status: string;
-    path: string;
-    cursor?: number;
-    recent_events?: NotebookActivityEvent[];
-};
-
 type NotebookActivityEvent = {
     event_id?: string;
     type?: string;

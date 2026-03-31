@@ -167,9 +167,6 @@ function loadExtensionModule() {
         if (request === './activity/panel') {
             return { ActivityPanelProvider: class ActivityPanelProvider {} };
         }
-        if (request === './execution/queue') {
-            return { initExecutionMonitor: () => ({ dispose() {} }) };
-        }
         if (request === './session') {
             return { SessionAutoAttach: FakeSessionAutoAttach, HeadlessNotebookProjection: FakeHeadlessNotebookProjection };
         }

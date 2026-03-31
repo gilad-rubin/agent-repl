@@ -6,7 +6,6 @@ import { writeConnectionFile, removeConnectionFile, generateToken } from './disc
 import { PromptStatusBarProvider } from './prompts/statusBar';
 import { insertPromptCell } from './prompts/commands';
 import { ActivityPanelProvider } from './activity/panel';
-import { initExecutionMonitor } from './execution/queue';
 import { HeadlessNotebookProjection, SessionAutoAttach } from './session';
 import { CanvasEditorProvider } from './editor/provider';
 import { logNotebookDiagnostic } from './debug';
@@ -14,7 +13,6 @@ import { logNotebookDiagnostic } from './debug';
 let server: BridgeServer | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext | undefined;
-let executionMonitorDisposable: vscode.Disposable | undefined;
 let sessionAutoAttach: SessionAutoAttach | undefined;
 let headlessProjection: HeadlessNotebookProjection | undefined;
 let canvasEditorProvider: CanvasEditorProvider | undefined;
@@ -34,10 +32,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(statusBarItem);
     context.subscriptions.push(sessionAutoAttach);
     context.subscriptions.push(headlessProjection);
-
-    // Execution monitor (watches cell executionSummary for completion detection)
-    executionMonitorDisposable = initExecutionMonitor();
-    context.subscriptions.push(executionMonitorDisposable);
 
     // Prompt badges
     const promptProvider = new PromptStatusBarProvider();
@@ -136,14 +130,9 @@ async function startBridge(
             }
         }
         const fresh = require('./routes') as { buildRoutes: typeof buildRoutes };
-        const freshQueue = require('./execution/queue') as { initExecutionMonitor: typeof initExecutionMonitor };
         const newRoutes = fresh.buildRoutes(maxQueue);
         newRoutes['POST /api/reload'] = server!.getRoute('POST /api/reload')!;
         server!.setRoutes(newRoutes);
-
-        executionMonitorDisposable?.dispose();
-        executionMonitorDisposable = freshQueue.initExecutionMonitor();
-        extensionContext?.subscriptions.push(executionMonitorDisposable);
 
         return {
             status: 'ok',

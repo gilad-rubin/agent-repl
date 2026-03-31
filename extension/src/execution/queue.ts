@@ -44,29 +44,6 @@ interface PreparedExecutionContext {
 // Per-notebook queues
 const queues = new Map<string, QueueEntry[]>();
 
-/**
- * Initialize execution monitoring.
- * With daemon-routed execution, the daemon pushes state via WebSocket.
- * This monitor is kept as a no-op disposable for extension.ts compatibility.
- */
-export function initExecutionMonitor(): vscode.Disposable {
-    // Daemon-routed execution tracks state via WebSocket events.
-    // Return a no-op disposable for extension.ts compatibility.
-    return { dispose() {} } as vscode.Disposable;
-}
-
-export function executionSummaryIndicatesCompletion(
-    summary: vscode.NotebookCellExecutionSummary | null | undefined,
-    initialExecutionOrder?: number | null
-): boolean {
-    if (!summary) { return false; }
-    if (typeof summary.success === 'boolean') { return true; }
-    if (typeof summary.timing?.endTime === 'number') { return true; }
-    return initialExecutionOrder !== undefined &&
-        typeof summary.executionOrder === 'number' &&
-        summary.executionOrder !== initialExecutionOrder;
-}
-
 /** Reset execution tracking state. */
 export function resetExecutionState(
     fsPath?: string,
