@@ -1716,6 +1716,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     setError(null);
     pendingExecutionRef.current = true;
 
+    // Clear previous outputs immediately before re-execution
+    clearCellOutputs(cellId);
+
     // Advance to next cell IMMEDIATELY — don't wait for execution
     if (mode === 'insert') {
       await insertRelativeCell('below', { switchToEdit: true });
@@ -1748,12 +1751,34 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     }
     setError(null);
     pendingExecutionRef.current = true;
-    await postJson('/api/standalone/notebook/execute-all-async', {
+
+    // Optimistically mark all code cells as queued
+    const model = modelRef.current;
+    const notebook = notebookRef.current;
+    if (model && notebook) {
+      const queuedIds: string[] = [];
+      for (let i = 0; i < model.cells.length; i++) {
+        const cellModel = model.cells.get(i);
+        if (cellModel?.type === 'code') {
+          const cellId = typeof (cellModel.sharedModel as any).getId === 'function'
+            ? (cellModel.sharedModel as any).getId() : '';
+          const src = (cellModel.sharedModel as any).getSource?.() ?? '';
+          if (cellId && src.trim()) {
+            queuedIds.push(cellId);
+            clearCellOutputs(cellId);
+          }
+        }
+      }
+      // Set optimistic queued state — will be overridden by real WS events
+      setRuntime((prev) => ({ ...prev, queued_cell_ids: queuedIds, running_cell_ids: [] }));
+    }
+
+    // Fire-and-forget — WS events manage running/queued state transitions
+    postJson('/api/standalone/notebook/execute-all-async', {
       client_id: PREVIEW_CLIENT_ID,
       path: currentNotebookPath,
-    });
-    await loadRuntime();
-  }, [flushAutosave, loadRuntime, currentNotebookPath]);
+    }).catch(() => {});
+  }, [clearCellOutputs, flushAutosave, currentNotebookPath]);
 
   const restartKernel = useCallback(async () => {
     if (!currentNotebookPath) {
@@ -2482,18 +2507,29 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         if (msgType === 'execution-started' && msg.cell_id) {
           clearCellOutputs(msg.cell_id);
           executedCellIdsRef.current.add(msg.cell_id);
+          // Move cell from queued to running (preserves optimistic queue for Run All)
+          setRuntime((prev) => ({
+            ...prev,
+            running_cell_ids: [msg.cell_id],
+            queued_cell_ids: prev.queued_cell_ids.filter((id: string) => id !== msg.cell_id),
+          }));
           setCellModelVersion((v) => v + 1);
-          void loadRuntime();
           return;
         }
         if (msgType === 'execution-finished' && msg.cell_id) {
           executedCellIdsRef.current.add(msg.cell_id);
+          // Remove from running, keep remaining queued
+          setRuntime((prev) => ({
+            ...prev,
+            running_cell_ids: prev.running_cell_ids.filter((id: string) => id !== msg.cell_id),
+          }));
+          setCellModelVersion((v) => v + 1);
         }
 
         // Non-streaming events: full refresh for reconciliation
         const isExecutionFinished = msgType === 'execution-finished'
           || msgType === 'cell-outputs-updated';
-        if (msg.runtime || isExecutionFinished) {
+        if (msg.runtime) {
           void loadRuntime();
         }
         if (isExecutionFinished) {
