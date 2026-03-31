@@ -133,7 +133,7 @@ async function openNotebookPage(notebookPath) {
         origin: new URL(previewUrl).origin,
     });
     const page = await context.newPage();
-    const targetUrl = `${previewUrl}?path=${encodeURIComponent(notebookPath)}&surface=jupyterlab`;
+    const targetUrl = `${previewUrl}?path=${encodeURIComponent(notebookPath)}`;
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
     await waitForJupyterLabReady(page);
     return { context, page };

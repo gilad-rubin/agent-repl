@@ -1199,7 +1199,7 @@ const showAgentation = isBrowserCanvas && (standaloneConfig?.features.agentation
 const requestedSurface = isBrowserCanvas
   ? (new URLSearchParams(window.location.search).get('surface')?.trim().toLowerCase() ?? '')
   : '';
-const useJupyterLabPreviewSurface = isBrowserCanvas && requestedSurface === 'jupyterlab';
+const useJupyterLabPreviewSurface = isBrowserCanvas && requestedSurface !== 'legacy';
 
 marked.use({
   gfm: true,

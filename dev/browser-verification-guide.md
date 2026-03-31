@@ -113,7 +113,7 @@ For `Run All` or `Restart and Run All`, verify:
 
 For the JupyterLab surface preview:
 
-- open `http://127.0.0.1:4176/preview.html?path=tmp-browser-jupyterlab-verify.ipynb&surface=jupyterlab`
+- open `http://127.0.0.1:4176/preview.html?path=tmp-browser-jupyterlab-verify.ipynb` (JupyterLab is the default surface; append `&surface=legacy` to test the old canvas)
 - wait for the shell marker `data-jupyterlab-phase="ready"` before judging notebook behavior; `booting` means the preview host has not finished attaching the notebook yet
 - verify the page reads like a notebook, not a plain text dump
 - verify the markdown cell is rendered, not shown as raw source
