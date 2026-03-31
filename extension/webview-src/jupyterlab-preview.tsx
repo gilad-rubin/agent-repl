@@ -157,6 +157,10 @@ const COMMAND_IDS = {
   undoNotebook: 'agent-repl:notebook-undo',
   redoNotebook: 'agent-repl:notebook-redo',
   clearAllOutputs: 'agent-repl:notebook-clear-all-outputs',
+  splitCell: 'agent-repl:notebook-split-cell',
+  mergeCells: 'agent-repl:notebook-merge-cells',
+  copyCells: 'agent-repl:notebook-copy-cells',
+  pasteCells: 'agent-repl:notebook-paste-cells',
 } as const;
 
 function createToolbarButtonBaseStyle(): React.CSSProperties {
@@ -1056,10 +1060,23 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     switch (msgType) {
       case 'stream':
       case 'execute_result':
-      case 'display_data':
       case 'error':
         codeModel.outputs.add(iopubOutput);
-        if (displayId && msgType === 'display_data') {
+        break;
+      case 'display_data': {
+        // If we already have this display_id, update in-place instead of adding
+        if (displayId) {
+          const cellMap = displayIdMapRef.current.get(cellId);
+          const existing = cellMap?.get(displayId);
+          if (existing && existing.length > 0) {
+            for (const index of existing) {
+              codeModel.outputs.set(index, iopubOutput);
+            }
+            break;
+          }
+        }
+        codeModel.outputs.add(iopubOutput);
+        if (displayId) {
           let cellMap = displayIdMapRef.current.get(cellId);
           if (!cellMap) { cellMap = new Map(); displayIdMapRef.current.set(cellId, cellMap); }
           const targets = cellMap.get(displayId) || [];
@@ -1067,6 +1084,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           cellMap.set(displayId, targets);
         }
         break;
+      }
       case 'update_display_data': {
         if (!displayId) break;
         const cellMap = displayIdMapRef.current.get(cellId);
@@ -1674,6 +1692,19 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       return;
     }
 
+    // Skip if cell is already running or queued
+    const cellId = activeCell.cell_id;
+    if (runtime.running_cell_ids.includes(cellId) || runtime.queued_cell_ids.includes(cellId)) {
+      // Still advance if requested
+      if (mode === 'advance' && activeIndex < currentCells.length - 1) {
+        notebook.activeCellIndex = activeIndex + 1;
+        focusNotebookCommandSelection(notebook);
+      } else if (mode === 'insert') {
+        await insertRelativeCell('below', { switchToEdit: true });
+      }
+      return;
+    }
+
     const saved = await flushAutosave();
     if (!saved) {
       return;
@@ -1875,6 +1906,18 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     addCommand(COMMAND_IDS.undoNotebook, wrapCommand(() => undoNotebookStructure()));
     addCommand(COMMAND_IDS.redoNotebook, wrapCommand(() => redoNotebookStructure()));
     addCommand(COMMAND_IDS.clearAllOutputs, wrapCommand(() => clearAllOutputs()));
+    addCommand(COMMAND_IDS.splitCell, wrapCommand(() => {
+      NotebookActions.splitCell(notebook);
+    }));
+    addCommand(COMMAND_IDS.mergeCells, wrapCommand(() => {
+      NotebookActions.mergeCells(notebook);
+    }));
+    addCommand(COMMAND_IDS.copyCells, wrapCommand(() => {
+      NotebookActions.copy(notebook);
+    }));
+    addCommand(COMMAND_IDS.pasteCells, wrapCommand(() => {
+      NotebookActions.paste(notebook);
+    }));
 
     const bindCommand = (command: string, keys: string[] | string, selector: string) => {
       commands.addKeyBinding({
@@ -1906,6 +1949,10 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     bindCommand(COMMAND_IDS.redoNotebook, 'Shift Z', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
     bindCommand(COMMAND_IDS.moveUp, 'Accel Shift ArrowUp', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
     bindCommand(COMMAND_IDS.moveDown, 'Accel Shift ArrowDown', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.splitCell, 'Accel Shift -', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-editMode`);
+    bindCommand(COMMAND_IDS.mergeCells, 'Shift M', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.copyCells, 'C', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.pasteCells, 'V', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
 
     const debugWindow = window as JupyterLabPreviewDebugWindow;
     debugWindow.__agentReplJupyterLab = {
@@ -2123,6 +2170,12 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         if (disposed) {
           return;
         }
+        // Render all markdown cells on load
+        for (const widget of notebook.widgets) {
+          if (widget.model.type === 'markdown' && 'rendered' in widget) {
+            (widget as unknown as { rendered: boolean }).rendered = true;
+          }
+        }
         // Activate the first code cell (not markdown) so Shift+Enter runs immediately
         const firstCodeIndex = notebook.widgets.findIndex(w => w.model.type === 'code');
         if (firstCodeIndex >= 0) {
@@ -2176,13 +2229,20 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     };
   }, [changeSelectedCellType, clearAllOutputs, deleteSelectedCells, executeActiveCell, executeAll, flushAutosave, initialCells, initialDocumentVersion, initialNotebookMetadata, initialTrustSnapshot, insertRelativeCell, moveSelectedCell, redoNotebookStructure, scheduleAutosave, undoNotebookStructure]);
 
-  // Global Cmd+S handler — independent of notebook lifecycle
+  // Global keyboard shortcuts — independent of notebook lifecycle
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+      const accel = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      if (accel && key === 's') {
         event.preventDefault();
         event.stopPropagation();
         void flushAutosave({ announce: true });
+      }
+      if (accel && key === 'b') {
+        event.preventDefault();
+        event.stopPropagation();
+        setExplorerCollapsed((prev: boolean) => !prev);
       }
     };
     document.addEventListener('keydown', handler, true);

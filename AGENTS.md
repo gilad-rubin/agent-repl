@@ -81,7 +81,8 @@ API changes touch multiple layers — keep in sync:
 Read [dev/extension-guide.md](dev/extension-guide.md) for module map, dev loops, shared modules, error handling patterns, and canvas icon rules. For browser QA, preview troubleshooting, and how to verify incremental cell output properly, use [dev/browser-verification-guide.md](dev/browser-verification-guide.md).
 
 Key points:
-- `execution/queue.ts` is the most complex module — read fully before modifying
+- `execution/queue.ts` is now a thin output-helper and Jupyter API cache module — the daemon owns all execution queue state
+- Execution routes in `routes.ts` are daemon HTTP pass-throughs; do not add local queue tracking
 - All execution routes through the daemon — no native VS Code execution, no Jupyter API fallbacks
 - Live sync uses `extension/src/shared/wsClient.ts` — shared by both proxy and browser host
 - Session operations use daemon HTTP directly (not CLI execFile), except during initial daemon bootstrap
