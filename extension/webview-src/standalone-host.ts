@@ -13,6 +13,7 @@ import {
   type RecoveryAdvice,
 } from '../src/shared/recovery';
 import { buildRuntimeSnapshot } from '../src/shared/runtimeSnapshot';
+import { DaemonWebSocket } from '../src/shared/wsClient';
 
 type NotebookOutput = {
   output_type: string;
@@ -112,11 +113,10 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
   const clientId = globalThis.crypto?.randomUUID?.() ?? `standalone-${Date.now()}`;
   let currentNotebookPath = config.notebookPath;
   let activityCursor = 0;
-  let pollingTimer: number | null = null;
   let touchTimer: number | null = null;
-  let pollingStarting = false;
   let attached = false;
   let activeCells: NotebookCell[] = [];
+  let daemonWs: DaemonWebSocket | null = null;
 
   const dispatch = (message: HostMessage) => {
     window.dispatchEvent(new MessageEvent('message', { data: message }));
@@ -347,29 +347,42 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
     });
   };
 
-  const primeActivityCursor = async () => {
-    if (!currentNotebookPath) {
-      return;
+  const handleWsMessage = (msg: any) => {
+    if (!attached) return;
+    const result = {
+      recent_events: [msg],
+      runtime: msg.runtime,
+      cursor: typeof msg.cursor === 'number' ? msg.cursor : undefined,
+    };
+    const activityResult = buildActivityPollResult(result, {
+      cursorFallback: activityCursor,
+      reloadOnSourceUpdates: true,
+      inlineSourceUpdates: false,
+    });
+    if (activityResult.shouldReloadContents) {
+      void loadContents();
     }
-    await ensureAttached();
-    try {
-      const result = await postJson<{ cursor?: number }>('/api/standalone/notebook/activity', {
-        client_id: clientId,
-        path: requireNotebookPath(),
-      });
-      if (typeof result.cursor === 'number') {
-        activityCursor = result.cursor;
-      }
-    } catch {
-      // A failed prime should not block the notebook from loading.
+    const activitySnapshot = activityResult.activityUpdate;
+    if (!activitySnapshot) return;
+
+    dispatch({
+      type: 'activity-update',
+      events: activitySnapshot.events,
+      presence: activitySnapshot.presence,
+      leases: activitySnapshot.leases,
+      runtime: activitySnapshot.runtime,
+      cursor: activitySnapshot.cursor,
+    });
+
+    if (typeof msg.cursor === 'number') {
+      activityCursor = msg.cursor;
     }
   };
 
-  const stopPolling = () => {
-    pollingStarting = false;
-    if (pollingTimer != null) {
-      window.clearInterval(pollingTimer);
-      pollingTimer = null;
+  const stopWs = () => {
+    if (daemonWs) {
+      daemonWs.close();
+      daemonWs = null;
     }
     if (touchTimer != null) {
       window.clearInterval(touchTimer);
@@ -377,97 +390,41 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
     }
   };
 
-  const pollActivity = async () => {
-    if (!attached) {
-      return;
-    }
-    try {
-      const result = await postJson<{
-        recent_events?: Array<{
-          event_id: string;
-          path: string;
-          type: string;
-          detail: string;
-          actor: string;
-          session_id: string;
-          cell_id: string | null;
-          cell_index: number | null;
-          data: unknown;
-          timestamp: number;
-        }>;
-        presence?: unknown[];
-        leases?: unknown[];
-        runtime?: { busy?: boolean; python_path?: string; current_execution?: Record<string, unknown> | null } | null;
-        runtime_record?: { label?: string } | null;
-        cursor?: number;
-      }>('/api/standalone/notebook/activity', {
-        client_id: clientId,
-        path: requireNotebookPath(),
-        since: activityCursor > 0 ? activityCursor : undefined,
-      });
-
-      const activityResult = buildActivityPollResult(result, {
-        cursorFallback: activityCursor,
-        reloadOnSourceUpdates: true,
-        inlineSourceUpdates: false,
-      });
-      if (activityResult.shouldReloadContents) {
-        await loadContents();
-      }
-      const activitySnapshot = activityResult.activityUpdate;
-      if (!activitySnapshot) {
-        return;
-      }
-
-      dispatch({
-        type: 'activity-update',
-        events: activitySnapshot.events,
-        presence: activitySnapshot.presence,
-        leases: activitySnapshot.leases,
-        runtime: activitySnapshot.runtime,
-        cursor: activitySnapshot.cursor,
-      });
-
-      if (typeof result.cursor === 'number') {
-        activityCursor = result.cursor;
-      }
-    } catch {
-      // Keep the standalone canvas responsive even if polling fails transiently.
-    }
-  };
-
-  const startPolling = () => {
-    if (pollingStarting) {
-      return;
-    }
-    if (pollingTimer != null || touchTimer != null) {
-      return;
-    }
-    pollingStarting = true;
-    void primeActivityCursor().finally(() => {
-      pollingStarting = false;
-      if (pollingTimer != null) {
-        return;
-      }
-      if (currentNotebookPath) {
-        void pollActivity();
-      }
-      pollingTimer = window.setInterval(() => {
-        void pollActivity();
-      }, 500);
-      if (touchTimer == null) {
-        touchTimer = window.setInterval(() => {
-          void postJson('/api/standalone/session-touch', {
-            client_id: clientId,
-            path: currentNotebookPath,
-          }).catch(() => undefined);
-        }, 15_000);
-      }
+  const startWs = () => {
+    if (daemonWs || !currentNotebookPath) return;
+    // Same-origin connection — the preview server proxies to the daemon.
+    const origin = window.location.origin;
+    daemonWs = new DaemonWebSocket({
+      daemonUrl: origin,
+      daemonToken: '', // same-origin; proxy handles auth
+      fetchFn: window.fetch.bind(window),
+      createSocket: (url: string) => new WebSocket(url) as any,
+      onMessage: handleWsMessage,
+      onConnect: () => {
+        if (currentNotebookPath) {
+          daemonWs?.subscribe(currentNotebookPath);
+        }
+      },
+      onDisconnect: () => { /* reconnect is automatic */ },
+      onInstanceChange: () => {
+        // Daemon restarted — full reload.
+        void loadContents();
+        void loadRuntime();
+      },
     });
+    daemonWs.connect();
+    if (touchTimer == null) {
+      touchTimer = window.setInterval(() => {
+        void postJson('/api/standalone/session-touch', {
+          client_id: clientId,
+          path: currentNotebookPath,
+        }).catch(() => undefined);
+      }, 15_000);
+    }
   };
 
   const endSession = () => {
-    stopPolling();
+    stopWs();
     void fetch('/api/standalone/session-end', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -504,7 +461,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
                 break;
               }
               await ensureAttached();
-              startPolling();
+              startWs();
               void loadRuntime().catch((error) => {
                 logNonBlockingFailure('runtime bootstrap', error);
               });
@@ -529,7 +486,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               if (typeof message.path !== 'string' || !message.path.trim()) {
                 throw new Error('Missing notebook path');
               }
-              stopPolling();
+              stopWs();
               currentNotebookPath = message.path.trim();
               activityCursor = 0;
               activeCells = [];
@@ -537,7 +494,7 @@ export function createStandaloneHost(config: StandaloneConfig): HostApi {
               await loadWorkspaceTree();
               await loadContents(message.requestId);
               await loadRuntime();
-              startPolling();
+              startWs();
               break;
             case 'get-kernels':
               await loadKernels(message.requestId);

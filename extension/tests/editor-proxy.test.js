@@ -142,11 +142,9 @@ test('loadContents includes the active notebook path in the contents message', a
     assert.equal(postedMessages[0].path, 'notebooks/test3.ipynb');
 });
 
-test('startPolling primes the activity cursor before requesting live updates', async (t) => {
+test('handleWsMessage dispatches activity updates to the webview', async () => {
     resetVscodeSpies();
     const postedMessages = [];
-    const httpCalls = [];
-    let intervalCallback = null;
     const proxy = new DaemonProxy(
         { fsPath: '/workspace/notebooks/test3.ipynb' },
         { webview: { postMessage(message) { postedMessages.push(message); } } },
@@ -158,43 +156,24 @@ test('startPolling primes the activity cursor before requesting live updates', a
         },
     );
 
-    const originalSetInterval = global.setInterval;
-    const originalClearInterval = global.clearInterval;
-    global.setInterval = (callback) => {
-        intervalCallback = callback;
-        return { callback };
-    };
-    global.clearInterval = () => {};
-    t.after(() => {
-        global.setInterval = originalSetInterval;
-        global.clearInterval = originalClearInterval;
+    // Simulate an incoming WS activity event through the internal handler.
+    proxy.handleWsMessage({
+        type: 'execution',
+        cursor: 42,
+        event_id: 'ev-1',
+        path: 'notebooks/test3.ipynb',
+        detail: 'cell finished',
+        actor: 'agent',
+        session_id: 'sess',
+        cell_id: 'cell-1',
+        cell_index: 0,
+        data: {},
+        timestamp: Date.now(),
     });
 
-    proxy.httpPost = async (endpoint, body) => {
-        httpCalls.push({ endpoint, body });
-        assert.equal(endpoint, '/api/notebooks/activity');
-        if (httpCalls.length === 1) {
-            assert.deepEqual(body, { path: 'notebooks/test3.ipynb' });
-            return { cursor: 123, recent_events: [], runtime: null };
-        }
-        assert.deepEqual(body, { path: 'notebooks/test3.ipynb', since: 123 });
-        return { cursor: 123, recent_events: [], runtime: null };
-    };
-
-    proxy.startPolling();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(typeof intervalCallback, 'function');
-    intervalCallback();
-    await new Promise((resolve) => setImmediate(resolve));
-
-    assert.deepEqual(
-        httpCalls.slice(0, 2).map((call) => call.body),
-        [
-            { path: 'notebooks/test3.ipynb' },
-            { path: 'notebooks/test3.ipynb', since: 123 },
-        ],
-    );
-    assert.equal(postedMessages.length, 0);
+    const activityMsg = postedMessages.find((m) => m.type === 'activity-update');
+    assert.ok(activityMsg, 'should dispatch activity-update to webview');
+    assert.equal(activityMsg.cursor, 42);
 });
 
 test('handleExecuteCell persists a source override before starting the cell', async () => {

@@ -11,6 +11,7 @@ import { runNotebookCommandFlow } from '../shared/notebookCommandFlow';
 import { buildReplaceSourceOperation } from '../shared/notebookEditPayload';
 import { daemonUnavailableRecovery, recoveryFromPayload } from '../shared/recovery';
 import { buildRuntimeSnapshot } from '../shared/runtimeSnapshot';
+import { DaemonWebSocket, type SocketLike } from '../shared/wsClient';
 import { DefinitionTarget, NotebookCellSnapshot, PyrightNotebookLspClient } from './lsp';
 import type { CellData } from './protocol';
 
@@ -24,8 +25,6 @@ const RUNTIME_FILE_PREFIX = 'agent-repl-core-';
  */
 export class DaemonProxy {
     readonly disposables: vscode.Disposable[] = [];
-    private pollTimer: ReturnType<typeof setInterval> | undefined;
-    private pollStarting = false;
     private activityCursor = 0;
     private notebookPath: string;
     private workspaceRoot: string;
@@ -35,6 +34,7 @@ export class DaemonProxy {
     private cells: CellData[] = [];
     private draftSources = new Map<string, string>();
     private lspClient: PyrightNotebookLspClient | null = null;
+    private daemonWs: DaemonWebSocket | null = null;
 
     constructor(
         private readonly documentUri: vscode.Uri,
@@ -81,18 +81,18 @@ export class DaemonProxy {
     }
 
     onVisibilityChanged(visible: boolean): void {
-        if (visible && !this.pollTimer) {
-            this.startPolling();
+        if (visible && !this.daemonWs) {
+            this.startWs();
             void this.syncPresence('observing');
-        } else if (!visible && this.pollTimer) {
-            this.stopPolling();
+        } else if (!visible && this.daemonWs) {
+            this.stopWs();
             void this.clearPresence();
         }
     }
 
     dispose(): void {
         this.disposed = true;
-        this.stopPolling();
+        this.stopWs();
         void this.clearPresence();
         this.lspClient?.dispose();
         this.lspClient = null;
@@ -209,6 +209,30 @@ export class DaemonProxy {
         });
     }
 
+    private async httpFetchShim(url: string, init?: any): Promise<any> {
+        return new Promise((resolve, reject) => {
+            const parsed = new URL(url);
+            const req = http.request(parsed, {
+                method: init?.method ?? 'GET',
+                headers: init?.headers ?? {},
+            }, (res) => {
+                const chunks: Buffer[] = [];
+                res.on('data', (c: Buffer) => chunks.push(c));
+                res.on('end', () => {
+                    const text = Buffer.concat(chunks).toString();
+                    resolve({
+                        ok: (res.statusCode ?? 500) < 400,
+                        status: res.statusCode,
+                        json: () => Promise.resolve(JSON.parse(text)),
+                    });
+                });
+            });
+            req.on('error', reject);
+            if (init?.body) req.write(init.body);
+            req.end();
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Initial load
     // -----------------------------------------------------------------------
@@ -219,7 +243,7 @@ export class DaemonProxy {
         this.ensureLspStarted();
         await this.handleGetKernels({ requestId: 'init-kernels' });
         await this.syncPresence('observing');
-        this.startPolling();
+        this.startWs();
     }
 
     private async loadContents(requestId: string): Promise<void> {
@@ -608,73 +632,87 @@ export class DaemonProxy {
     }
 
     // -----------------------------------------------------------------------
-    // Activity polling — direct HTTP, fast
+    // WebSocket push — replaces HTTP polling
     // -----------------------------------------------------------------------
 
-    private startPolling(): void {
-        if (this.pollTimer || this.disposed || this.pollStarting) return;
-        this.pollStarting = true;
-        void this.primeActivityCursor().finally(() => {
-            this.pollStarting = false;
-            if (this.pollTimer || this.disposed) return;
-            this.pollTimer = setInterval(() => this.pollActivity(), 500);
-            void this.pollActivity();
+    private startWs(): void {
+        if (this.daemonWs || this.disposed) return;
+        if (!this.discoverDaemon()) return;
+        this.daemonWs = new DaemonWebSocket({
+            daemonUrl: this.daemonUrl!,
+            daemonToken: this.daemonToken!,
+            createSocket: (url: string): SocketLike => {
+                // Electron 28+ (VS Code 1.87+) has globalThis.WebSocket.
+                // Older runtimes fall back to a bundled 'ws' package.
+                if (typeof (globalThis as any).WebSocket === 'function') {
+                    return new (globalThis as any).WebSocket(url);
+                }
+                try {
+                    const WSLib = require('ws');
+                    return new WSLib(url);
+                } catch { /* not available */ }
+                throw new Error('No WebSocket implementation available');
+            },
+            fetchFn: globalThis.fetch ?? this.httpFetchShim.bind(this),
+            onMessage: (msg) => this.handleWsMessage(msg),
+            onConnect: () => {
+                this.daemonWs?.subscribe(this.notebookPath);
+            },
+            onDisconnect: () => { /* reconnect is automatic */ },
+            onInstanceChange: () => {
+                // Daemon restarted — full reload.
+                void this.loadContents('ws-instance-change');
+                void this.handleGetRuntime({ requestId: 'ws-instance-change-runtime' });
+            },
         });
+        this.daemonWs.connect();
     }
 
-    private stopPolling(): void {
-        this.pollStarting = false;
-        if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = undefined; }
-    }
-
-    private async primeActivityCursor(): Promise<void> {
-        try {
-            const result = await this.httpPost('/api/notebooks/activity', {
-                path: this.notebookPath,
-            });
-            if (typeof result.cursor === 'number') {
-                this.activityCursor = result.cursor;
-            }
-        } catch {
-            // Non-fatal. We can still fall back to regular polling.
+    private stopWs(): void {
+        if (this.daemonWs) {
+            this.daemonWs.close();
+            this.daemonWs = null;
         }
     }
 
-    private async pollActivity(): Promise<void> {
-        if (this.disposed) { this.stopPolling(); return; }
-        try {
-            const body: any = { path: this.notebookPath };
-            if (this.activityCursor > 0) body.since = this.activityCursor;
-            const result = await this.httpPost('/api/notebooks/activity', body);
+    private handleWsMessage(msg: any): void {
+        if (this.disposed) return;
+        // Wrap the incoming WS event into the same envelope shape that
+        // buildActivityPollResult expects so the webview sees identical data.
+        const result = {
+            recent_events: [msg],
+            runtime: msg.runtime,
+            cursor: typeof msg.cursor === 'number' ? msg.cursor : undefined,
+        };
+        const activityResult = buildActivityPollResult(result, {
+            cursorFallback: this.activityCursor,
+            includeDetachedRuntime: true,
+            inlineSourceUpdates: true,
+            reloadOnSourceUpdates: false,
+        });
+        for (const cell of activityResult.sourceUpdates) {
+            this.upsertCell(cell as CellData);
+        }
+        if (activityResult.shouldReloadContents) {
+            void this.loadContents('ws-activity-reload');
+        } else if (activityResult.shouldSyncLsp) {
+            this.syncLsp();
+        }
+        const activitySnapshot = activityResult.activityUpdate;
+        if (!activitySnapshot) return;
 
-            const activityResult = buildActivityPollResult(result, {
-                cursorFallback: this.activityCursor,
-                includeDetachedRuntime: true,
-                inlineSourceUpdates: true,
-                reloadOnSourceUpdates: false,
-            });
-            for (const cell of activityResult.sourceUpdates) {
-                this.upsertCell(cell as CellData);
-            }
-            if (activityResult.shouldReloadContents) {
-                await this.loadContents('activity-reload');
-            } else if (activityResult.shouldSyncLsp) {
-                this.syncLsp();
-            }
-            const activitySnapshot = activityResult.activityUpdate;
-            if (!activitySnapshot) return;
+        this.postMessage({
+            type: 'activity-update',
+            events: activitySnapshot.events,
+            presence: activitySnapshot.presence,
+            leases: activitySnapshot.leases,
+            runtime: activitySnapshot.runtime,
+            cursor: activitySnapshot.cursor,
+        });
 
-            this.postMessage({
-                type: 'activity-update',
-                events: activitySnapshot.events,
-                presence: activitySnapshot.presence,
-                leases: activitySnapshot.leases,
-                runtime: activitySnapshot.runtime,
-                cursor: activitySnapshot.cursor,
-            });
-
-            if (typeof result.cursor === 'number') this.activityCursor = result.cursor;
-        } catch { /* non-fatal */ }
+        if (typeof msg.cursor === 'number') {
+            this.activityCursor = msg.cursor;
+        }
     }
 
     // -----------------------------------------------------------------------
