@@ -1966,6 +1966,84 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     };
   }, [changeSelectedCellType, deleteSelectedCells, executeActiveCell, executeAll, flushAutosave, initialCells, initialDocumentVersion, initialNotebookMetadata, initialTrustSnapshot, insertRelativeCell, moveSelectedCell, scheduleAutosave, undoNotebookStructure]);
 
+  // Inject cell status bars and executing-cell data attributes
+  useEffect(() => {
+    const notebook = notebookRef.current;
+    const model = modelRef.current;
+    if (!notebook || !model || !surfaceReady) {
+      return;
+    }
+
+    const runningSet = new Set(runtime.running_cell_ids);
+    const queuedSet = new Set(runtime.queued_cell_ids);
+
+    for (let i = 0; i < notebook.widgets.length; i++) {
+      const widget = notebook.widgets[i];
+      const cellModel = model.cells.get(i);
+      if (!cellModel || cellModel.type !== 'code') {
+        widget.node.removeAttribute('data-cell-executing');
+        const oldBar = widget.node.querySelector('.agent-repl-cell-status');
+        if (oldBar) oldBar.remove();
+        continue;
+      }
+
+      const cellId = typeof (cellModel.sharedModel as any).getId === 'function'
+        ? (cellModel.sharedModel as any).getId()
+        : (cellModel as any).id ?? '';
+
+      const isRunning = runningSet.has(cellId);
+      const isQueued = queuedSet.has(cellId);
+      const hasError = (cellModel as any).executionCount != null
+        && Array.isArray((cellModel.toJSON() as any).outputs)
+        && (cellModel.toJSON() as any).outputs.some((o: any) => o.output_type === 'error');
+      const hasOutput = (cellModel as any).executionCount != null
+        && Array.isArray((cellModel.toJSON() as any).outputs)
+        && (cellModel.toJSON() as any).outputs.length > 0;
+
+      // Set data attribute for CSS shimmer
+      if (isRunning) {
+        widget.node.setAttribute('data-cell-executing', 'true');
+      } else {
+        widget.node.removeAttribute('data-cell-executing');
+      }
+
+      // Inject or update status bar
+      let bar = widget.node.querySelector('.agent-repl-cell-status') as HTMLElement | null;
+      if (isRunning || isQueued) {
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.className = 'agent-repl-cell-status';
+          widget.node.appendChild(bar);
+        }
+        if (isRunning) {
+          bar.className = 'agent-repl-cell-status agent-repl-cell-status-running';
+          bar.innerHTML = '<span class="agent-repl-cell-status-spinner"></span><span>Running</span>';
+        } else {
+          bar.className = 'agent-repl-cell-status agent-repl-cell-status-queued';
+          bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 4.5H12.5M3.5 8H9.5M3.5 11.5H8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Queued</span>';
+        }
+      } else if (hasError) {
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.className = 'agent-repl-cell-status';
+          widget.node.appendChild(bar);
+        }
+        bar.className = 'agent-repl-cell-status agent-repl-cell-status-failed';
+        bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Error</span>';
+      } else if (hasOutput && !isRunning) {
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.className = 'agent-repl-cell-status';
+          widget.node.appendChild(bar);
+        }
+        bar.className = 'agent-repl-cell-status agent-repl-cell-status-completed';
+        bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Completed</span>';
+      } else if (bar) {
+        bar.remove();
+      }
+    }
+  }, [runtime, surfaceReady]);
+
   useEffect(() => {
     let disposed = false;
 
