@@ -577,6 +577,10 @@ function focusActiveCellEditor(notebook: Notebook): void {
     return;
   }
   editor.focus();
+  // Move cursor to end of last line
+  const lastLine = editor.lineCount - 1;
+  const lastLineLength = editor.getLine(lastLine)?.length ?? 0;
+  editor.setCursorPosition({ line: lastLine, column: lastLineLength });
 }
 
 function focusNotebookCommandSelection(notebook: Notebook): void {

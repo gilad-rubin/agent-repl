@@ -576,7 +576,28 @@ body { margin: 0; }
 }
 
 .agent-repl-jupyterlab-notebook .jp-MarkdownCell.jp-mod-rendered {
-  background: color-mix(in srgb, var(--cds-layer-accent) 72%, transparent);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  padding-left: 8px;
+}
+
+.agent-repl-jupyterlab-notebook .jp-MarkdownCell.jp-mod-rendered:hover {
+  background: rgba(217, 119, 6, 0.03);
+  border-color: transparent;
+}
+
+.agent-repl-jupyterlab-notebook .jp-MarkdownCell.jp-mod-rendered.jp-mod-active {
+  border-color: rgba(217, 119, 6, 0.15);
+  background: transparent;
+}
+
+.agent-repl-jupyterlab-notebook .jp-MarkdownCell.jp-mod-rendered .jp-InputPrompt {
+  display: none;
+}
+
+.agent-repl-jupyterlab-notebook .jp-MarkdownCell.jp-mod-rendered .jp-RenderedHTMLCommon {
+  padding: 4px 0;
 }
 
 .agent-repl-jupyterlab-notebook .jp-Cell-inputWrapper,
