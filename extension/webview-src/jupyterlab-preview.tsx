@@ -658,6 +658,9 @@ function shouldHandleNotebookShortcut(event: KeyboardEvent, notebook: Notebook):
     if (normalizedKey.toLowerCase() === 's' && accel) {
       return true;
     }
+    if (accel && event.shiftKey && (normalizedKey === '-' || normalizedKey === 'minus')) {
+      return true;
+    }
     return false;
   }
 
@@ -670,7 +673,7 @@ function shouldHandleNotebookShortcut(event: KeyboardEvent, notebook: Notebook):
   if (normalizedKey === 'ArrowUp' || normalizedKey === 'ArrowDown') {
     return !event.altKey && !accel;
   }
-  return ['a', 'b', 'd', 'j', 'k', 'm', 'y', 'z'].includes(normalizedKey);
+  return ['a', 'b', 'c', 'd', 'j', 'k', 'm', 'v', 'y', 'z'].includes(normalizedKey);
 }
 
 function shouldRouteNotebookEvent(
@@ -2035,8 +2038,13 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         return;
       }
       const normalizedKey = normalizedKeyEarly;
-      const routedFromDocumentRoot = target === document.body || target === document.documentElement;
-      if (routedFromDocumentRoot) {
+      const isNotebookTarget = target === document.body
+        || target === document.documentElement
+        || (target instanceof HTMLElement && (
+          mountNode.contains(target)
+          || target.closest('.agent-repl-jupyterlab-notebook')
+        ));
+      if (isNotebookTarget) {
         const accel = event.metaKey || event.ctrlKey;
         const directCommand = (() => {
           if (notebook.mode === 'edit') {
@@ -2051,6 +2059,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
             }
             if (normalizedKey === 'Enter' && event.altKey) {
               return COMMAND_IDS.runAndInsertBelow;
+            }
+            if (accel && event.shiftKey && (normalizedKey === '-' || normalizedKey === 'minus')) {
+              return COMMAND_IDS.splitCell;
             }
             return null;
           }
@@ -2081,7 +2092,10 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           if (normalizedKey === 'b') {
             return COMMAND_IDS.insertBelow;
           }
-          if (normalizedKey === 'm') {
+          if (normalizedKey === 'm' && event.shiftKey) {
+            return COMMAND_IDS.mergeCells;
+          }
+          if (normalizedKey === 'm' && !event.shiftKey) {
             return COMMAND_IDS.changeToMarkdown;
           }
           if (normalizedKey === 'y') {
@@ -2092,6 +2106,12 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           }
           if (normalizedKey === 'z' && event.shiftKey) {
             return COMMAND_IDS.redoNotebook;
+          }
+          if (normalizedKey === 'c' && !accel) {
+            return COMMAND_IDS.copyCells;
+          }
+          if (normalizedKey === 'v' && !accel) {
+            return COMMAND_IDS.pasteCells;
           }
           return null;
         })();
