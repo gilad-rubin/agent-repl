@@ -1322,12 +1322,34 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     }
     setError(null);
     pendingExecutionRef.current = true;
-    await postJson('/api/standalone/notebook/restart-and-run-all-async', {
+
+    // Clear all statuses and outputs immediately
+    executedCellIdsRef.current.clear();
+    displayIdMapRef.current.clear();
+    const model = modelRef.current;
+    const notebook = notebookRef.current;
+    if (model && notebook) {
+      const queuedIds: string[] = [];
+      for (let i = 0; i < model.cells.length; i++) {
+        const cellModel = model.cells.get(i);
+        if (cellModel?.type === 'code') {
+          const cellId = typeof (cellModel.sharedModel as any).getId === 'function'
+            ? (cellModel.sharedModel as any).getId() : '';
+          const src = (cellModel.sharedModel as any).getSource?.() ?? '';
+          if (cellId && src.trim()) {
+            queuedIds.push(cellId);
+            clearCellOutputs(cellId);
+          }
+        }
+      }
+      setRuntime((prev) => ({ ...prev, queued_cell_ids: queuedIds, running_cell_ids: [] }));
+    }
+
+    postJson('/api/standalone/notebook/restart-and-run-all-async', {
       client_id: PREVIEW_CLIENT_ID,
       path: currentNotebookPath,
-    });
-    await loadRuntime();
-  }, [currentNotebookPath, flushAutosave, loadRuntime]);
+    }).catch(() => {});
+  }, [clearCellOutputs, currentNotebookPath, flushAutosave]);
 
   const persistStructureOperations = useCallback(async (
     operations: NotebookEditOperation[],
@@ -1795,11 +1817,16 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     }
     setError(null);
     showToolbarStatus('Restarting kernel...', 2200);
+    // Clear all statuses immediately
+    executedCellIdsRef.current.clear();
+    displayIdMapRef.current.clear();
+    setRuntime((prev) => ({ ...prev, running_cell_ids: [], queued_cell_ids: [] }));
+    setCellModelVersion((v) => v + 1);
+    pendingExecutionRef.current = false;
     await postJson('/api/standalone/notebook/restart', {
       client_id: PREVIEW_CLIENT_ID,
       path: currentNotebookPath,
     });
-    pendingExecutionRef.current = false;
     await Promise.all([loadRuntime(), loadContents()]);
   }, [loadContents, loadRuntime, currentNotebookPath, showToolbarStatus]);
 
