@@ -694,6 +694,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
   const lastSyncedCellsRef = useRef<NotebookCell[]>([]);
   const autoSaveTimerRef = useRef<number | null>(null);
   const displayIdMapRef = useRef<Map<string, Map<string, number[]>>>(new Map());
+  const [cellModelVersion, setCellModelVersion] = useState(0);
   const toolbarStatusTimerRef = useRef<number | null>(null);
   const applyingRemoteRef = useRef(false);
   const applyingNotebookActionRef = useRef(false);
@@ -948,6 +949,8 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       }
       notebook.mode = previousMode;
       notebook.update();
+      // Trigger status bar re-evaluation after model update
+      setCellModelVersion((v) => v + 1);
     } finally {
       applyingRemoteRef.current = false;
     }
@@ -1060,6 +1063,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         displayIdMapRef.current.delete(cellId);
         break;
     }
+    setCellModelVersion((v) => v + 1);
   }, []);
 
   const trustNotebook = useCallback(async () => {
@@ -2172,7 +2176,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         }
       }
     }
-  }, [runtime, surfaceReady]);
+  }, [runtime, surfaceReady, cellModelVersion]);
 
   useEffect(() => {
     let disposed = false;
