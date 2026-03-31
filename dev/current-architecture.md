@@ -21,24 +21,30 @@ For the north-star target architecture, see:
 ```
 Human or Agent
     ↕
-CLI / VS Code Canvas / Browser Preview
+CLI / VS Code Canvas / Browser Preview / MCP (6 bundled tools)
+    ↕  HTTP + WebSocket (push-based sync)
+Workspace Daemon (`src/agent_repl/core/`)
+    ├─ Document authority (YDoc + nbformat)
+    ├─ Execution authority (single queue per notebook)
+    ├─ Runtime manager (headless kernels)
+    ├─ Session and presence
+    ├─ Checkpoint service (SQLite-backed)
+    └─ WebSocket transport (activity, execution, presence events)
     ↕
-Shared Runtime (`src/agent_repl/core/`)
-    ↕
-Notebook files + headless kernels
+SQLite state + YDoc notebooks + headless kernels + .ipynb files
 ```
 
-There is still a second transport in the system:
+There is still a second transport in the system for editor-specific capabilities:
 
 ```
 CLI editor-backed commands
     ↕
 VS Code extension bridge (`extension/src/routes.ts`)
     ↕
-VS Code notebook APIs
+VS Code notebook APIs (prompt cells, kernel picker, reload)
 ```
 
-That bridge remains necessary for editor-specific capabilities, but it is no longer the product's center of gravity.
+That bridge remains necessary for VS Code-specific features, but execution and sync no longer depend on it.
 
 ## Shared Runtime (`src/agent_repl/core/`)
 
@@ -102,7 +108,7 @@ Key modules:
 | `editor/provider.ts` | Custom `.ipynb` canvas provider and open-canvas tracking |
 | `editor/proxy.ts` | Webview/runtime message bridge and presence updates |
 | `editor/webview.ts` | HTML shell that loads the shared canvas bundle |
-| `execution/queue.ts` | VS Code-backed execution queue and kernel state tracking |
+| `execution/queue.ts` | Daemon-routed execution queue — all execution via `POST /api/notebooks/execute-cell` |
 | `notebook/*` | Resolver, edit operations, output conversion, identity helpers |
 
 ### Canvas UI
@@ -276,21 +282,13 @@ This is the main replacement rule for ongoing work:
 
 ## Execution Paths
 
-### Headless runtime path
+All notebook execution routes through the daemon via `POST /api/notebooks/execute-cell`:
 
-This is the preferred path for public notebook commands:
-
-- works without an editor
-- owns kernel lifecycle in the workspace daemon
-- persists outputs directly into the notebook file
-
-### VS Code execution path
-
-This path is still used for editor-backed execution and bridge routes:
-
-- execution is serialized per notebook in `execution/queue.ts`
-- live kernel state is reconciled against notebook events before reporting idle/busy
-- open notebooks can stream visible progress through VS Code if the projection client is attached
+- CLI, MCP, browser UI, and VS Code canvas all use the same daemon HTTP endpoint
+- The extension's `execution/queue.ts` dispatches to `daemonPost` — no native VS Code execution (`notebook.cell.execute`, `kernel.executeCode`) is used for workspace notebooks
+- `HeadlessNotebookProjection.executeCells` in `session.ts` uses the same daemon path
+- Queue state and running/idle status are derived from daemon responses and WebSocket push events
+- Execution is serialized per notebook by the daemon's execution ledger
 
 ## Open vs Closed Notebooks
 
@@ -310,7 +308,7 @@ The settings with the biggest architectural impact are:
 - `agent-repl.browserCanvasUrl`
 - `agent-repl.executionMode`
 
-`executionMode` still controls whether the extension prefers a lower-focus background path (`no-yank`) or native VS Code execution (`native`) for editor-backed runs.
+`executionMode` is no longer used for execution routing. All execution goes through the daemon. The setting may be removed in a future cleanup.
 
 Canvas Python IDE features are powered by a virtual notebook document plus a generated shadow file under the workspace-local `.agent-repl/pyright/` tree. That keeps Pyright's on-disk scratch state out of the notebook directories while preserving notebook-relative analysis semantics.
 

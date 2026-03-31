@@ -5,9 +5,11 @@
 | Module | Responsibility |
 |--------|---------------|
 | `server.py` | `CoreState` orchestrator — session/runtime/document records, notebook loading/saving |
-| `asgi.py` | Starlette ASGI app, `TokenAuthMiddleware`, MCP mount, route registration |
+| `asgi.py` | Starlette ASGI app, `TokenAuthMiddleware`, MCP mount, WebSocket route, nonce auth endpoint |
 | `db.py` | SQLite persistence — schema, bulk persist/load |
-| `mcp_adapter.py` | FastMCP server with tools for all notebook/runtime/session operations |
+| `mcp_adapter.py` | FastMCP server with 6 bundled tools: `notebook-observe`, `notebook-edit`, `notebook-execute`, `notebook-runtime`, `workspace-files`, `checkpoint` |
+| `ws_transport.py` | `WebSocketTransport` — push-based sync for activity, execution, and presence events. Nonce auth, per-path subscriptions, cursor-based replay |
+| `checkpoint_service.py` | `CheckpointService` — create, list, restore notebook checkpoints in SQLite. Refuses restore while notebook is executing |
 | `notebook_read_service.py` | Read/projection APIs (contents, status, activity, projection) |
 | `notebook_write_service.py` | Command/mutation wrappers (edit, create, select-kernel) |
 | `notebook_mutation_service.py` | Private mutation engine — routes edits through YDoc then to nbformat |
@@ -33,10 +35,17 @@ Each exports a `routes(state) -> list[Route]` function consumed by `asgi.py`:
 
 | Module | Domain | Routes |
 |--------|--------|--------|
-| `notebook_http_routes.py` | Notebook CRUD, execution, projection | ~19 POST |
+| `notebook_http_routes.py` | Notebook CRUD, execution, projection, checkpoints | ~22 POST |
 | `collaboration_http_routes.py` | Sessions, presence, branches, leases | ~13 |
 | `document_http_routes.py` | Document tracking | ~4 |
 | `runtime_http_routes.py` | Runtime lifecycle, runs | ~9 |
+
+Additionally, `asgi.py` registers these non-REST endpoints directly:
+
+| Endpoint | Protocol | Purpose |
+|----------|----------|---------|
+| `POST /api/ws-nonce` | HTTP | Create single-use nonce for WebSocket auth |
+| `/ws` | WebSocket | Push-based sync — activity, execution, presence events |
 
 ## Request Models
 

@@ -49,6 +49,15 @@ Those decisions are part of the product, even if they are not yet well documente
 | Session auto-attach keeps reusing and heartbeating the intended session shape | Session continuity is a user-visible collaboration decision | [session-auto-attach.test.js](/Users/giladrubin/python_workspace/agent-repl/extension/tests/session-auto-attach.test.js#L629) |
 | Background notebook operations should not force save or steal focus unexpectedly | Background-safe execution is a product promise | [routes-background.test.js](/Users/giladrubin/python_workspace/agent-repl/extension/tests/routes-background.test.js#L696), [queue-no-yank.test.js](/Users/giladrubin/python_workspace/agent-repl/extension/tests/queue-no-yank.test.js#L188) |
 
+### V1 Architecture (Modernization)
+
+| Behavior | Why it matters | Locked by |
+|---|---|---|
+| Checkpoint restore refuses while notebook is executing | Restoring mid-execution corrupts state | [v1-architecture.md](v1-architecture.md) |
+| MCP exposes 6 bundled tools, not flat | Agents need manageable tools, not a phone book | [v1-architecture.md](v1-architecture.md), [mcp_dos_and_donts.md](/dev/mcp_dos_and_donts.md) |
+| WebSocket is the only sync transport | Polling was explicitly rejected for v1 | [v1-architecture.md](v1-architecture.md), [ws-client.test.js](/extension/tests/ws-client.test.js) |
+| All execution routes through daemon HTTP | One execution path for all surfaces | [v1-architecture.md](v1-architecture.md), [queue-no-yank.test.js](/extension/tests/queue-no-yank.test.js) |
+
 ### CLI and Core Contracts
 
 | Behavior | Why it matters | Locked by |

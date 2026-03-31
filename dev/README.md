@@ -20,6 +20,9 @@
 ## Design Docs
 
 - [North-Star Design Set](/Users/giladrubin/python_workspace/agent-repl/dev/design/README.md) - aspirational UX and architecture direction, not a guarantee of current behavior
+- [Agreed V1 Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/design/agreed-v1-architecture.md) - the concrete first architecture we currently agree to build, including human-facing and backend-facing acceptance criteria
+- [Founding Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/design/founding-architecture.md) - final clean-slate architecture statement with explicit decisions, red lines, and founding bets
+- [Greenfield Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/design/greenfield-architecture.md) - clean-slate architecture for deciding which seams are durable versus transitional
 - [JupyterLab-Powered Notebook Surface](/Users/giladrubin/python_workspace/agent-repl/dev/design/jupyterlab-surface.md) - proposed path to stop owning the notebook UI while preserving runtime-first authority
 - [Architecture Modernization Plan](/Users/giladrubin/python_workspace/agent-repl/dev/architecture-modernization-plan.md) - recommended path to reduce bespoke infrastructure while preserving current CLI, VS Code, and browser behavior
 - [Architecture Modernization Rollout](/Users/giladrubin/python_workspace/agent-repl/dev/implementation-chain/architecture-modernization-rollout.md) - implementation slices with HLD, acceptance criteria, and test gates for the modernization chain

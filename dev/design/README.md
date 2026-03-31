@@ -7,6 +7,9 @@ These documents describe the system we want to build, the boundaries we want to 
 ## Documents
 
 - [North Star](north-star.md) — the desired end-state architecture
+- [Agreed V1 Architecture](agreed-v1-architecture.md) — the concrete first architecture we currently agree to build, with human-facing and backend-facing acceptance criteria
+- [Founding Architecture](founding-architecture.md) — the most opinionated clean-slate architecture statement for the project
+- [Greenfield Architecture](greenfield-architecture.md) — the clean-slate architecture we would choose if rebuilding from zero today
 - [Interaction Contract](interaction-contract.md) — the agreed human/agent notebook behavior and UX contract
 - [Joint Canvas Spec](joint-canvas-spec.md) — concrete product behavior for live human-agent collaboration, reopen, continuity, and ephemeral work
 - [Joint Canvas Rollout](joint-canvas-rollout.md) — the concrete implementation sequence and ClickUp-backed rollout plan for the joint-canvas work

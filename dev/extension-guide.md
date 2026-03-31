@@ -6,7 +6,7 @@
 - `server.ts` — extension HTTP server for CLI bridge
 - `routes.ts` — extension API surface for editor-backed features and bridge routes
 - `session.ts` — session auto-attach, heartbeat, headless notebook projection
-- `execution/queue.ts` — most complex module; read fully before modifying
+- `execution/queue.ts` — daemon-routed execution queue; all execution via `POST /api/notebooks/execute-cell`
 - `editor/provider.ts` — canvas custom editor host
 - `editor/webview.ts` — mounts the shared React bundle into the custom editor
 - `editor/proxy.ts` — proxies runtime traffic between canvas and daemon
@@ -40,9 +40,10 @@ Current practical boundary:
 
 | Module | Purpose |
 |--------|---------|
+| `wsClient.ts` | `DaemonWebSocket` — shared WebSocket client for proxy and browser standalone host. Nonce auth, auto-reconnect with exponential backoff, per-path subscriptions, cursor-based replay |
 | `runtimeSnapshot.ts` | Build runtime/activity snapshots from daemon payloads |
 | `executionState.ts` | Pure reducers for execution bucket transitions |
-| `notebookActivity.ts` | Shared activity poll interpreter |
+| `notebookActivity.ts` | Shared activity interpreter (WebSocket events and poll fallback) |
 | `notebookCommandFlow.ts` | Shared command orchestration pattern |
 | `notebookEditPayload.ts` | Shared edit operation builders |
 | `postCommandRefresh.ts` | Post-command refresh policy per command |
@@ -55,6 +56,25 @@ Current practical boundary:
 - **Extension host**: `cd extension && npm run compile` then `Agent REPL: Reload` — hot-reloads routes/modules without reinstalling VSIX.
 - **Full rebuild**: Changes to `extension.ts` or `server.ts` require full window reload.
 - **Installed extension**: Recompiling does NOT update `~/.vscode/extensions/` — reinstall the `.vsix` or use Extension Development Host.
+
+## Execution Model
+
+All notebook execution routes through the daemon via `POST /api/notebooks/execute-cell`. There are no native VS Code execution paths (`notebook.cell.execute`, `kernel.executeCode`) used for workspace notebooks.
+
+- `execution/queue.ts` manages queue state and dispatches to `daemonPost` from `session.ts`
+- `HeadlessNotebookProjection.executeCells` in `session.ts` uses the same daemon HTTP path
+- Queue status and running state are derived from daemon responses and WebSocket events
+- The execution monitor (`initExecutionMonitor`) is a no-op — execution state comes from daemon, not VS Code document change events
+
+## Sync Model
+
+The extension uses push-based WebSocket sync instead of HTTP polling:
+
+- `editor/proxy.ts` creates a `DaemonWebSocket` for each canvas webview, subscribing to the active notebook path
+- `session.ts` (`HeadlessNotebookProjection`) creates a `DaemonWebSocket` for projection sync
+- `webview-src/jupyterlab-preview.tsx` and `standalone-host.ts` use `DaemonWebSocket` directly from the browser
+- WebSocket events are wrapped into the same envelope format as the old poll results via `buildActivityPollResult`
+- Reconnection uses exponential backoff (500ms base, 30s max, 30% jitter) with automatic resubscription
 
 ## Key Rules
 
