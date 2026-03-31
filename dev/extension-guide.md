@@ -6,7 +6,7 @@
 - `server.ts` — extension HTTP server for CLI bridge
 - `routes.ts` — extension API surface for editor-backed features and bridge routes
 - `session.ts` — session auto-attach, heartbeat, headless notebook projection
-- `execution/queue.ts` — daemon-routed execution queue; all execution via `POST /api/notebooks/execute-cell`
+- `execution/queue.ts` — output helpers (iopub-to-Jupyter, display-id updates) and Jupyter API cache; execution queue state is daemon-owned
 - `editor/provider.ts` — canvas custom editor host
 - `editor/webview.ts` — mounts the shared React bundle into the custom editor
 - `editor/proxy.ts` — proxies runtime traffic between canvas and daemon
@@ -61,9 +61,10 @@ Current practical boundary:
 
 All notebook execution routes through the daemon via `POST /api/notebooks/execute-cell`. There are no native VS Code execution paths (`notebook.cell.execute`, `kernel.executeCode`) used for workspace notebooks.
 
-- `execution/queue.ts` manages queue state and dispatches to `daemonPost` from `session.ts`
+- `routes.ts` execution routes are thin daemon HTTP pass-throughs via `daemonPost` from `session.ts`
+- `execution/queue.ts` contains only output helpers and Jupyter API cache — no local queue state
 - `HeadlessNotebookProjection.executeCells` in `session.ts` uses the same daemon HTTP path
-- Queue status and running state are derived from daemon responses and WebSocket events
+- Queue status and running state are derived from daemon responses and WebSocket events via `shared/executionState.ts`
 - The execution monitor (`initExecutionMonitor`) is a no-op — execution state comes from daemon, not VS Code document change events
 
 ## Sync Model

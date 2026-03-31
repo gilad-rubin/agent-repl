@@ -7,7 +7,8 @@ import { resolveNotebook, resolveNotebookUri, resolveOrOpenNotebook, findOpenNot
 import { applyEdits, EditOp } from './notebook/operations';
 import { getCellId, ensureIds, resolveCell, withCellId, newCellId } from './notebook/identity';
 import { toJupyter, stripForAgent } from './notebook/outputs';
-import { getExecution, getStatus, resetExecutionState, resetJupyterApiCache, getJupyterApi, startExecution, startNotebookExecutionAll, insertAndExecute } from './execution/queue';
+import { resetJupyterApiCache, getJupyterApi } from './execution/queue';
+import { discoverDaemon, daemonPost, workspaceRootForPath } from './session';
 import { isCanvasNotebookOpen, listOpenCanvasNotebookPaths } from './editor/provider';
 
 type KernelRecord = {
@@ -673,6 +674,18 @@ async function selectKernelById(
     }
 }
 
+function requireDaemon(fsPath: string): { daemon: { url: string; token: string }; workspaceRoot: string } {
+    const workspaceRoot = workspaceRootForPath(fsPath);
+    if (!workspaceRoot) {
+        throw new Error(`No workspace root found for ${fsPath}`);
+    }
+    const daemon = discoverDaemon(workspaceRoot);
+    if (!daemon) {
+        throw new Error('Daemon not found');
+    }
+    return { daemon, workspaceRoot };
+}
+
 export function buildRoutes(maxQueue: number): Routes {
     return {
         // --- Health ---
@@ -828,7 +841,9 @@ export function buildRoutes(maxQueue: number): Routes {
                     queued: [],
                 };
             }
-            const status = await getStatus(doc.uri.fsPath);
+            const { daemon, workspaceRoot } = requireDaemon(doc.uri.fsPath);
+            const notebookPath = path.relative(workspaceRoot, doc.uri.fsPath);
+            const status = await daemonPost(daemon, '/api/notebooks/status', { path: notebookPath });
             return { ...status, path: relPath, open: true };
         },
 
@@ -842,35 +857,59 @@ export function buildRoutes(maxQueue: number): Routes {
             return { path, results };
         },
 
-        // --- Execute ---
+        // --- Execute (daemon pass-through) ---
         'POST /api/notebook/execute-cell': async (body) => {
-            const { path, cwd, cell_id, cell_index } = body as {
+            const { path: relPath, cwd, cell_id, cell_index } = body as {
                 path: string; cwd?: string; cell_id?: string; cell_index?: number;
             };
-            const doc = await resolveOrOpenNotebook(path, cwd);
-            return startExecution(doc.uri.fsPath, { cell_id, cell_index }, maxQueue);
+            const doc = await resolveOrOpenNotebook(relPath, cwd);
+            const { daemon, workspaceRoot } = requireDaemon(doc.uri.fsPath);
+            const notebookPath = path.relative(workspaceRoot, doc.uri.fsPath);
+            return daemonPost(daemon, '/api/notebooks/execute-cell', {
+                path: notebookPath,
+                cell_id,
+                cell_index,
+            });
         },
 
         'GET /api/notebook/execution': async (_body, q) => {
             const id = q.get('id');
+            const notebookPath = q.get('path');
             if (!id) { throw new Error('Missing ?id='); }
-            return getExecution(id);
+            if (!notebookPath) { throw new Error('Missing ?path='); }
+            const doc = resolveNotebook(notebookPath);
+            const { daemon, workspaceRoot } = requireDaemon(doc.uri.fsPath);
+            const relPath = path.relative(workspaceRoot, doc.uri.fsPath);
+            return daemonPost(daemon, '/api/notebooks/execution', {
+                path: relPath,
+                execution_id: id,
+            });
         },
 
         'POST /api/notebook/insert-and-execute': async (body) => {
-            const { path, cwd, source, cell_type, at_index } = body as {
+            const { path: relPath, cwd, source, cell_type, at_index } = body as {
                 path: string; cwd?: string; source: string; cell_type?: string; at_index?: number;
             };
-            const doc = await resolveOrOpenNotebook(path, cwd);
-            return insertAndExecute(doc.uri.fsPath, source, cell_type ?? 'code', at_index ?? -1, maxQueue);
+            const doc = await resolveOrOpenNotebook(relPath, cwd);
+            const { daemon, workspaceRoot } = requireDaemon(doc.uri.fsPath);
+            const notebookPath = path.relative(workspaceRoot, doc.uri.fsPath);
+            return daemonPost(daemon, '/api/notebooks/insert-and-execute', {
+                path: notebookPath,
+                source,
+                cell_type: cell_type ?? 'code',
+                at_index: at_index ?? -1,
+            });
         },
 
         // --- Lifecycle ---
         'POST /api/notebook/execute-all': async (body) => {
-            const { path, cwd } = body as { path: string; cwd?: string };
-            const doc = await resolveOrOpenNotebook(path, cwd);
-            const executions = await startNotebookExecutionAll(doc.uri.fsPath, maxQueue);
-            return { status: 'started', path, executions };
+            const { path: relPath, cwd } = body as { path: string; cwd?: string };
+            const doc = await resolveOrOpenNotebook(relPath, cwd);
+            const { daemon, workspaceRoot } = requireDaemon(doc.uri.fsPath);
+            const notebookPath = path.relative(workspaceRoot, doc.uri.fsPath);
+            return daemonPost(daemon, '/api/notebooks/execute-all', {
+                path: notebookPath,
+            });
         },
 
         'POST /api/notebook/restart-kernel': async (body) => {
@@ -882,12 +921,16 @@ export function buildRoutes(maxQueue: number): Routes {
         },
 
         'POST /api/notebook/restart-and-run-all': async (body) => {
-            const { path, cwd } = body as { path: string; cwd?: string };
-            const doc = await resolveOrOpenNotebook(path, cwd);
+            const { path: relPath, cwd } = body as { path: string; cwd?: string };
+            const doc = await resolveOrOpenNotebook(relPath, cwd);
             const diagnostics: AttachDiagnostic[] = [];
             const method = await restartKernelQuietly(doc, resolveWorkspaceDir(cwd), diagnostics);
-            const executions = await startNotebookExecutionAll(doc.uri.fsPath, maxQueue);
-            return { status: 'started', path, method, diagnostics, executions };
+            const { daemon, workspaceRoot } = requireDaemon(doc.uri.fsPath);
+            const notebookPath = path.relative(workspaceRoot, doc.uri.fsPath);
+            const execResult = await daemonPost(daemon, '/api/notebooks/execute-all', {
+                path: notebookPath,
+            });
+            return { status: 'started', path: relPath, method, diagnostics, ...execResult };
         },
 
         'POST /api/notebook/select-kernel': async (body) => {
@@ -1184,7 +1227,6 @@ async function restartKernelQuietly(
         });
         throw new Error(`Background kernel restart failed. ${formatDiagnostics(diagnostics)}`);
     } finally {
-        resetExecutionState(doc.uri.fsPath);
         resetJupyterApiCache();
     }
 

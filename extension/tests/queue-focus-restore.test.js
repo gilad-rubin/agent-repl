@@ -3,39 +3,13 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const path = require('node:path');
 
-function loadQueueModule(vscode, overrides = {}) {
+function loadQueueModule() {
     const modulePath = path.resolve(__dirname, '../out/execution/queue.js');
     const originalLoad = Module._load;
     Module._load = function patchedLoad(request, parent, isMain) {
         if (request === 'vscode') {
-            return vscode;
-        }
-        if (request === '../notebook/identity') {
             return {
-                resolveCell: () => 0,
-                getCellId: () => 'cell-1',
-            };
-        }
-        if (request === '../notebook/outputs') {
-            return {
-                AGENT_REPL_OUTPUT_METADATA_KEY: 'agent-repl-output',
-                toJupyter: () => [],
-                stripForAgent: value => value,
-                toVSCode: value => value,
-            };
-        }
-        if (request === '../notebook/resolver') {
-            return {
-                resolveNotebook: () => overrides.doc,
-                ...overrides.resolver,
-            };
-        }
-        if (request === '../session') {
-            return {
-                discoverDaemon: () => overrides.daemon ?? { url: 'http://127.0.0.1:9999', token: 'tok' },
-                daemonPost: overrides.daemonPost ?? (async () => ({ status: 'ok' })),
-                workspaceRootForPath: () => '/workspace',
-                sessionIdForWorkspaceState: () => undefined,
+                extensions: { getExtension: () => undefined },
             };
         }
         return originalLoad.call(this, request, parent, isMain);
@@ -49,34 +23,22 @@ function loadQueueModule(vscode, overrides = {}) {
     }
 }
 
-test('executeCell routes through daemon HTTP and returns the result', async () => {
-    const doc = {
-        uri: { fsPath: '/workspace/demo.ipynb' },
-        cellAt: () => ({
-            document: { getText: () => 'print(1)' },
-            executionSummary: null,
-        }),
-    };
+test('queue module exports output helpers and Jupyter API accessors', () => {
+    const queue = loadQueueModule();
+    assert.equal(typeof queue.iopubMessageToJupyterOutput, 'function');
+    assert.equal(typeof queue.applyNotebookOutput, 'function');
+    assert.equal(typeof queue.applyJupyterOutput, 'function');
+    assert.equal(typeof queue.getJupyterApi, 'function');
+    assert.equal(typeof queue.resetJupyterApiCache, 'function');
+});
 
-    let daemonCalls = [];
-    const queue = loadQueueModule(
-        {
-            workspace: { getConfiguration: () => ({ get: (_n, fb) => fb }) },
-            extensions: { getExtension: () => undefined },
-        },
-        {
-            doc,
-            daemonPost: async (_daemon, endpoint, body) => {
-                daemonCalls.push({ endpoint, body });
-                return { status: 'ok', outputs: [], execution_count: 1 };
-            },
-        },
-    );
-
-    const result = await queue.executeCell('/workspace/demo.ipynb', { cell_id: 'cell-1' }, 20);
-    assert.equal(result.status, 'ok');
-    assert.equal(result.execution_mode, 'daemon');
-    assert.equal(daemonCalls.length, 1);
-    assert.equal(daemonCalls[0].endpoint, '/api/notebooks/execute-cell');
-    assert.equal(daemonCalls[0].body.wait, true);
+test('queue module no longer exports local queue functions', () => {
+    const queue = loadQueueModule();
+    assert.equal(queue.executeCell, undefined);
+    assert.equal(queue.startExecution, undefined);
+    assert.equal(queue.getExecution, undefined);
+    assert.equal(queue.getStatus, undefined);
+    assert.equal(queue.resetExecutionState, undefined);
+    assert.equal(queue.insertAndExecute, undefined);
+    assert.equal(queue.startNotebookExecutionAll, undefined);
 });

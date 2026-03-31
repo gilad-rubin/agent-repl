@@ -4,7 +4,7 @@ const Module = require('node:module');
 const path = require('node:path');
 const fs = require('node:fs');
 
-function loadRoutesModule({ vscode, resolver, queue }) {
+function loadRoutesModule({ vscode, resolver, queue, session }) {
     const modulePath = path.resolve(__dirname, '../out/routes.js');
     const originalLoad = Module._load;
     Module._load = function patchedLoad(request, parent, isMain) {
@@ -37,6 +37,13 @@ function loadRoutesModule({ vscode, resolver, queue }) {
         }
         if (request.endsWith('/execution/queue')) {
             return queue;
+        }
+        if (request.endsWith('/session')) {
+            return session ?? {
+                discoverDaemon: () => ({ url: 'http://127.0.0.1:9999', token: 'tok' }),
+                daemonPost: async () => ({ status: 'ok' }),
+                workspaceRootForPath: () => '/workspace',
+            };
         }
         return originalLoad.call(this, request, parent, isMain);
     };
@@ -294,20 +301,11 @@ test('create route fails clearly when no workspace venv kernel exists and none i
     }
 });
 
-test('execute-all route stays in the background and queues code cells through the internal executor', async () => {
+test('execute-all route forwards to daemon HTTP', async () => {
     const uri = { fsPath: '/workspace/tmp/demo.ipynb', toString: () => 'file:///workspace/tmp/demo.ipynb' };
-    const doc = {
-        uri,
-        notebookType: 'jupyter-notebook',
-        cellCount: 2,
-        cellAt(index) {
-            return index === 0
-                ? { kind: 1, document: { getText: () => '# heading' } }
-                : { kind: 2, document: { getText: () => 'print(1)' } };
-        },
-    };
+    const doc = { uri, notebookType: 'jupyter-notebook', cellCount: 2 };
     let showCalls = 0;
-    let executeAllCalls = 0;
+    const daemonCalls = [];
 
     const routesModule = loadRoutesModule({
         vscode: {
@@ -318,19 +316,12 @@ test('execute-all route stays in the background and queues code cells through th
                 openNotebookDocument: async () => doc,
             },
             window: {
-                showNotebookDocument: async () => {
-                    showCalls += 1;
-                    return {};
-                },
+                showNotebookDocument: async () => { showCalls += 1; return {}; },
                 activeNotebookEditor: undefined,
                 activeTextEditor: undefined,
                 visibleNotebookEditors: [],
             },
-            commands: {
-                executeCommand: async () => {
-                    throw new Error('notebook.execute should not run');
-                },
-            },
+            commands: { executeCommand: async () => { throw new Error('should not run'); } },
             extensions: { getExtension: () => undefined },
         },
         resolver: {
@@ -338,29 +329,22 @@ test('execute-all route stays in the background and queues code cells through th
             resolveNotebookUri: () => uri,
             resolveOrOpenNotebook: async () => doc,
             findOpenNotebook: () => undefined,
-            findEditor: () => {
-                throw new Error('not needed');
-            },
-            ensureNotebookEditor: async () => {
-                throw new Error('should not ensure editor for execute-all');
-            },
+            findEditor: () => { throw new Error('not needed'); },
+            ensureNotebookEditor: async () => { throw new Error('should not ensure editor'); },
             captureEditorFocus: () => ({ kind: 'none' }),
             restoreEditorFocus: async () => {},
         },
         queue: {
-            executeCell: async () => ({ status: 'ok' }),
-            getExecution: () => ({ status: 'ok' }),
-            getStatus: async () => ({ kernel_state: 'idle' }),
-            insertAndExecute: async () => ({ status: 'ok' }),
-            resetExecutionState: () => {},
             resetJupyterApiCache: () => {},
             getJupyterApi: async () => undefined,
-            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
-            startNotebookExecutionAll: async (pathArg) => {
-                executeAllCalls += 1;
-                assert.equal(pathArg, '/workspace/tmp/demo.ipynb');
-                return [{ status: 'started', execution_id: 'exec-1', cell_index: 1 }];
+        },
+        session: {
+            discoverDaemon: () => ({ url: 'http://127.0.0.1:9999', token: 'tok' }),
+            daemonPost: async (_daemon, endpoint, body) => {
+                daemonCalls.push({ endpoint, body });
+                return { status: 'started', executions: [{ execution_id: 'exec-1', cell_index: 1 }] };
             },
+            workspaceRootForPath: () => '/workspace',
         },
     });
 
@@ -371,23 +355,17 @@ test('execute-all route stays in the background and queues code cells through th
     });
 
     assert.equal(result.status, 'started');
-    assert.equal(result.executions.length, 1);
-    assert.equal(executeAllCalls, 1);
+    assert.equal(daemonCalls.length, 1);
+    assert.equal(daemonCalls[0].endpoint, '/api/notebooks/execute-all');
+    assert.equal(daemonCalls[0].body.path, 'tmp/demo.ipynb');
     assert.equal(showCalls, 0);
 });
 
-test('insert-and-execute route stays in the background for an already-open notebook', async () => {
+test('insert-and-execute route forwards to daemon HTTP', async () => {
     const uri = { fsPath: '/workspace/tmp/demo.ipynb', toString: () => 'file:///workspace/tmp/demo.ipynb' };
-    const doc = {
-        uri,
-        notebookType: 'jupyter-notebook',
-        cellCount: 1,
-        cellAt() {
-            return { kind: 2, document: { getText: () => 'print(1)' } };
-        },
-    };
+    const doc = { uri, notebookType: 'jupyter-notebook', cellCount: 1 };
     let showCalls = 0;
-    let queueCalls = 0;
+    const daemonCalls = [];
 
     const routesModule = loadRoutesModule({
         vscode: {
@@ -398,19 +376,12 @@ test('insert-and-execute route stays in the background for an already-open noteb
                 openNotebookDocument: async () => doc,
             },
             window: {
-                showNotebookDocument: async () => {
-                    showCalls += 1;
-                    return {};
-                },
+                showNotebookDocument: async () => { showCalls += 1; return {}; },
                 activeNotebookEditor: undefined,
                 activeTextEditor: undefined,
                 visibleNotebookEditors: [],
             },
-            commands: {
-                executeCommand: async () => {
-                    throw new Error('foreground notebook command should not run');
-                },
-            },
+            commands: { executeCommand: async () => { throw new Error('should not run'); } },
             extensions: { getExtension: () => undefined },
         },
         resolver: {
@@ -419,29 +390,21 @@ test('insert-and-execute route stays in the background for an already-open noteb
             resolveOrOpenNotebook: async () => doc,
             findOpenNotebook: () => doc,
             findEditor: () => undefined,
-            ensureNotebookEditor: async () => {
-                throw new Error('should not ensure editor for insert-and-execute');
-            },
+            ensureNotebookEditor: async () => { throw new Error('should not ensure editor'); },
             captureEditorFocus: () => ({ kind: 'none' }),
             restoreEditorFocus: async () => {},
         },
         queue: {
-            executeCell: async () => ({ status: 'ok' }),
-            getExecution: () => ({ status: 'ok' }),
-            getStatus: async () => ({ kernel_state: 'idle' }),
-            insertAndExecute: async (pathArg, sourceArg, cellTypeArg, atIndexArg) => {
-                queueCalls += 1;
-                assert.equal(pathArg, '/workspace/tmp/demo.ipynb');
-                assert.equal(sourceArg, 'x = 2');
-                assert.equal(cellTypeArg, 'code');
-                assert.equal(atIndexArg, -1);
-                return { status: 'started', execution_id: 'exec-ix', cell_id: 'cell-2' };
-            },
-            resetExecutionState: () => {},
             resetJupyterApiCache: () => {},
             getJupyterApi: async () => undefined,
-            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
-            startNotebookExecutionAll: async () => [],
+        },
+        session: {
+            discoverDaemon: () => ({ url: 'http://127.0.0.1:9999', token: 'tok' }),
+            daemonPost: async (_daemon, endpoint, body) => {
+                daemonCalls.push({ endpoint, body });
+                return { status: 'started', execution_id: 'exec-ix', cell_id: 'cell-2' };
+            },
+            workspaceRootForPath: () => '/workspace',
         },
     });
 
@@ -456,86 +419,10 @@ test('insert-and-execute route stays in the background for an already-open noteb
 
     assert.equal(result.status, 'started');
     assert.equal(result.execution_id, 'exec-ix');
-    assert.equal(queueCalls, 1);
-    assert.equal(showCalls, 0);
-});
-
-test('insert-and-execute route opens a closed notebook in the background without revealing it', async () => {
-    const uri = { fsPath: '/workspace/tmp/demo.ipynb', toString: () => 'file:///workspace/tmp/demo.ipynb' };
-    const doc = {
-        uri,
-        notebookType: 'jupyter-notebook',
-        cellCount: 0,
-        cellAt() {
-            return { kind: 2, document: { getText: () => 'print(1)' } };
-        },
-    };
-    let showCalls = 0;
-    let queueCalls = 0;
-
-    const routesModule = loadRoutesModule({
-        vscode: {
-            NotebookCellKind: { Markup: 1, Code: 2 },
-            workspace: {
-                workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
-                notebookDocuments: [],
-                openNotebookDocument: async () => doc,
-            },
-            window: {
-                showNotebookDocument: async () => {
-                    showCalls += 1;
-                    return {};
-                },
-                activeNotebookEditor: undefined,
-                activeTextEditor: undefined,
-                visibleNotebookEditors: [],
-            },
-            commands: {
-                executeCommand: async () => {
-                    throw new Error('foreground notebook command should not run');
-                },
-            },
-            extensions: { getExtension: () => undefined },
-        },
-        resolver: {
-            resolveNotebook: () => doc,
-            resolveNotebookUri: () => uri,
-            resolveOrOpenNotebook: async () => doc,
-            findOpenNotebook: () => undefined,
-            findEditor: () => undefined,
-            ensureNotebookEditor: async () => {
-                throw new Error('should not ensure editor for closed-notebook insert-and-execute');
-            },
-            captureEditorFocus: () => ({ kind: 'none' }),
-            restoreEditorFocus: async () => {},
-        },
-        queue: {
-            executeCell: async () => ({ status: 'ok' }),
-            getExecution: () => ({ status: 'ok' }),
-            getStatus: async () => ({ kernel_state: 'idle' }),
-            insertAndExecute: async () => {
-                queueCalls += 1;
-                return { status: 'started', execution_id: 'exec-ix', cell_id: 'cell-2' };
-            },
-            resetExecutionState: () => {},
-            resetJupyterApiCache: () => {},
-            getJupyterApi: async () => undefined,
-            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
-            startNotebookExecutionAll: async () => [],
-        },
-    });
-
-    const routes = routesModule.buildRoutes(20);
-    const result = await routes['POST /api/notebook/insert-and-execute']({
-        path: 'tmp/demo.ipynb',
-        cwd: '/workspace',
-        source: 'x = 2',
-        cell_type: 'code',
-        at_index: -1,
-    });
-
-    assert.equal(result.status, 'started');
-    assert.equal(queueCalls, 1);
+    assert.equal(daemonCalls.length, 1);
+    assert.equal(daemonCalls[0].endpoint, '/api/notebooks/insert-and-execute');
+    assert.equal(daemonCalls[0].body.source, 'x = 2');
+    assert.equal(daemonCalls[0].body.cell_type, 'code');
     assert.equal(showCalls, 0);
 });
 
@@ -557,9 +444,7 @@ test('restart routes use background shutdown and quiet reattach without opening 
     let openNotebookCalls = 0;
     let showCalls = 0;
     let commandCalls = 0;
-    let resetCalls = 0;
     let resetApiCalls = 0;
-    let executeAllCalls = 0;
 
     process.env.JUPYTER_PATH = fakeRoot;
     fs.existsSync = (target) => (
@@ -583,6 +468,8 @@ test('restart routes use background shutdown and quiet reattach without opening 
             language: 'python',
         });
     };
+
+    const daemonCalls = [];
 
     const routesModule = loadRoutesModule({
         vscode: {
@@ -648,13 +535,6 @@ test('restart routes use background shutdown and quiet reattach without opening 
             restoreEditorFocus: async () => {},
         },
         queue: {
-            executeCell: async () => ({ status: 'ok' }),
-            getExecution: () => ({ status: 'ok' }),
-            getStatus: async () => ({ kernel_state: 'idle' }),
-            insertAndExecute: async () => ({ status: 'ok' }),
-            resetExecutionState: () => {
-                resetCalls += 1;
-            },
             resetJupyterApiCache: () => {
                 resetApiCalls += 1;
             },
@@ -674,12 +554,14 @@ test('restart routes use background shutdown and quiet reattach without opening 
                     executable: { uri: { fsPath: workspacePython } },
                 }),
             }),
-            startExecution: async () => ({ status: 'started', execution_id: 'exec-1' }),
-            startNotebookExecutionAll: async (pathArg) => {
-                executeAllCalls += 1;
-                assert.equal(pathArg, '/workspace/notebooks/demo.ipynb');
-                return [{ status: 'started', execution_id: 'exec-1', cell_index: 0 }];
+        },
+        session: {
+            discoverDaemon: () => ({ url: 'http://127.0.0.1:9999', token: 'tok' }),
+            daemonPost: async (_daemon, endpoint, body) => {
+                daemonCalls.push({ endpoint, body });
+                return { status: 'started', executions: [{ execution_id: 'exec-1', cell_index: 0 }] };
             },
+            workspaceRootForPath: () => '/workspace',
         },
     });
 
@@ -698,13 +580,12 @@ test('restart routes use background shutdown and quiet reattach without opening 
             cwd: '/workspace',
         });
         assert.equal(restartRunAll.status, 'started');
-        assert.equal(restartRunAll.executions.length, 1);
 
         assert.equal(shutdownCalls, 2);
         assert.equal(openNotebookCalls, 2);
-        assert.equal(resetCalls, 2);
         assert.equal(resetApiCalls, 2);
-        assert.equal(executeAllCalls, 1);
+        assert.equal(daemonCalls.length, 1);
+        assert.equal(daemonCalls[0].endpoint, '/api/notebooks/execute-all');
         assert.equal(showCalls, 0);
         assert.equal(commandCalls, 0);
     } finally {
