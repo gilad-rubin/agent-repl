@@ -163,10 +163,6 @@ class NotebookMutationService:
                 # Read back from YDoc and apply to nbformat
                 ydoc_cells = ydoc.get_cells(relative_path)
                 cell.source = ydoc_cells[index]["source"] if index < len(ydoc_cells) else source
-                if cell.cell_type == "code":
-                    cell.outputs = []
-                    cell.execution_count = None
-                    self.state._clear_cell_runtime_provenance(cell)
                 results.append({"op": "replace-source", "changed": True, "cell_id": stable_cell_id, "cell_count": len(notebook.cells)})
                 self.state._append_activity_event(
                     path=relative_path,

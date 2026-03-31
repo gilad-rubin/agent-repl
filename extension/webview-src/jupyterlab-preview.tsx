@@ -1821,6 +1821,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
             if (normalizedKey === 'Enter' && event.altKey) {
               return COMMAND_IDS.runAndInsertBelow;
             }
+            if (normalizedKey === 's' && accel) {
+              return COMMAND_IDS.save;
+            }
             return null;
           }
           if (accel && normalizedKey === 'a') {

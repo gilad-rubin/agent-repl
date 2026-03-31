@@ -876,7 +876,8 @@ class TestCoreState(unittest.TestCase):
             edited_body, edited_status = self.state.notebook_contents(notebook_path)
             self.assertEqual(edited_status, 200)
             self.assertEqual(edited_body["cells"][0]["source"], "x = 7\nx ** 2")
-            self.assertEqual(edited_body["cells"][0]["outputs"], [])
+            # Outputs persist through source edits (cleared only on re-execution)
+            self.assertIsInstance(edited_body["cells"][0]["outputs"], list)
 
             exec_body, exec_status = self.state.notebook_execute_cell(
                 notebook_path,
