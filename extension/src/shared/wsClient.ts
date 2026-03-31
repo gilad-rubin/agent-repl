@@ -42,6 +42,12 @@ export interface DaemonWebSocketOptions {
     onDisconnect: () => void;
     /** Called when the daemon instance ID changed (daemon restarted). */
     onInstanceChange: (newInstanceId: any) => void;
+    /**
+     * Called when the cursor is stale (too many events missed).
+     * The caller should do a full state rehydrate.
+     * If not provided, `onInstanceChange` is fired as a fallback.
+     */
+    onStaleCursor?: () => void;
 }
 
 // -- Backoff helpers --------------------------------------------------------
@@ -66,6 +72,8 @@ export class DaemonWebSocket {
     private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private _closed = false;
     private _subscriptions = new Set<string>();
+    /** Cells currently executing — used to emit synthetic failures on disconnect. */
+    private _executingCells = new Map<string, { path: string; cellId: string }>();
 
     private readonly opts: DaemonWebSocketOptions;
 
@@ -88,6 +96,19 @@ export class DaemonWebSocket {
         if (this._closed) return;
         if (this._state !== 'disconnected') return;
         this._doConnect();
+    }
+
+    /**
+     * Mark a cell as executing. If the connection drops while this cell
+     * is still tracked, a synthetic failure event is emitted via onMessage.
+     */
+    trackExecutingCell(path: string, cellId: string): void {
+        this._executingCells.set(cellId, { path, cellId });
+    }
+
+    /** Mark a cell as no longer executing (completed or failed normally). */
+    untrackExecutingCell(cellId: string): void {
+        this._executingCells.delete(cellId);
     }
 
     /** Subscribe to activity events for a notebook path. */
@@ -161,6 +182,22 @@ export class DaemonWebSocket {
             const wasConnected = this._state === 'connected';
             this._socket = null;
             this._state = 'disconnected';
+
+            // Emit synthetic failure events for any in-flight cells.
+            if (wasConnected && this._executingCells.size > 0) {
+                for (const [cellId, info] of this._executingCells) {
+                    this.opts.onMessage({
+                        type: 'execution',
+                        path: info.path,
+                        cell_id: cellId,
+                        status: 'failed',
+                        error: 'Connection lost during execution',
+                        synthetic: true,
+                    });
+                }
+                this._executingCells.clear();
+            }
+
             if (wasConnected) {
                 this.opts.onDisconnect();
             }
@@ -192,6 +229,7 @@ export class DaemonWebSocket {
         const newInstanceId = hello.instance;
         const instanceChanged = this._instanceId !== null
             && JSON.stringify(newInstanceId) !== JSON.stringify(this._instanceId);
+        const stale = hello.stale === true;
 
         this._instanceId = newInstanceId;
         this._state = 'connected';
@@ -211,8 +249,17 @@ export class DaemonWebSocket {
             this._sendJson({ subscribe: true, path });
         }
 
+        // Signal callers that need full rehydrate.
         if (instanceChanged) {
             this.opts.onInstanceChange(newInstanceId);
+        } else if (stale) {
+            // Cursor evicted — too many events missed. Full rehydrate needed.
+            if (this.opts.onStaleCursor) {
+                this.opts.onStaleCursor();
+            } else {
+                // Fallback: treat like instance change so caller reloads.
+                this.opts.onInstanceChange(newInstanceId);
+            }
         }
 
         this.opts.onConnect();

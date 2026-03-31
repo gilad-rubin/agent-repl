@@ -82,19 +82,28 @@ class WebSocketTransport:
         await self._send_hello(conn)
 
     async def _send_hello(self, conn: _Connection) -> None:
-        """Send hello frame, replaying missed events if cursor is still valid."""
+        """Send hello frame, replaying missed events if cursor is still valid.
+
+        If the client's cursor has been evicted from the bounded event log,
+        the hello includes ``"stale": true`` so the client knows it must do
+        a full state rehydrate rather than relying on incremental replay.
+        """
         hello: dict[str, Any] = {
             "type": "hello",
             "instance": self._instance_id,
+            "stale": False,
         }
-        # If client sent a cursor and it's from this instance, replay missed events
         if conn.last_cursor > 0 and self._cursor_valid(conn.last_cursor):
             missed = self._events_since(conn.last_cursor)
             hello["replay"] = missed
             if missed:
                 conn.last_cursor = missed[-1]["cursor"]
+        elif conn.last_cursor > 0:
+            # Client had a cursor but it's been evicted — stale
+            hello["stale"] = True
+            hello["replay"] = []
         else:
-            # Fresh connection or stale cursor — no replay
+            # Fresh connection — no replay needed
             hello["replay"] = []
         await conn.ws.send_json(hello)
 
