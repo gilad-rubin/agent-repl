@@ -84,6 +84,7 @@ type StructureUndoEntry = {
 type RuntimeSnapshot = {
   busy: boolean;
   kernel_label: string;
+  kernel_generation: number;
   current_execution: Record<string, unknown> | null;
   running_cell_ids: string[];
   queued_cell_ids: string[];
@@ -755,10 +756,12 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
   const [runtime, setRuntime] = useState<RuntimeSnapshot>({
     busy: false,
     kernel_label: '',
+    kernel_generation: 0,
     current_execution: null,
     running_cell_ids: [],
     queued_cell_ids: [],
   });
+  const lastKernelGenerationRef = useRef(0);
   const [toolbarStatus, setToolbarStatus] = useState<string | null>(null);
   const [trustSnapshot, setTrustSnapshot] = useState<NotebookTrustSnapshot>({
     notebook_trusted: false,
@@ -1039,6 +1042,8 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     const nextRuntime: RuntimeSnapshot = {
       busy: Boolean(runtimeResult.runtime?.busy),
       kernel_label: runtimeResult.runtime_record?.label ?? '',
+      kernel_generation: typeof (runtimeResult.runtime_record as any)?.kernel_generation === 'number'
+        ? (runtimeResult.runtime_record as any).kernel_generation : 0,
       current_execution: null,
       running_cell_ids: Array.isArray(statusResult.running)
         ? statusResult.running.map((entry) => entry.cell_id).filter((cellId): cellId is string => typeof cellId === 'string')
@@ -1999,6 +2004,11 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     const runningSet = new Set(runtime.running_cell_ids);
     const queuedSet = new Set(runtime.queued_cell_ids);
 
+    // Detect kernel restart — clear all status bars when generation changes
+    const kernelRestarted = runtime.kernel_generation !== lastKernelGenerationRef.current
+      && lastKernelGenerationRef.current !== 0;
+    lastKernelGenerationRef.current = runtime.kernel_generation;
+
     for (let i = 0; i < notebook.widgets.length; i++) {
       const widget = notebook.widgets[i];
       const cellModel = model.cells.get(i);
@@ -2015,12 +2025,6 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
 
       const isRunning = runningSet.has(cellId);
       const isQueued = queuedSet.has(cellId);
-      const hasError = (cellModel as any).executionCount != null
-        && Array.isArray((cellModel.toJSON() as any).outputs)
-        && (cellModel.toJSON() as any).outputs.some((o: any) => o.output_type === 'error');
-      const hasOutput = (cellModel as any).executionCount != null
-        && Array.isArray((cellModel.toJSON() as any).outputs)
-        && (cellModel.toJSON() as any).outputs.length > 0;
 
       // Set data attribute for CSS shimmer
       if (isRunning) {
@@ -2031,7 +2035,9 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
 
       // Inject or update status bar
       let bar = widget.node.querySelector('.agent-repl-cell-status') as HTMLElement | null;
+
       if (isRunning || isQueued) {
+        // Active execution — always show
         if (!bar) {
           bar = document.createElement('div');
           bar.className = 'agent-repl-cell-status';
@@ -2044,24 +2050,37 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           bar.className = 'agent-repl-cell-status agent-repl-cell-status-queued';
           bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 4.5H12.5M3.5 8H9.5M3.5 11.5H8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Queued</span>';
         }
-      } else if (hasError) {
-        if (!bar) {
-          bar = document.createElement('div');
-          bar.className = 'agent-repl-cell-status';
-          widget.node.appendChild(bar);
+      } else if (kernelRestarted) {
+        // Kernel restarted — clear all stale statuses
+        if (bar) bar.remove();
+      } else {
+        // No active execution, no restart — show completed/error from outputs
+        const hasError = (cellModel as any).executionCount != null
+          && Array.isArray((cellModel.toJSON() as any).outputs)
+          && (cellModel.toJSON() as any).outputs.some((o: any) => o.output_type === 'error');
+        const hasOutput = (cellModel as any).executionCount != null
+          && Array.isArray((cellModel.toJSON() as any).outputs)
+          && (cellModel.toJSON() as any).outputs.length > 0;
+
+        if (hasError) {
+          if (!bar) {
+            bar = document.createElement('div');
+            bar.className = 'agent-repl-cell-status';
+            widget.node.appendChild(bar);
+          }
+          bar.className = 'agent-repl-cell-status agent-repl-cell-status-failed';
+          bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Error</span>';
+        } else if (hasOutput) {
+          if (!bar) {
+            bar = document.createElement('div');
+            bar.className = 'agent-repl-cell-status';
+            widget.node.appendChild(bar);
+          }
+          bar.className = 'agent-repl-cell-status agent-repl-cell-status-completed';
+          bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Completed</span>';
+        } else if (bar) {
+          bar.remove();
         }
-        bar.className = 'agent-repl-cell-status agent-repl-cell-status-failed';
-        bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Error</span>';
-      } else if (hasOutput && !isRunning) {
-        if (!bar) {
-          bar = document.createElement('div');
-          bar.className = 'agent-repl-cell-status';
-          widget.node.appendChild(bar);
-        }
-        bar.className = 'agent-repl-cell-status agent-repl-cell-status-completed';
-        bar.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Completed</span>';
-      } else if (bar) {
-        bar.remove();
       }
     }
   }, [runtime, surfaceReady]);
