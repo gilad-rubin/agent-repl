@@ -6,7 +6,7 @@ import { writeConnectionFile, removeConnectionFile, generateToken } from './disc
 import { PromptStatusBarProvider } from './prompts/statusBar';
 import { insertPromptCell } from './prompts/commands';
 import { ActivityPanelProvider } from './activity/panel';
-import { HeadlessNotebookProjection, SessionAutoAttach } from './session';
+import { SessionAutoAttach } from './session';
 import { CanvasEditorProvider } from './editor/provider';
 import { logNotebookDiagnostic } from './debug';
 
@@ -14,14 +14,12 @@ let server: BridgeServer | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext | undefined;
 let sessionAutoAttach: SessionAutoAttach | undefined;
-let headlessProjection: HeadlessNotebookProjection | undefined;
 let canvasEditorProvider: CanvasEditorProvider | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     extensionContext = context;
     const config = vscode.workspace.getConfiguration('agent-repl');
     sessionAutoAttach = new SessionAutoAttach(context);
-    headlessProjection = new HeadlessNotebookProjection(context, context.extension.id);
 
     // Status bar
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -31,7 +29,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
     context.subscriptions.push(sessionAutoAttach);
-    context.subscriptions.push(headlessProjection);
 
     // Prompt badges
     const promptProvider = new PromptStatusBarProvider();
@@ -210,8 +207,6 @@ function context_subscriptions_push(d: vscode.Disposable): void { extraDisposabl
 
 async function stopBridge(): Promise<void> {
     await sessionAutoAttach?.detachIfAttached();
-    headlessProjection?.dispose();
-    headlessProjection = undefined;
     canvasEditorProvider = undefined;
     server?.dispose();
     server = undefined;

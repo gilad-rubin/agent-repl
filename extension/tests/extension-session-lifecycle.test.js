@@ -75,15 +75,6 @@ function loadExtensionModule() {
         dispose() {}
     }
 
-    class FakeHeadlessNotebookProjection {
-        constructor(context, extensionId) {
-            this.context = context;
-            this.extensionId = extensionId;
-        }
-
-        dispose() {}
-    }
-
     class FakeCanvasEditorProvider {
         constructor(context) {
             this.context = context;
@@ -168,7 +159,7 @@ function loadExtensionModule() {
             return { ActivityPanelProvider: class ActivityPanelProvider {} };
         }
         if (request === './session') {
-            return { SessionAutoAttach: FakeSessionAutoAttach, HeadlessNotebookProjection: FakeHeadlessNotebookProjection };
+            return { SessionAutoAttach: FakeSessionAutoAttach };
         }
         if (request === './editor/provider') {
             return {

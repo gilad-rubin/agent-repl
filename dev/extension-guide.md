@@ -5,7 +5,7 @@
 - `extension.ts` — VS Code activation, command registration
 - `server.ts` — extension HTTP server for CLI bridge
 - `routes.ts` — extension API surface for editor-backed features and bridge routes
-- `session.ts` — session auto-attach, heartbeat, headless notebook projection
+- `session.ts` — session auto-attach, heartbeat, daemon discovery and HTTP helpers
 - `execution/queue.ts` — output helpers (iopub-to-Jupyter, display-id updates) and Jupyter API cache; execution queue state is daemon-owned
 - `editor/provider.ts` — canvas custom editor host
 - `editor/webview.ts` — mounts the shared React bundle into the custom editor
@@ -63,7 +63,6 @@ All notebook execution routes through the daemon via `POST /api/notebooks/execut
 
 - `routes.ts` execution routes are thin daemon HTTP pass-throughs via `daemonPost` from `session.ts`
 - `execution/queue.ts` contains only output helpers and Jupyter API cache — no local queue state
-- `HeadlessNotebookProjection.executeCells` in `session.ts` uses the same daemon HTTP path
 - Queue status and running state are derived from daemon responses and WebSocket events via `shared/executionState.ts`
 - The execution monitor (`initExecutionMonitor`) is a no-op — execution state comes from daemon, not VS Code document change events
 
@@ -72,7 +71,6 @@ All notebook execution routes through the daemon via `POST /api/notebooks/execut
 The extension uses push-based WebSocket sync instead of HTTP polling:
 
 - `editor/proxy.ts` creates a `DaemonWebSocket` for each canvas webview, subscribing to the active notebook path
-- `session.ts` (`HeadlessNotebookProjection`) creates a `DaemonWebSocket` for projection sync
 - `webview-src/jupyterlab-preview.tsx` and `standalone-host.ts` use `DaemonWebSocket` directly from the browser
 - WebSocket events are wrapped into the same envelope format as the old poll results via `buildActivityPollResult`
 - Reconnection uses exponential backoff (500ms base, 30s max, 30% jitter) with automatic resubscription
