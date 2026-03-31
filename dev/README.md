@@ -8,11 +8,14 @@
 
 **Onboarding is now public CLI surface** - `agent-repl setup`, `agent-repl doctor`, `agent-repl editor configure --default-canvas`, and `agent-repl editor dev` are shipped commands, so internal docs should treat them as current product behavior rather than aspirational UX only.
 
+**Notebook surface direction** - The current browser-preview path is now a real JupyterLab notebook surface hosted inside the existing `agent-repl` shell. Treat custom notebook rendering/editing code as transitional unless it is host-specific or product-specific.
+
 ## Read These First
 
 - [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md) - shipped topology, live module boundaries, runtime/session model, and preview/editor split
 - [Browser Verification Guide](/Users/giladrubin/python_workspace/agent-repl/dev/browser-verification-guide.md) - how to QA browser preview properly, verify streamed cell output, and avoid stale-build false alarms
 - [VS Code Jupyter Parity Checklist](/Users/giladrubin/python_workspace/agent-repl/dev/jupyter-parity-checklist.md) - integration gaps and parity work against native notebooks
+- [Extension Guide](/Users/giladrubin/python_workspace/agent-repl/dev/extension-guide.md) - module ownership, dev loops, and which notebook code is transitional versus durable
 
 ## Design Docs
 
@@ -34,5 +37,6 @@
 - Update this folder when the runtime surface, preview/editor topology, or extension build loop changes in a user-visible way
 - When onboarding or install flows change, update the developer-facing explanation here as well as the public docs
 - Prefer [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md) for shipped details and keep design docs clearly labeled as targets
+- If a doc disagrees about notebook UI ownership, prefer the JupyterLab-surface docs and [Current Architecture](/Users/giladrubin/python_workspace/agent-repl/dev/current-architecture.md). Older “keep the custom canvas” guidance is historical, not the current direction.
 - When preview and installed VS Code behavior differ, document which asset source is authoritative and how to verify sync
 - Treat Extension Development Host as the preferred integration loop; installed-extension workflows are secondary and should surface drift warnings

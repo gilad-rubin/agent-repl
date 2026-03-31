@@ -4,6 +4,12 @@
 
 Updated 2026-03-29
 
+Notebook surface direction note:
+
+- This document remains correct about the runtime-first core: daemon authority, shared services, YDoc data models, collaboration boundaries, and thin adapters are still the target.
+- It is no longer current about notebook UI ownership. Since the JupyterLab surface work documented in [JupyterLab-Powered Notebook Surface](./design/jupyterlab-surface.md), the active direction is to let JupyterLab own notebook semantics while `agent-repl` keeps the host shell and runtime/product behavior.
+- When this document conflicts with [Current Architecture](./current-architecture.md), [JupyterLab-Powered Notebook Surface](./design/jupyterlab-surface.md), or [JupyterLab Surface Rollout](./implementation-chain/jupyterlab-surface-rollout.md) on notebook-surface ownership, prefer those newer documents.
+
 ### Shipped
 
 - **ASGI host shell (Phase 3)**: Starlette app served by uvicorn (`src/agent_repl/core/asgi.py`), with `TokenAuthMiddleware` for auth. The old `ThreadingHTTPServer` handler has been fully removed.
@@ -46,7 +52,7 @@ This plan is intentionally pragmatic:
 
 ## Non-Goals
 
-- Rebuild the frontend around JupyterLab widgets or Lumino just to be “more Jupyter”
+- Rebuild the entire product shell around JupyterLab or Lumino just to be “more Jupyter”
 - Delete collaboration features that users already rely on just because CRDTs exist
 - Big-bang rewrite of the daemon, extension, and browser preview together
 - Trade the current shared-canvas direction for separate UI implementations per surface
@@ -58,13 +64,13 @@ The repo already has several good architectural moves. Modernization should buil
 Keep:
 
 - the shared runtime in `src/agent_repl/core/` as the product authority
-- the shared React canvas bundle in `extension/webview-src/`
+- the shared browser/VS Code host shell in `extension/webview-src/`
 - VS Code and browser preview as clients of the same notebook surface
 - Jupyter kernels as the execution backend
 - projection/activity as the mechanism for editor continuity
 - the newer pure shared UI logic modules in `extension/src/shared/`
 
-In other words: the main opportunity is not “replace everything”. It is “reduce duplicated orchestration and replace custom infrastructure under the current shape”.
+In other words: the main opportunity is not “replace everything”. It is “keep the runtime-first shape, but stop owning notebook semantics where JupyterLab is already stronger”.
 
 ## Current Design Smells
 
@@ -142,7 +148,7 @@ This is the pragmatic stack to converge toward.
 | CRDT persistence | `pycrdt-store` or equivalent YDoc-backed persistence | Do not invent a second custom persistence format for collaborative documents if upstream already provides one |
 | Notebook diff verification | [`nbdime`](https://nbdime.readthedocs.io/) | Semantic notebook diffs for round-trip parity checks |
 | LSP virtual document model | [jupyterlab-lsp virtual document pattern](https://jupyterlab.readthedocs.io/en/stable/api/modules/lsp.VirtualDocument.html) + [jupyterlab-lsp extension guidance](https://jupyterlab-lsp.readthedocs.io/en/latest/Extending.html) + `vscode-languageclient` where it fits | Reuse the established notebook-to-virtual-document mapping model rather than growing a one-off mapper forever |
-| Editor surface | [VS Code Custom Editor API](https://code.visualstudio.com/api/extension-guides/custom-editors), shared React canvas, [CodeMirror 6](https://codemirror.net/docs/guide) | Keep the current shared-canvas direction; do not replace it with JupyterLab UI packages |
+| Editor surface | [VS Code Custom Editor API](https://code.visualstudio.com/api/extension-guides/custom-editors), shared host shell, JupyterLab notebook surface, [CodeMirror 6](https://codemirror.net/docs/guide) | Keep the current host-shell direction, but let JupyterLab replace bespoke notebook editing/rendering where it reduces maintenance |
 
 ## Transport Choices
 
@@ -191,9 +197,9 @@ Recommended stance:
 - keep the human-oriented `agent-repl` CLI handcrafted where that UX matters
 - consider generated or thin-wrapper CLI commands for admin or MCP-native workflows where schema-driven generation reduces maintenance
 
-### Adopt Jupyter collaboration data models, not JupyterLab frontend UI
+### Adopt Jupyter collaboration data models and use JupyterLab for notebook semantics where it clearly wins
 
-The best upstream reuse target is the collaborative document model, not the JupyterLab renderer stack.
+The biggest long-term reuse target is still the collaborative document model, but the notebook surface direction has changed: we now want JupyterLab to own notebook semantics while `agent-repl` keeps runtime and product-shell authority.
 
 Use:
 
@@ -201,13 +207,18 @@ Use:
 - `@jupyter/ydoc`
 - `jupyter_server_ydoc`
 - Yjs Awareness
+- JupyterLab notebook/output/editor packages for the visible notebook surface
 
 Do not try to:
 
-- replace the current shared React canvas with JupyterLab notebook widgets
-- pull Lumino-heavy frontend infrastructure into the VS Code webview just to reduce a small amount of UI code
+- replace daemon/session/runtime ownership with JupyterLab frontend ownership
+- rebuild the whole product shell as a JupyterLab application when we only need JupyterLab to own the notebook itself
+- give up the existing browser/VS Code shell integration, recovery UX, and headless execution model
 
-That would increase coupling without clearly reducing product complexity.
+The goal is a hybrid boundary:
+
+- `agent-repl` owns runtime, collaboration/product workflow, and host shell
+- JupyterLab owns notebook-local behavior
 
 ### Keep outputs and execution state outside the CRDT
 
@@ -233,6 +244,8 @@ Reason:
 - outputs are produced by the runtime, not by collaborative text editing
 - execution status needs server ownership anyway
 - the current product already relies on ownership, runtime, and activity semantics that are richer than simple shared document state
+
+This remains true even with a JupyterLab notebook surface. JupyterLab is a client/projection layer here, not the runtime authority.
 
 ### Do not delete branches just because CRDTs reduce edit conflicts
 
@@ -473,7 +486,7 @@ These changes are low-value or actively harmful right now.
 Do not prioritize:
 
 - replacing `marked` + `DOMPurify` unless you have a concrete markdown feature gap
-- replacing the shared React canvas with a different frontend stack
+- replacing the shared host shell with a different product shell when the real goal is only to swap notebook semantics underneath it
 - rewriting all CodeMirror code just to use a different React wrapper
 - moving to a distributed task queue before the local execution model is clean
 - replacing `sqlite3` with a heavier ORM before the schema stabilizes

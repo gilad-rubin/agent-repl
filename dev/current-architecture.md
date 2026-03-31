@@ -12,7 +12,8 @@ For the north-star target architecture, see:
 
 - The shared runtime in `src/agent_repl/core/` is now the primary notebook authority for public CLI flows
 - The VS Code extension is a projection and editor-integration layer, not the only execution backend
-- The browser preview and the VS Code canvas render the same bundled UI from `extension/webview-src/main.tsx`
+- The browser preview now has a real JupyterLab-backed notebook surface hosted inside the existing `agent-repl` browser shell
+- The long-term VS Code target is the same split: `agent-repl` owns the host shell and daemon projection, JupyterLab owns notebook semantics
 - Some editor-assisted features still live on bridge routes: prompt cells, reload, kernel inspection, and notebook APIs that require VS Code
 
 ## Topology
@@ -106,18 +107,27 @@ Key modules:
 
 ### Canvas UI
 
-There is one shipped canvas implementation:
+There are now two relevant notebook UI layers in the extension worktree:
 
-- source: `extension/webview-src/main.tsx`
-- standalone/preview host glue: `extension/webview-src/standalone-host.ts`
-- built assets: `extension/media/canvas.js` and `extension/media/canvas.css`
+1. The existing host shell and product canvas UI:
+   - `extension/webview-src/main.tsx`
+   - `extension/webview-src/standalone-host.ts`
+2. The JupyterLab notebook surface:
+   - `extension/webview-src/jupyterlab-preview.tsx`
+   - bundled into `extension/media/canvas.js` and `extension/media/canvas.css`
 
-Both of these use the same bundle:
+The current shipped preview path uses the same built assets:
 
 - browser preview: `extension/preview.html` + `extension/scripts/preview-webview.mjs`
 - VS Code custom editor: `editor/provider.ts` + `editor/webview.ts`
 
-In browser mode, the shared bundle now renders a minimal VS Code-like shell around the notebook canvas: a thin activity rail plus a collapsible explorer for workspace `*.ipynb` files. The explorer is browser-only, but it is still driven by the same `main.tsx` bundle as the VS Code canvas instead of a separate preview UI.
+In browser mode, the host shell still looks like `agent-repl`: activity rail, explorer, toolbar framing, theme controls, and kernel picker live in the host layer. Inside that shell, the notebook itself is now a real JupyterLab `Notebook` widget. That means:
+
+- notebook editing/rendering behavior is increasingly JupyterLab-owned
+- daemon/session/runtime behavior remains `agent-repl`-owned
+- browser-only shell affordances can stay custom without re-implementing notebook semantics
+
+Treat the older custom notebook-surface code in `main.tsx`, notebook-specific CSS, and bespoke output rendering as transitional unless it is still required for a host-specific feature.
 
 The installed extension can optionally prefer preview-served assets through the `agent-repl.browserCanvasUrl` setting, but only from loopback origins and only with a packaged-asset fallback. If preview and VS Code diverge visually, the most likely cause is bundle drift rather than a separate UI codepath.
 
@@ -237,6 +247,30 @@ There are two output views:
 - notebook persistence keeps full Jupyter outputs
 - agent-facing APIs strip rich media down to safe summaries or text placeholders
 - canvas/browser rendering prefers rich notebook mime bundles in a JupyterLab-like order: `text/html`, `text/markdown`, SVG/raster images, JSON, then plain text
+
+## Ownership Boundaries
+
+The intended ownership split is now:
+
+### JupyterLab-owned notebook behavior
+
+- code and markdown cell editing behavior
+- command/edit mode and notebook keyboard semantics
+- rich output rendering and trust-aware notebook presentation
+- widget-compatible rendering and notebook-local interaction expectations
+
+### `agent-repl`-owned product/runtime behavior
+
+- daemon authority and workspace routing
+- headless execution and runtime lifecycle
+- attach/detach continuity across browser, VS Code, CLI, and agents
+- collaboration/session attribution, leases, branches, and review flows
+- host shell framing such as explorer, toolbar placement, and browser-specific recovery UX
+
+This is the main replacement rule for ongoing work:
+
+- replace bespoke notebook rendering/editing code with JupyterLab where possible
+- keep custom code where it expresses runtime-first product behavior or host-specific UX
 
 `toJupyter()` and `toVSCode()` bridge between VS Code notebook output objects and standard Jupyter structures.
 

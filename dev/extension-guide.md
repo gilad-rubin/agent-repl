@@ -14,6 +14,28 @@
 - `scripts/standalone-lsp.mjs` — headless LSP for browser preview
 - `src/shared/` — pure helpers shared across proxy and standalone host
 
+## Ownership Split
+
+The extension now has a deliberate split between host-shell/product behavior and notebook semantics.
+
+- `agent-repl` still owns:
+  - runtime/session authority
+  - daemon routing and workspace resolution
+  - attach/detach behavior across browser, VS Code, CLI, and agents
+  - product shell concerns such as explorer framing, toolbar integration, recovery UX, and host messaging
+- JupyterLab now owns, or should increasingly own:
+  - code and markdown cell editing behavior
+  - command/edit mode semantics and notebook keyboard flows
+  - rich output rendering, trust-aware notebook presentation, and widget-compatible rendering
+  - notebook-local interaction defaults where upstream already has a strong answer
+
+Current practical boundary:
+
+- `extension/webview-src/jupyterlab-preview.tsx` is the active notebook-surface path for browser preview and the reference direction for the eventual VS Code custom-editor notebook surface.
+- `extension/webview-src/main.tsx` still contains older custom notebook surface behavior and host-shell code. Treat notebook-rendering and notebook-editing logic there as transitional unless it is clearly host-specific or product-specific.
+- `editor/webview.ts`, `editor/provider.ts`, and `editor/proxy.ts` remain durable host glue. They should mount and synchronize the notebook surface, not re-encode notebook semantics.
+- `editor/lsp.ts` and `src/shared/notebookVirtualDocument.ts` remain important, but their current custom notebook mapping is transitional until it is aligned with a `jupyterlab-lsp`-style virtual-document model.
+
 ## Shared Modules (`extension/src/shared/`)
 
 | Module | Purpose |
@@ -29,7 +51,7 @@
 ## Dev Loops
 
 - **Preferred integration loop**: `uv run agent-repl editor dev --editor vscode` — compiles the repo extension and opens an Extension Development Host so VS Code runs the workspace checkout directly.
-- **Canvas UI**: `cd extension && npm run preview:webview` — serves real canvas in browser with simulated runtime. Fastest loop for renderer work.
+- **Canvas UI / JupyterLab preview**: `cd extension && npm run preview:webview` — serves the browser shell and the current JupyterLab-backed notebook surface. Fastest loop for renderer work.
 - **Extension host**: `cd extension && npm run compile` then `Agent REPL: Reload` — hot-reloads routes/modules without reinstalling VSIX.
 - **Full rebuild**: Changes to `extension.ts` or `server.ts` require full window reload.
 - **Installed extension**: Recompiling does NOT update `~/.vscode/extensions/` — reinstall the `.vsix` or use Extension Development Host.
@@ -39,6 +61,8 @@
 - Execution paths must stay background-safe. If a path steals focus or surfaces UI, that's a product bug.
 - Browser preview does not exercise VS Code messaging, kernel attach, or custom-editor lifecycle. Verify integration-sensitive changes in Extension Development Host.
 - Browser preview does exercise the standalone session-selection path. If preview and VS Code disagree on lease behavior, inspect session reuse first.
+- Prefer replacing bespoke notebook editing/rendering behavior with JupyterLab primitives rather than growing new notebook-specific code in `main.tsx`.
+- Keep custom extension work focused on host-shell concerns, daemon synchronization, and product-specific affordances. If a behavior is fundamentally notebook-local and JupyterLab already implements it well, treat JupyterLab as the default owner.
 - `browserCanvasUrl` lets the installed extension prefer preview-served assets on loopback. If preview and installed UI disagree, suspect asset drift.
 - `agent-repl doctor` and `agent-repl reload --pretty` now report repo-vs-installed build drift when the workspace contains an `extension/` checkout.
 - Dirty-draft behavior around execute-all, restart-and-run-all, and notebook switching is high-risk. Add regression coverage when touching those flows.
