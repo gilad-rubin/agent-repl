@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { WebSocket as NodeWebSocket } from 'ws';
 
 import { createStandaloneServices } from './standalone-server.mjs';
@@ -59,6 +60,23 @@ const contentTypes = new Map([
   ['.svg', 'image/svg+xml'],
   ['.woff2', 'font/woff2'],
 ]);
+
+const compressibleExts = new Set(['.js', '.css', '.html', '.json', '.svg']);
+const gzipCache = new Map(); // filePath → { mtime, data }
+
+function getGzipped(filePath, rawData, stat) {
+  if (!compressibleExts.has(extname(filePath))) {
+    return null;
+  }
+  const mtimeMs = stat.mtimeMs;
+  const cached = gzipCache.get(filePath);
+  if (cached && cached.mtime === mtimeMs) {
+    return cached.data;
+  }
+  const compressed = gzipSync(rawData, { level: 6 });
+  gzipCache.set(filePath, { mtime: mtimeMs, data: compressed });
+  return compressed;
+}
 
 let buildInFlight = false;
 let buildQueued = false;
@@ -181,12 +199,22 @@ const server = createServer(async (request, response) => {
     const targetFile = stat.isDirectory() ? join(filePath, 'index.html') : filePath;
     const data = await readFile(targetFile);
     const contentType = contentTypes.get(extname(targetFile)) || 'application/octet-stream';
-    response.writeHead(200, {
+    const acceptEncoding = request.headers['accept-encoding'] || '';
+    const gzipped = acceptEncoding.includes('gzip') ? getGzipped(targetFile, data, stat) : null;
+    const headers = {
       'Content-Type': contentType,
       'Content-Language': 'en',
       'Cache-Control': 'no-store',
-    });
-    response.end(data);
+    };
+    if (gzipped) {
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+      response.writeHead(200, headers);
+      response.end(gzipped);
+    } else {
+      response.writeHead(200, headers);
+      response.end(data);
+    }
   } catch {
     response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     response.end(`Not found: ${normalize(filePath)}`);

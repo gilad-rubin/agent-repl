@@ -142,13 +142,33 @@ const COMMAND_IDS = {
   selectBelow: 'agent-repl:notebook-select-below',
   extendSelectionAbove: 'agent-repl:notebook-extend-selection-above',
   extendSelectionBelow: 'agent-repl:notebook-extend-selection-below',
+  extendSelectionTop: 'agent-repl:notebook-extend-selection-top',
+  extendSelectionBottom: 'agent-repl:notebook-extend-selection-bottom',
   insertAbove: 'agent-repl:notebook-insert-above',
   insertBelow: 'agent-repl:notebook-insert-below',
+  insertHeadingAbove: 'agent-repl:notebook-insert-heading-above',
+  insertHeadingBelow: 'agent-repl:notebook-insert-heading-below',
   changeToCode: 'agent-repl:notebook-change-to-code',
   changeToMarkdown: 'agent-repl:notebook-change-to-markdown',
+  changeToRaw: 'agent-repl:notebook-change-to-raw',
+  setHeading1: 'agent-repl:notebook-set-heading-1',
+  setHeading2: 'agent-repl:notebook-set-heading-2',
+  setHeading3: 'agent-repl:notebook-set-heading-3',
+  setHeading4: 'agent-repl:notebook-set-heading-4',
+  setHeading5: 'agent-repl:notebook-set-heading-5',
+  setHeading6: 'agent-repl:notebook-set-heading-6',
   deleteCells: 'agent-repl:notebook-delete-cells',
+  cutCells: 'agent-repl:notebook-cut-cells',
   moveUp: 'agent-repl:notebook-move-up',
   moveDown: 'agent-repl:notebook-move-down',
+  mergeCellAbove: 'agent-repl:notebook-merge-cell-above',
+  mergeCellBelow: 'agent-repl:notebook-merge-cell-below',
+  headingAboveOrCollapse: 'agent-repl:notebook-heading-above-or-collapse',
+  headingBelowOrExpand: 'agent-repl:notebook-heading-below-or-expand',
+  collapseAllHeadings: 'agent-repl:notebook-collapse-all-headings',
+  expandAllHeadings: 'agent-repl:notebook-expand-all-headings',
+  toggleLineNumbers: 'agent-repl:notebook-toggle-line-numbers',
+  toggleSideBySide: 'agent-repl:notebook-toggle-side-by-side',
   runCell: 'agent-repl:notebook-run-cell',
   runAndAdvance: 'agent-repl:notebook-run-and-advance',
   runAndInsertBelow: 'agent-repl:notebook-run-and-insert-below',
@@ -161,6 +181,8 @@ const COMMAND_IDS = {
   mergeCells: 'agent-repl:notebook-merge-cells',
   copyCells: 'agent-repl:notebook-copy-cells',
   pasteCells: 'agent-repl:notebook-paste-cells',
+  interruptKernel: 'agent-repl:notebook-interrupt-kernel',
+  restartKernel: 'agent-repl:notebook-restart-kernel',
 } as const;
 
 function createToolbarButtonBaseStyle(): React.CSSProperties {
@@ -661,19 +683,52 @@ function shouldHandleNotebookShortcut(event: KeyboardEvent, notebook: Notebook):
     if (accel && event.shiftKey && (normalizedKey === '-' || normalizedKey === 'minus')) {
       return true;
     }
+    // Ctrl+M — alternative enter-command-mode
+    if (event.ctrlKey && !event.metaKey && normalizedKey === 'm') {
+      return true;
+    }
     return false;
   }
 
+  // Command mode
   if (accel && normalizedKey === 'a') {
     return true;
   }
   if (normalizedKey === 'Enter' || normalizedKey === 'Escape') {
     return true;
   }
+  // Arrow keys: up/down for navigation, left/right for heading collapse/expand
   if (normalizedKey === 'ArrowUp' || normalizedKey === 'ArrowDown') {
     return !event.altKey && !accel;
   }
-  return ['a', 'b', 'c', 'd', 'j', 'k', 'm', 'v', 'y', 'z'].includes(normalizedKey);
+  if (normalizedKey === 'ArrowLeft' || normalizedKey === 'ArrowRight') {
+    // Plain arrows for heading nav, Ctrl+Shift for collapse/expand all
+    return !event.altKey;
+  }
+  // Shift+Home/End for extend to top/bottom
+  if ((normalizedKey === 'Home' || normalizedKey === 'End') && event.shiftKey) {
+    return true;
+  }
+  // Ctrl+Backspace for merge cell above
+  if (normalizedKey === 'Backspace' && event.ctrlKey) {
+    return true;
+  }
+  // Ctrl+Shift+M for merge cell below (distinct from plain Shift+M merge-cells)
+  if (normalizedKey === 'm' && event.ctrlKey && event.shiftKey) {
+    return true;
+  }
+  // Ctrl+Shift+Arrow for collapse/expand all headings, move cell up/down
+  if ((normalizedKey === 'ArrowUp' || normalizedKey === 'ArrowDown'
+    || normalizedKey === 'ArrowLeft' || normalizedKey === 'ArrowRight')
+    && accel && event.shiftKey) {
+    return true;
+  }
+  // 1-6 for heading levels, 0 for restart kernel (double-tap)
+  if ('1234560'.includes(normalizedKey) && !accel && !event.altKey) {
+    return true;
+  }
+  // Single-letter command mode keys
+  return ['a', 'b', 'c', 'd', 'i', 'j', 'k', 'l', 'm', 'r', 'v', 'x', 'y', 'z'].includes(normalizedKey);
 }
 
 function shouldRouteNotebookEvent(
@@ -1511,7 +1566,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     });
   }, [persistStructureOperations]);
 
-  const changeSelectedCellType = useCallback(async (nextType: 'code' | 'markdown') => {
+  const changeSelectedCellType = useCallback(async (nextType: 'code' | 'markdown' | 'raw') => {
     const notebook = notebookRef.current;
     const model = modelRef.current;
     if (!notebook || !model) {
@@ -1548,7 +1603,7 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
       return {
         op: 'change-cell-type',
         cell_id: cellId,
-        cell_type: previousCell?.cell_type === 'markdown' ? 'markdown' : 'code',
+        cell_type: previousCell?.cell_type ?? 'code',
         source: previousCell?.source ?? '',
       };
     });
@@ -1860,8 +1915,6 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     if (!mountNode || !initialCells) {
       return;
     }
-    const _tSurface = performance.now();
-    console.log('[TIMING] surface creation start');
     const restoreWarningFilter = installBenignYjsWarningFilter();
     let disposed = false;
 
@@ -1995,6 +2048,59 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     addCommand(COMMAND_IDS.pasteCells, wrapCommand(() => {
       NotebookActions.paste(notebook);
     }));
+    addCommand(COMMAND_IDS.cutCells, wrapCommand(() => {
+      NotebookActions.cut(notebook);
+    }));
+    addCommand(COMMAND_IDS.changeToRaw, wrapCommand(() => changeSelectedCellType('raw')));
+    for (let level = 1; level <= 6; level++) {
+      const id = COMMAND_IDS[`setHeading${level}` as keyof typeof COMMAND_IDS];
+      addCommand(id, wrapCommand(() => {
+        NotebookActions.setMarkdownHeader(notebook, level, nullTranslator);
+      }));
+    }
+    addCommand(COMMAND_IDS.insertHeadingAbove, wrapCommand(() => {
+      void NotebookActions.insertSameLevelHeadingAbove(notebook);
+    }));
+    addCommand(COMMAND_IDS.insertHeadingBelow, wrapCommand(() => {
+      void NotebookActions.insertSameLevelHeadingBelow(notebook);
+    }));
+    addCommand(COMMAND_IDS.mergeCellAbove, wrapCommand(() => {
+      NotebookActions.mergeCells(notebook, true);
+    }));
+    addCommand(COMMAND_IDS.mergeCellBelow, wrapCommand(() => {
+      NotebookActions.mergeCells(notebook, false);
+    }));
+    addCommand(COMMAND_IDS.headingAboveOrCollapse, wrapCommand(() => {
+      NotebookActions.selectHeadingAboveOrCollapseHeading(notebook);
+    }));
+    addCommand(COMMAND_IDS.headingBelowOrExpand, wrapCommand(() => {
+      NotebookActions.selectHeadingBelowOrExpandHeading(notebook);
+    }));
+    addCommand(COMMAND_IDS.collapseAllHeadings, wrapCommand(() => {
+      NotebookActions.collapseAllHeadings(notebook);
+    }));
+    addCommand(COMMAND_IDS.expandAllHeadings, wrapCommand(() => {
+      NotebookActions.expandAllHeadings(notebook);
+    }));
+    addCommand(COMMAND_IDS.toggleLineNumbers, wrapCommand(() => {
+      NotebookActions.toggleAllLineNumbers(notebook);
+    }));
+    addCommand(COMMAND_IDS.toggleSideBySide, wrapCommand(() => {
+      const cell = notebook.activeCell;
+      if (cell && cell.node.classList.contains('jp-mod-sideBySide')) {
+        NotebookActions.renderDefault(notebook);
+      } else {
+        NotebookActions.renderSideBySide(notebook);
+      }
+    }));
+    addCommand(COMMAND_IDS.extendSelectionTop, wrapCommand(() => {
+      NotebookActions.extendSelectionAbove(notebook, true);
+    }));
+    addCommand(COMMAND_IDS.extendSelectionBottom, wrapCommand(() => {
+      NotebookActions.extendSelectionBelow(notebook, true);
+    }));
+    addCommand(COMMAND_IDS.interruptKernel, wrapCommand(() => interruptExecution()));
+    addCommand(COMMAND_IDS.restartKernel, wrapCommand(() => restartKernel()));
 
     const bindCommand = (command: string, keys: string[] | string, selector: string) => {
       commands.addKeyBinding({
@@ -2029,7 +2135,32 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     bindCommand(COMMAND_IDS.splitCell, 'Accel Shift -', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-editMode`);
     bindCommand(COMMAND_IDS.mergeCells, 'Shift M', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
     bindCommand(COMMAND_IDS.copyCells, 'C', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.cutCells, 'X', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
     bindCommand(COMMAND_IDS.pasteCells, 'V', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.changeToRaw, 'R', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.setHeading1, '1', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.setHeading2, '2', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.setHeading3, '3', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.setHeading4, '4', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.setHeading5, '5', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.setHeading6, '6', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.insertHeadingAbove, 'Shift A', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.insertHeadingBelow, 'Shift B', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.mergeCellAbove, 'Ctrl Backspace', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.mergeCellBelow, 'Ctrl Shift M', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.headingAboveOrCollapse, 'ArrowLeft', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.headingBelowOrExpand, 'ArrowRight', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.collapseAllHeadings, 'Ctrl Shift ArrowLeft', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.expandAllHeadings, 'Ctrl Shift ArrowRight', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.toggleLineNumbers, 'Shift L', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.toggleSideBySide, 'Shift R', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.extendSelectionAbove, 'Shift K', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.extendSelectionBelow, 'Shift J', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.extendSelectionTop, 'Shift Home', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.extendSelectionBottom, 'Shift End', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.interruptKernel, ['I', 'I'], `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.restartKernel, ['0', '0'], `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-commandMode`);
+    bindCommand(COMMAND_IDS.enterCommandMode, 'Ctrl M', `${NOTEBOOK_COMMAND_SELECTOR}.jp-mod-editMode`);
 
     const debugWindow = window as JupyterLabPreviewDebugWindow;
     debugWindow.__agentReplJupyterLab = {
@@ -2137,8 +2268,13 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
             if (accel && event.shiftKey && (normalizedKey === '-' || normalizedKey === 'minus')) {
               return COMMAND_IDS.splitCell;
             }
+            // Ctrl+M — alternative enter command mode
+            if (event.ctrlKey && !event.metaKey && normalizedKey === 'm') {
+              return COMMAND_IDS.enterCommandMode;
+            }
             return null;
           }
+          // Command mode
           if (normalizedKey === 'Enter' && event.shiftKey) {
             return COMMAND_IDS.runAndAdvance;
           }
@@ -2154,17 +2290,72 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           if (normalizedKey === 'Enter') {
             return COMMAND_IDS.enterEditMode;
           }
+          // Collapse/expand all headings (Ctrl+Shift+Left/Right)
+          if (accel && event.shiftKey && normalizedKey === 'ArrowLeft') {
+            return COMMAND_IDS.collapseAllHeadings;
+          }
+          if (accel && event.shiftKey && normalizedKey === 'ArrowRight') {
+            return COMMAND_IDS.expandAllHeadings;
+          }
+          // Move cell up/down (Ctrl+Shift+Up/Down) — must check before plain arrows
+          if (accel && event.shiftKey && normalizedKey === 'ArrowUp') {
+            return COMMAND_IDS.moveUp;
+          }
+          if (accel && event.shiftKey && normalizedKey === 'ArrowDown') {
+            return COMMAND_IDS.moveDown;
+          }
+          // Extend selection (Shift+Arrow/K/J/Home/End)
+          if (event.shiftKey && (normalizedKey === 'ArrowUp' || normalizedKey === 'k')) {
+            return COMMAND_IDS.extendSelectionAbove;
+          }
+          if (event.shiftKey && (normalizedKey === 'ArrowDown' || normalizedKey === 'j')) {
+            return COMMAND_IDS.extendSelectionBelow;
+          }
+          if (event.shiftKey && normalizedKey === 'Home') {
+            return COMMAND_IDS.extendSelectionTop;
+          }
+          if (event.shiftKey && normalizedKey === 'End') {
+            return COMMAND_IDS.extendSelectionBottom;
+          }
+          // Navigation
           if (normalizedKey === 'ArrowUp' || normalizedKey === 'k') {
             return COMMAND_IDS.selectAbove;
           }
           if (normalizedKey === 'ArrowDown' || normalizedKey === 'j') {
             return COMMAND_IDS.selectBelow;
           }
+          if (normalizedKey === 'ArrowLeft') {
+            return COMMAND_IDS.headingAboveOrCollapse;
+          }
+          if (normalizedKey === 'ArrowRight') {
+            return COMMAND_IDS.headingBelowOrExpand;
+          }
+          // Merge: Ctrl+Backspace (above), Ctrl+Shift+M (below), Shift+M (selected)
+          if (event.ctrlKey && normalizedKey === 'Backspace') {
+            return COMMAND_IDS.mergeCellAbove;
+          }
+          if (event.ctrlKey && event.shiftKey && normalizedKey === 'm') {
+            return COMMAND_IDS.mergeCellBelow;
+          }
+          // Insert: Shift+A/B for heading, plain A/B for cell
+          if (normalizedKey === 'a' && event.shiftKey) {
+            return COMMAND_IDS.insertHeadingAbove;
+          }
+          if (normalizedKey === 'b' && event.shiftKey) {
+            return COMMAND_IDS.insertHeadingBelow;
+          }
           if (normalizedKey === 'a') {
             return COMMAND_IDS.insertAbove;
           }
           if (normalizedKey === 'b') {
             return COMMAND_IDS.insertBelow;
+          }
+          // Display toggles: Shift+L (line numbers), Shift+R (side-by-side)
+          if (normalizedKey === 'l' && event.shiftKey) {
+            return COMMAND_IDS.toggleLineNumbers;
+          }
+          if (normalizedKey === 'r' && event.shiftKey) {
+            return COMMAND_IDS.toggleSideBySide;
           }
           if (normalizedKey === 'm' && event.shiftKey) {
             return COMMAND_IDS.mergeCells;
@@ -2175,6 +2366,14 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           if (normalizedKey === 'y') {
             return COMMAND_IDS.changeToCode;
           }
+          if (normalizedKey === 'r' && !event.shiftKey) {
+            return COMMAND_IDS.changeToRaw;
+          }
+          // Heading levels 1-6
+          if ('123456'.includes(normalizedKey) && !accel && !event.altKey && !event.shiftKey) {
+            const level = parseInt(normalizedKey, 10);
+            return COMMAND_IDS[`setHeading${level}` as keyof typeof COMMAND_IDS];
+          }
           if (normalizedKey === 'z' && !event.shiftKey) {
             return COMMAND_IDS.undoNotebook;
           }
@@ -2184,9 +2383,13 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           if (normalizedKey === 'c' && !accel) {
             return COMMAND_IDS.copyCells;
           }
+          if (normalizedKey === 'x' && !accel) {
+            return COMMAND_IDS.cutCells;
+          }
           if (normalizedKey === 'v' && !accel) {
             return COMMAND_IDS.pasteCells;
           }
+          // Double-tap sequences (I,I and 0,0) are handled by CommandRegistry
           return null;
         })();
         if (directCommand) {
@@ -2246,26 +2449,17 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
     document.addEventListener('keyup', handleDocumentKeyUp, true);
     document.addEventListener('input', handleDocumentInput, true);
 
-    const _tSync = performance.now();
-    console.log(`[TIMING] surface sync setup: ${(_tSync - _tSurface).toFixed(0)}ms`);
-
     void (async () => {
       const widgetState = extractWidgetState(initialNotebookMetadata);
       if (widgetState && !disposed) {
-        const _tW = performance.now();
         await widgetManager.clear_state();
         await widgetManager.set_state(widgetState);
-        console.log(`[TIMING] widget state: ${(performance.now() - _tW).toFixed(0)}ms`);
       }
-      const _tAttach = performance.now();
       Widget.attach(notebook, mountNode);
       notebook.update();
-      console.log(`[TIMING] DOM attach + update: ${(performance.now() - _tAttach).toFixed(0)}ms`);
       lastSyncedCellsRef.current = cloneCells(initialCells);
       model.dirty = false;
-      const _tConfig = performance.now();
       configureNotebookEditors();
-      console.log(`[TIMING] configureNotebookEditors: ${(performance.now() - _tConfig).toFixed(0)}ms`);
       if (notebook.widgets.length > 0) {
         notebook.activeCellIndex = Math.max(0, notebook.activeCellIndex);
       }
@@ -2273,7 +2467,6 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
         if (disposed) {
           return;
         }
-        const _tRAF = performance.now();
         // Render all markdown cells on load
         for (const widget of notebook.widgets) {
           if (widget.model.type === 'markdown' && 'rendered' in widget) {
@@ -2286,12 +2479,10 @@ export function JupyterLabPreviewApp({ notebookPath }: JupyterLabPreviewAppProps
           notebook.activeCellIndex = firstCodeIndex;
         }
         focusNotebookCommandSelection(notebook);
-        console.log(`[TIMING] rAF (markdown render + focus): ${(performance.now() - _tRAF).toFixed(0)}ms`);
       });
 
       modelRef.current = model;
       notebookRef.current = notebook;
-      console.log(`[TIMING] surface creation total: ${(performance.now() - _tSurface).toFixed(0)}ms`);
       setSurfaceReady(true);
       setLoading(false);
     })().catch((err) => {

@@ -361,6 +361,19 @@ export function discoverKernels(
   };
 }
 
+const _kernelCache = new Map(); // workspaceRoot → { result, timestamp }
+const KERNEL_CACHE_TTL_MS = 30_000; // 30 seconds
+
+function cachedDiscoverKernels(workspaceRoot) {
+  const entry = _kernelCache.get(workspaceRoot);
+  if (entry && Date.now() - entry.timestamp < KERNEL_CACHE_TTL_MS) {
+    return entry.result;
+  }
+  const result = discoverKernels(workspaceRoot);
+  _kernelCache.set(workspaceRoot, { result, timestamp: Date.now() });
+  return result;
+}
+
 function readJsonBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -940,7 +953,7 @@ export function createStandaloneServices({
           return true;
         }
         if (requestPath === '/api/standalone/kernels') {
-          sendJson(response, 200, discoverKernels(resolveTargetWorkspaceRoot(payload)));
+          sendJson(response, 200, cachedDiscoverKernels(resolveTargetWorkspaceRoot(payload)));
           return true;
         }
         if (requestPath === '/api/standalone/workspace-tree') {
